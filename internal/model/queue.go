@@ -49,8 +49,11 @@ func (q *Queue) Add(op PendingOp) {
 	q.Ops = append(q.Ops, op)
 }
 
-// Remove drops the op at index i.
+// Remove drops the op at index i. Out-of-range i is a no-op.
 func (q *Queue) Remove(i int) {
+	if i < 0 || i >= len(q.Ops) {
+		return
+	}
 	q.Ops = append(q.Ops[:i], q.Ops[i+1:]...)
 }
 

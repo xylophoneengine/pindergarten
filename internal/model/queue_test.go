@@ -37,6 +37,23 @@ func TestAddKeepsPosition(t *testing.T) {
 	}
 }
 
+func TestRemove(t *testing.T) {
+	var q Queue
+	q.Add(PendingOp{VM: "vm-a"})
+	q.Add(PendingOp{VM: "vm-b"})
+
+	q.Remove(-1) // out of range: no-op
+	q.Remove(2)  // out of range: no-op
+	if q.Len() != 2 {
+		t.Fatalf("Len() after out-of-range Remove = %d, want 2", q.Len())
+	}
+
+	q.Remove(0)
+	if q.Len() != 1 || q.Ops[0].VM != "vm-b" {
+		t.Errorf("after Remove(0), Ops = %+v, want just vm-b", q.Ops)
+	}
+}
+
 func buildPlainSnapshot(t *testing.T) *Snapshot {
 	t.Helper()
 	cfg, err := libvirtio.ParseDomainXML(plainXML)
@@ -89,6 +106,50 @@ func TestProjectPin(t *testing.T) {
 	gotUse2, stillHas := snap.Use[2]
 	if stillHas != hadUse2 || !reflect.DeepEqual(gotUse2, origUse2) {
 		t.Errorf("original snapshot Use[2] mutated: got %+v, want %+v (present=%v)", gotUse2, origUse2, hadUse2)
+	}
+}
+
+func TestProjectDoesNotAliasOriginal(t *testing.T) {
+	cfg, err := libvirtio.ParseDomainXML(pinnedNoNumaXML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dom := libvirtio.Domain{Config: cfg, State: libvirtio.StateRunning}
+	snap := Build(testTopo(), []libvirtio.Domain{dom}, func(string) int { return -1 })
+	projected := Project(snap, map[string]*libvirtio.DomainConfig{"pinned-no-numa": cfg}, nil)
+	projected.VM("pinned-no-numa").Pins[0][0] = 99
+	if got := snap.VM("pinned-no-numa").Pins[0][0]; got == 99 {
+		t.Errorf("original snapshot aliases projection: Pins[0][0] = %d", got)
+	}
+	if got := cfg.VCPUPins[0][0]; got == 99 {
+		t.Errorf("doms config aliases projection: VCPUPins[0][0] = %d", got)
+	}
+}
+
+func TestProjectPinMemNodeUnchanged(t *testing.T) {
+	cfg, err := libvirtio.ParseDomainXML(gpuOnNode1PinnedNode0XML)
+	if err != nil {
+		t.Fatalf("ParseDomainXML: %v", err)
+	}
+	dom := libvirtio.Domain{Config: cfg, State: libvirtio.StateRunning}
+	snap := Build(testTopo(), []libvirtio.Domain{dom}, func(string) int { return -1 })
+
+	origMemNodes := snap.VM("gpu-mismatch").MemNodes
+	if want := []int{1}; !reflect.DeepEqual(origMemNodes, want) {
+		t.Fatalf("precondition: gpu-mismatch.MemNodes = %v, want %v", origMemNodes, want)
+	}
+
+	ops := []PendingOp{
+		{Kind: OpPin, VM: "gpu-mismatch", Pins: map[int][]int{0: {6}}, MemNode: -1},
+	}
+	projected := Project(snap, nil, ops)
+
+	pvm := projected.VM("gpu-mismatch")
+	if want := (map[int][]int{0: {6}}); !reflect.DeepEqual(pvm.Pins, want) {
+		t.Errorf("projected Pins = %v, want %v", pvm.Pins, want)
+	}
+	if want := []int{1}; !reflect.DeepEqual(pvm.MemNodes, want) {
+		t.Errorf("projected MemNodes = %v, want unchanged %v", pvm.MemNodes, want)
 	}
 }
 
