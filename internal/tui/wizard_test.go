@@ -462,6 +462,9 @@ func TestWizardManualViewShowsSelectedCount(t *testing.T) {
 	if !strings.Contains(view, "selected 2/2") {
 		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
 	}
+	if !strings.Contains(a.View(), "[h/l] move") {
+		t.Fatalf("View() = %q, want the manual-screen key hint in the status bar", a.View())
+	}
 }
 
 // TestWizardProposalHighlightsProposedThreads forces a color-emitting

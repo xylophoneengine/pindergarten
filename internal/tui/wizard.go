@@ -185,7 +185,6 @@ func (w *wizard) view() string {
 			b.WriteString(w.status)
 			b.WriteString("\n")
 		}
-		b.WriteString("\nh/l move  space toggle  enter accept  esc back")
 	}
 	return b.String()
 }

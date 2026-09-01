@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
@@ -49,20 +50,25 @@ type App struct {
 	backupDir string
 	version   string
 
-	tab       int
-	cursor    int // selected core index (s.Topo.Cores) on the CPU Map tab
-	vmSel     int // selected row (s.VMs) on the VMs tab
-	editMode  bool
-	queue     model.Queue
-	snap      *model.Snapshot
-	doms      map[string]*libvirtio.DomainConfig
-	scanErr   error
-	status    string
-	confirm   *confirm
-	wizard    *wizard
-	width     int
-	height    int
-	tabRanges [numTabs][2]int // X ranges recorded during the last render, row 0
+	tab        int
+	cursor     int    // selected core index (s.Topo.Cores) on the CPU Map tab
+	vmSel      int    // selected row (s.VMs) on the VMs tab
+	pendingSel int    // selected row (queue.Ops) on the Pending tab
+	backupsSel int    // selected row on the Backups tab
+	diffView   string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
+	editMode   bool
+	queue      model.Queue
+	snap       *model.Snapshot
+	doms       map[string]*libvirtio.DomainConfig
+	scanErr    error
+	status     string
+	confirm    *confirm
+	wizard     *wizard
+	flow       *applyFlow
+	reopenVM   string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
+	width      int
+	height     int
+	tabRanges  [numTabs][2]int // X ranges recorded during the last render, row 0
 }
 
 var _ tea.Model = (*App)(nil)
@@ -98,7 +104,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = ""
 		}
 		a.clampVMSel()
+		if a.reopenVM != "" {
+			vm := a.reopenVM
+			a.reopenVM = ""
+			a.openWizardFor(vm)
+		}
 		return a, nil
+	case driftCheckedMsg:
+		return a.handleDriftChecked(msg)
+	case applyDoneMsg:
+		return a.handleApplyDone(msg)
 	case tea.MouseMsg:
 		return a.handleMouse(msg)
 	case tea.KeyMsg:
@@ -130,6 +145,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.wizard != nil {
 		return a.handleWizardKey(msg)
 	}
+	if a.flow != nil {
+		return a.handleFlowKey(msg)
+	}
 
 	switch {
 	case msg.Type == tea.KeyCtrlC, isRune(msg, 'q'):
@@ -140,6 +158,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case isRune(msg, 'r'):
 		a.status = "rescanning..."
 		return a, a.scanCmd()
+	case isRune(msg, 'a'):
+		return a.openApplyFlow()
 	case msg.Type == tea.KeyTab:
 		a.tab = (a.tab + 1) % len(tabNames)
 		return a, nil
@@ -171,6 +191,37 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.openWizard()
 	case a.tab == 2 && isRune(msg, 's'):
 		return a.stageStrip()
+	case a.tab == 3 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+		a.movePendingSel(-1)
+		return a, nil
+	case a.tab == 3 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+		a.movePendingSel(1)
+		return a, nil
+	case a.tab == 3 && isRune(msg, 'x'):
+		return a.removeSelectedPendingOp()
+	case a.tab == 3 && isRune(msg, 'd'):
+		return a.discardAllPending()
+	case a.tab == 4 && a.diffView != "":
+		// any key dismisses the diff view back to the list
+		a.diffView = ""
+		return a, nil
+	case a.tab == 4 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown || isRune(msg, 'j') || isRune(msg, 'k')):
+		n := 0
+		if entries, err := backup.List(a.backupDir); err == nil {
+			n = len(entries)
+		}
+		a.handleBackupsKey(msg, &a.backupsSel, n)
+		return a, nil
+	case a.tab == 4 && msg.Type == tea.KeyEnter:
+		if diff, err := a.backupsDiff(a.backupsSel); err != nil {
+			a.status = err.Error()
+		} else {
+			a.diffView = diff
+		}
+		return a, nil
+	case a.tab == 4 && isRune(msg, 'R'):
+		a.status = a.stageRestore(a.backupsSel)
+		return a, nil
 	}
 	return a, nil
 }
@@ -415,9 +466,8 @@ func (a *App) renderHeader() string {
 	return title + strings.Repeat(" ", gap) + rendered
 }
 
-// renderBody renders the active tab's body. Tabs 0-4 are placeholders here
-// (Tasks 12-14 replace Overview/CPU Map/VMs/Pending/Backups with real
-// views); it never panics ahead of the first scanDoneMsg.
+// renderBody renders the active tab's body (or the wizard/apply-flow
+// screen in its place); it never panics ahead of the first scanDoneMsg.
 func (a *App) renderBody() string {
 	if a.snap == nil {
 		if a.scanErr != nil {
@@ -429,6 +479,9 @@ func (a *App) renderBody() string {
 	if a.wizard != nil {
 		return a.wizard.view()
 	}
+	if a.flow != nil {
+		return a.flow.view(a.width)
+	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
@@ -438,25 +491,38 @@ func (a *App) renderBody() string {
 	case 2:
 		return renderVMs(projected, a.vmSel, a.width) + "\n" + vmDetail(projected, a.vmSel)
 	case 3:
-		return fmt.Sprintf("(pending ops: %d)", a.queue.Len())
+		return renderPending(a.queue, a.pendingSel, a.width)
 	case 4:
-		return "(no backups)"
+		if a.diffView != "" {
+			return a.diffView
+		}
+		return a.renderBackups(a.backupsSel, a.width)
 	}
 	return ""
 }
 
 func (a *App) renderStatusBar() string {
-	if a.wizard != nil {
-		return statusBarStyle.Render(a.wizard.statusBarHint())
-	}
-
 	parts := []string{fmt.Sprintf("%d pending ops", a.queue.Len())}
-	if a.editMode && a.queue.Len() > 0 {
-		parts = append(parts, "[a]pply", "[d]iscard")
+
+	switch {
+	case a.wizard != nil:
+		parts = append(parts, a.wizard.statusBarHint())
+	case a.flow != nil:
+		parts = append(parts, a.flow.statusBarHint())
+	default:
+		if a.editMode && a.tab == 3 {
+			parts = append(parts, "[x] remove")
+		}
+		if a.editMode && a.queue.Len() > 0 {
+			parts = append(parts, "[a]pply", "[d]iscard")
+		}
+		if a.editMode && a.tab == 2 {
+			parts = append(parts, "[p]in", "[s]trip")
+		}
+		if a.editMode && a.tab == 4 {
+			parts = append(parts, "[R]estore", "enter diff")
+		}
+		parts = append(parts, "[e]dit", "[q]uit")
 	}
-	if a.editMode && a.tab == 2 {
-		parts = append(parts, "[p]in", "[s]trip")
-	}
-	parts = append(parts, "[e]dit", "[q]uit")
 	return statusBarStyle.Render(strings.Join(parts, "  "))
 }
