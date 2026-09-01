@@ -140,7 +140,13 @@ func (a *App) openMemNodePicker() (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
-	a.memPicker = newMemNodePicker(projected.VM(vm.Name), model.HashXML(xml), xml, projected)
+	pv := projected.VM(vm.Name)
+	if pv == nil {
+		// Project never adds or removes VMs, so this only guards a future change.
+		a.status = fmt.Sprintf("%s: not in projected snapshot", vm.Name)
+		return a, nil
+	}
+	a.memPicker = newMemNodePicker(pv, model.HashXML(xml), xml, projected)
 	a.status = ""
 	return a, nil
 }

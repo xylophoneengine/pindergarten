@@ -223,7 +223,7 @@ func TestStatusClearsOnTabSwitch(t *testing.T) {
 	}
 
 	a.status = "leftover"
-	rng := a.tabRanges[0] // Overview: a.tab is currently 1 (VMs) after the switches above
+	rng := a.tabRanges[0] // Overview: a.tab is currently 3 (Pending) after the switches above
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	if a.status != "" {
 		t.Fatalf("status = %q after a mouse tab click, want cleared", a.status)
