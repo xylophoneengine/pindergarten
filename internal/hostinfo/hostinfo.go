@@ -2,7 +2,9 @@
 package hostinfo
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -157,6 +159,12 @@ func Read(sysfsRoot string) (*Topology, error) {
 		topoDir := filepath.Join(dir, "topology")
 
 		socketRaw, err := readTrimmed(filepath.Join(topoDir, "physical_package_id"))
+		if errors.Is(err, fs.ErrNotExist) {
+			// Kernel removes topology/ for an offlined CPU; the cpuN dir
+			// itself stays. Such a CPU is offline: it belongs in no
+			// Thread/Core.
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("hostinfo: reading physical_package_id for cpu %d: %w", id, err)
 		}

@@ -129,6 +129,48 @@ func TestReadTwoNodeSMT(t *testing.T) {
 	}
 }
 
+func TestReadSkipsOfflineCPU(t *testing.T) {
+	root := t.TempDir()
+	writeSysfs(t, root,
+		map[int]string{0: "0-1,4-5", 1: "2-3,6-7"},
+		map[int][2]uint64{0: {1000, 400}, 1: {1000, 900}},
+		map[int][3]string{
+			0: {"0", "0", "0,4"}, 4: {"0", "0", "0,4"},
+			1: {"0", "1", "1,5"}, 5: {"0", "1", "1,5"},
+			2: {"1", "0", "2,6"}, 6: {"1", "0", "2,6"},
+			3: {"1", "1", "3,7"}, 7: {"1", "1", "3,7"},
+		}, nil)
+	// Offline CPU: cpuN directory exists but the kernel has removed its
+	// topology/ subdirectory. cpu8 is intentionally absent from every
+	// node's cpulist too, matching what an offlined CPU looks like.
+	offlineDir := fmt.Sprintf("%s/devices/system/cpu/cpu8", root)
+	if err := os.MkdirAll(offlineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	topo, err := Read(root)
+	if err != nil {
+		t.Fatalf("Read: unexpected error with offline cpu present: %v", err)
+	}
+	if _, ok := topo.Threads[8]; ok {
+		t.Errorf("Threads[8] present, want offline cpu absent")
+	}
+	for _, c := range topo.Cores {
+		for _, tid := range c.Threads {
+			if tid == 8 {
+				t.Errorf("core %+v contains offline thread 8", c)
+			}
+		}
+	}
+	for _, n := range topo.Nodes {
+		for _, tid := range n.Threads {
+			if tid == 8 {
+				t.Errorf("node %+v contains offline thread 8", n)
+			}
+		}
+	}
+}
+
 func TestPCINumaNode(t *testing.T) {
 	root := t.TempDir()
 	writeSysfs(t, root, map[int]string{0: "0"},
