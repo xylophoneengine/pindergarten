@@ -2,6 +2,7 @@ package libvirtio
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,142 @@ func TestParseDomainXML_CpusetRange(t *testing.T) {
 	want := map[int][]int{0: {4, 5}}
 	if !reflect.DeepEqual(cfg.VCPUPins, want) {
 		t.Errorf("VCPUPins = %v, want %v", cfg.VCPUPins, want)
+	}
+}
+
+func TestParseDomainXML_HostdevMissingAddress(t *testing.T) {
+	xml := `<domain type='kvm'>
+  <name>bad-hostdev-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b04</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices>
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source/>
+    </hostdev>
+  </devices>
+</domain>`
+	_, err := ParseDomainXML(xml)
+	if err == nil {
+		t.Fatal("expected error for hostdev missing source/address, got nil")
+	}
+}
+
+func TestParseDomainXML_EmptyCpusetSkipped(t *testing.T) {
+	xml := `<domain type='kvm'>
+  <name>empty-cpuset-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b05</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset=''/>
+    <vcpupin vcpu='1' cpuset='6'/>
+  </cputune>
+  <numatune>
+    <memory mode='strict' nodeset=''/>
+  </numatune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+	cfg, err := ParseDomainXML(xml)
+	if err != nil {
+		t.Fatalf("ParseDomainXML: %v", err)
+	}
+	want := map[int][]int{1: {6}}
+	if !reflect.DeepEqual(cfg.VCPUPins, want) {
+		t.Errorf("VCPUPins = %v, want %v", cfg.VCPUPins, want)
+	}
+	if cfg.MemNodes != nil {
+		t.Errorf("MemNodes = %v, want nil", cfg.MemNodes)
+	}
+	if cfg.MemMode != "strict" {
+		t.Errorf("MemMode = %q, want strict", cfg.MemMode)
+	}
+}
+
+func TestSetPinningRoundTrip(t *testing.T) {
+	out, err := SetPinning(plainVMXML, map[int][]int{0: {2}, 1: {6}}, 1)
+	if err != nil {
+		t.Fatalf("SetPinning: %v", err)
+	}
+	cfg, err := ParseDomainXML(out)
+	if err != nil {
+		t.Fatalf("ParseDomainXML(out): %v", err)
+	}
+	wantPins := map[int][]int{0: {2}, 1: {6}}
+	if !reflect.DeepEqual(cfg.VCPUPins, wantPins) {
+		t.Errorf("VCPUPins = %v, want %v", cfg.VCPUPins, wantPins)
+	}
+	if !reflect.DeepEqual(cfg.MemNodes, []int{1}) {
+		t.Errorf("MemNodes = %v, want [1]", cfg.MemNodes)
+	}
+	if cfg.MemMode != "strict" {
+		t.Errorf("MemMode = %q, want strict", cfg.MemMode)
+	}
+	if !strings.Contains(out, "<os>") {
+		t.Errorf("output missing <os>: %s", out)
+	}
+	if !strings.Contains(out, "<devices/>") {
+		t.Errorf("output missing <devices/>: %s", out)
+	}
+	if cfg.Name != "plain-vm" {
+		t.Errorf("Name = %q, want plain-vm", cfg.Name)
+	}
+	if cfg.UUID != "2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b02" {
+		t.Errorf("UUID = %q, want unchanged", cfg.UUID)
+	}
+	if cfg.MemoryKiB != 4194304 {
+		t.Errorf("MemoryKiB = %d, want 4194304", cfg.MemoryKiB)
+	}
+}
+
+func TestSetPinningReplacesExisting(t *testing.T) {
+	out, err := SetPinning(gpuVMXML, map[int][]int{0: {10}}, -1)
+	if err != nil {
+		t.Fatalf("SetPinning: %v", err)
+	}
+	cfg, err := ParseDomainXML(out)
+	if err != nil {
+		t.Fatalf("ParseDomainXML(out): %v", err)
+	}
+	wantPins := map[int][]int{0: {10}}
+	if !reflect.DeepEqual(cfg.VCPUPins, wantPins) {
+		t.Errorf("VCPUPins = %v, want %v", cfg.VCPUPins, wantPins)
+	}
+	if !reflect.DeepEqual(cfg.MemNodes, []int{1}) {
+		t.Errorf("MemNodes = %v, want [1] (memNode -1 leaves numatune untouched)", cfg.MemNodes)
+	}
+	if !strings.Contains(out, "<hostdev") {
+		t.Errorf("output missing hostdev: %s", out)
+	}
+}
+
+func TestStripPinning(t *testing.T) {
+	out, err := StripPinning(gpuVMXML)
+	if err != nil {
+		t.Fatalf("StripPinning: %v", err)
+	}
+	cfg, err := ParseDomainXML(out)
+	if err != nil {
+		t.Fatalf("ParseDomainXML(out): %v", err)
+	}
+	if len(cfg.VCPUPins) != 0 {
+		t.Errorf("VCPUPins = %v, want empty", cfg.VCPUPins)
+	}
+	if cfg.MemNodes != nil {
+		t.Errorf("MemNodes = %v, want nil", cfg.MemNodes)
+	}
+	if strings.Contains(out, "<cputune") {
+		t.Errorf("output still contains <cputune: %s", out)
+	}
+	if strings.Contains(out, "<numatune") {
+		t.Errorf("output still contains <numatune: %s", out)
+	}
+	if !strings.Contains(out, "<hostdev") {
+		t.Errorf("output missing hostdev: %s", out)
+	}
+	if !strings.Contains(out, "<disk") {
+		t.Errorf("output missing disk: %s", out)
 	}
 }

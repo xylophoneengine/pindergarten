@@ -3,6 +3,7 @@ package libvirtio
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/beevik/etree"
@@ -25,13 +26,9 @@ type DomainConfig struct {
 
 // ParseDomainXML parses a libvirt domain XML document into a DomainConfig.
 func ParseDomainXML(raw string) (*DomainConfig, error) {
-	doc := etree.NewDocument()
-	if err := doc.ReadFromString(raw); err != nil {
-		return nil, fmt.Errorf("libvirtio: parsing domain xml: %w", err)
-	}
-	domain := doc.SelectElement("domain")
-	if domain == nil {
-		return nil, fmt.Errorf("libvirtio: domain xml missing <domain> root")
+	_, domain, err := loadDomain(raw)
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &DomainConfig{
@@ -64,11 +61,15 @@ func ParseDomainXML(raw string) (*DomainConfig, error) {
 
 	if cputune := domain.SelectElement("cputune"); cputune != nil {
 		for _, pin := range cputune.SelectElements("vcpupin") {
+			cpuset := pin.SelectAttrValue("cpuset", "")
+			if cpuset == "" {
+				continue
+			}
 			vcpu, err := strconv.Atoi(pin.SelectAttrValue("vcpu", ""))
 			if err != nil {
 				return nil, fmt.Errorf("libvirtio: parsing vcpupin vcpu attr: %w", err)
 			}
-			threads, err := hostinfo.ParseCPUList(pin.SelectAttrValue("cpuset", ""))
+			threads, err := hostinfo.ParseCPUList(cpuset)
 			if err != nil {
 				return nil, fmt.Errorf("libvirtio: parsing vcpupin cpuset: %w", err)
 			}
@@ -79,11 +80,13 @@ func ParseDomainXML(raw string) (*DomainConfig, error) {
 	if numatune := domain.SelectElement("numatune"); numatune != nil {
 		if mem := numatune.SelectElement("memory"); mem != nil {
 			cfg.MemMode = mem.SelectAttrValue("mode", "")
-			nodes, err := hostinfo.ParseCPUList(mem.SelectAttrValue("nodeset", ""))
-			if err != nil {
-				return nil, fmt.Errorf("libvirtio: parsing numatune nodeset: %w", err)
+			if nodeset := mem.SelectAttrValue("nodeset", ""); nodeset != "" {
+				nodes, err := hostinfo.ParseCPUList(nodeset)
+				if err != nil {
+					return nil, fmt.Errorf("libvirtio: parsing numatune nodeset: %w", err)
+				}
+				cfg.MemNodes = nodes
 			}
-			cfg.MemNodes = nodes
 		}
 	}
 
@@ -94,11 +97,11 @@ func ParseDomainXML(raw string) (*DomainConfig, error) {
 			}
 			source := hd.SelectElement("source")
 			if source == nil {
-				continue
+				return nil, fmt.Errorf("libvirtio: hostdev missing <source>")
 			}
 			addr := source.SelectElement("address")
 			if addr == nil {
-				continue
+				return nil, fmt.Errorf("libvirtio: hostdev missing <source><address>")
 			}
 			pciAddr, err := formatPCIAddress(addr)
 			if err != nil {
@@ -162,4 +165,92 @@ func formatPCIAddress(addr *etree.Element) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%04x:%02x:%02x.%x", domain, bus, slot, function), nil
+}
+
+// loadDomain parses raw into an etree.Document and returns its <domain>
+// root, for in-place editing.
+func loadDomain(raw string) (*etree.Document, *etree.Element, error) {
+	doc := etree.NewDocument()
+	if err := doc.ReadFromString(raw); err != nil {
+		return nil, nil, fmt.Errorf("libvirtio: parsing domain xml: %w", err)
+	}
+	domain := doc.SelectElement("domain")
+	if domain == nil {
+		return nil, nil, fmt.Errorf("libvirtio: domain xml missing <domain> root")
+	}
+	return doc, domain, nil
+}
+
+// SetPinning replaces all vcpupin entries with pins and, when memNode >= 0,
+// sets <numatune><memory mode='strict' nodeset='<memNode>'/>. memNode < 0
+// leaves numatune untouched. Only <cputune> and <numatune> are modified;
+// everything else in raw is preserved.
+func SetPinning(raw string, pins map[int][]int, memNode int) (string, error) {
+	doc, domain, err := loadDomain(raw)
+	if err != nil {
+		return "", err
+	}
+
+	cputune := domain.SelectElement("cputune")
+	if cputune == nil {
+		cputune = domain.CreateElement("cputune")
+	} else {
+		for _, pin := range cputune.SelectElements("vcpupin") {
+			cputune.RemoveChild(pin)
+		}
+	}
+	vcpus := make([]int, 0, len(pins))
+	for vcpu := range pins {
+		vcpus = append(vcpus, vcpu)
+	}
+	sort.Ints(vcpus)
+	for _, vcpu := range vcpus {
+		pin := cputune.CreateElement("vcpupin")
+		pin.CreateAttr("vcpu", strconv.Itoa(vcpu))
+		pin.CreateAttr("cpuset", hostinfo.FormatCPUList(pins[vcpu]))
+	}
+
+	if memNode >= 0 {
+		numatune := domain.SelectElement("numatune")
+		if numatune == nil {
+			numatune = domain.CreateElement("numatune")
+		}
+		mem := numatune.SelectElement("memory")
+		if mem == nil {
+			mem = numatune.CreateElement("memory")
+		}
+		mem.CreateAttr("mode", "strict")
+		mem.CreateAttr("nodeset", strconv.Itoa(memNode))
+	}
+
+	return doc.WriteToString()
+}
+
+// StripPinning removes every vcpupin element and the numatune memory
+// binding. Empty <cputune>/<numatune> elements are removed entirely.
+func StripPinning(raw string) (string, error) {
+	doc, domain, err := loadDomain(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if cputune := domain.SelectElement("cputune"); cputune != nil {
+		for _, pin := range cputune.SelectElements("vcpupin") {
+			cputune.RemoveChild(pin)
+		}
+		if len(cputune.ChildElements()) == 0 {
+			domain.RemoveChild(cputune)
+		}
+	}
+
+	if numatune := domain.SelectElement("numatune"); numatune != nil {
+		if mem := numatune.SelectElement("memory"); mem != nil {
+			numatune.RemoveChild(mem)
+		}
+		if len(numatune.ChildElements()) == 0 {
+			domain.RemoveChild(numatune)
+		}
+	}
+
+	return doc.WriteToString()
 }
