@@ -50,6 +50,7 @@ type App struct {
 	version   string
 
 	tab       int
+	cursor    int // selected core index (s.Topo.Cores) on the CPU Map tab
 	editMode  bool
 	queue     model.Queue
 	snap      *model.Snapshot
@@ -142,8 +143,36 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '5':
 		a.tab = int(msg.Runes[0] - '1')
 		return a, nil
+	case a.tab == 1 && (msg.Type == tea.KeyLeft || isRune(msg, 'h')):
+		a.moveCursor(-1)
+		return a, nil
+	case a.tab == 1 && (msg.Type == tea.KeyRight || isRune(msg, 'l')):
+		a.moveCursor(1)
+		return a, nil
+	case a.tab == 1 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+		a.moveCursor(-coresPerRow)
+		return a, nil
+	case a.tab == 1 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+		a.moveCursor(coresPerRow)
+		return a, nil
 	}
 	return a, nil
+}
+
+// moveCursor shifts the CPU Map cursor by delta cores, clamped to
+// [0, len(Cores)-1]. A no-op before the first scan or on a topology with no
+// cores.
+func (a *App) moveCursor(delta int) {
+	if a.snap == nil || len(a.snap.Topo.Cores) == 0 {
+		return
+	}
+	a.cursor += delta
+	if a.cursor < 0 {
+		a.cursor = 0
+	}
+	if max := len(a.snap.Topo.Cores) - 1; a.cursor > max {
+		a.cursor = max
+	}
 }
 
 func (a *App) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -302,9 +331,9 @@ func (a *App) renderBody() string {
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
-		return fmt.Sprintf("Overview: %d VMs, %d nodes", len(projected.VMs), len(projected.Topo.Nodes))
+		return renderOverview(projected, a.width)
 	case 1:
-		return fmt.Sprintf("CPU Map: %d nodes", len(projected.Topo.Nodes))
+		return renderCPUMap(projected, a.cursor, a.width) + "\n" + cpuMapDetail(projected, a.cursor)
 	case 2:
 		return fmt.Sprintf("VMs: %d", len(projected.VMs))
 	case 3:

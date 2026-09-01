@@ -231,9 +231,20 @@ func TestOverviewUsesProjectedSnapshot(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
 
+	// plain-vm scans with no pins and no membind, so node 0 starts with
+	// nothing bound to it. Staging a pin+membind op must show up in the
+	// Overview body, proving it renders model.Project's output rather than
+	// the raw scanned snapshot.
+	a.queue.Add(model.PendingOp{
+		Kind:    model.OpPin,
+		VM:      "plain-vm",
+		Pins:    map[int][]int{0: {0}},
+		MemNode: 0,
+	})
+
 	view := a.View()
-	if !strings.Contains(view, "Overview: 1 VMs, 2 nodes") {
-		t.Fatalf("View() = %q, want overview line from projected snapshot", view)
+	if !strings.Contains(view, "bound-vm-mem 1000.0K") {
+		t.Fatalf("View() = %q, want the staged op's membind reflected in node 0's bound-vm-mem", view)
 	}
 }
 

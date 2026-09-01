@@ -26,4 +26,17 @@ var (
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			Padding(0, 1)
+
+	// overStyle marks an overcommitted node's "OVER" marker in red.
+	overStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#c0392b", Dark: "#ff5f5f"})
+
+	// pendingGlyphStyle distinguishes a pending-only claim on the CPU map
+	// from an actually-pinned one, without changing its glyph.
+	pendingGlyphStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#f0a020", Dark: "#c98a10"})
+
+	// cursorStyle marks the selected CPU map cell reverse-video.
+	cursorStyle = lipgloss.NewStyle().Reverse(true)
 )
