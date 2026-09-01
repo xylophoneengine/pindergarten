@@ -2,11 +2,15 @@
 set -eu
 files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(go|md|mod)$|^Makefile$' || true)
 [ -z "$files" ] && exit 0
+changed=
 for f in $files; do
 	[ -f "$f" ] || continue
+	before=$(sha256sum -- "$f" | cut -d' ' -f1)
 	perl -CSD -i -pe 's/[\x{200B}-\x{200D}\x{FEFF}\x{2060}]//g' "$f"
 	iconv -f UTF-8 -t ASCII//TRANSLIT "$f" >"$f.tmp"
 	mv "$f.tmp" "$f"
+	after=$(sha256sum -- "$f" | cut -d' ' -f1)
+	[ "$before" = "$after" ] || changed="$changed $f"
 done
 if LC_ALL=C grep -nP '[^\x00-\x7F]' -- $files; then
 	echo "pre-commit: non-ASCII remains after transliteration, fix manually" >&2
@@ -14,8 +18,16 @@ if LC_ALL=C grep -nP '[^\x00-\x7F]' -- $files; then
 fi
 gofiles=$(echo "$files" | grep '\.go$' || true)
 if [ -n "$gofiles" ]; then
-	gofmt -w $gofiles
+	command -v golangci-lint >/dev/null || { echo "pre-commit: golangci-lint not installed (go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)" >&2; exit 1; }
+	for f in $gofiles; do
+		before=$(sha256sum -- "$f" | cut -d' ' -f1)
+		gofmt -w "$f"
+		after=$(sha256sum -- "$f" | cut -d' ' -f1)
+		[ "$before" = "$after" ] || changed="$changed $f"
+	done
 	go vet ./... || exit 1
 	golangci-lint run ./... || exit 1
 fi
-git add -- $files
+if [ -n "$changed" ]; then
+	git add -- $changed
+fi
