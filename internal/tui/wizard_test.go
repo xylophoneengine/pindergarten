@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -359,5 +361,147 @@ func TestRepinIncludesOwnPins(t *testing.T) {
 	}
 	if a.wizard.proposal.Node != 0 {
 		t.Fatalf("proposal.Node = %d, want 0 (self-exclusion frees up its own current node)", a.wizard.proposal.Node)
+	}
+}
+
+// TestWizardProposalShowsOwnPinsAsFree renders the proposal screen for an
+// already-pinned VM and checks its own current threads draw the free glyph,
+// not the pinned one. Before the fix, view() rendered against the App's
+// plain projection (which still shows pinned-vm's own pins), disagreeing
+// with a proposal/rationale that was computed against the self-stripped
+// base -- an operator would see "these cores are free" text next to a
+// pinned-looking map.
+func TestWizardProposalShowsOwnPinsAsFree(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+
+	view := a.wizard.view()
+	if strings.Contains(view, "\u25cf") {
+		t.Fatalf("wizard.view() = %q, want no pinned glyph (pinned-vm is the only VM, and its own pins must project away)", view)
+	}
+}
+
+// TestWizardViewRendersRationale covers wizard.view's proposal-screen
+// rationale rendering (0% covered before this fix round).
+func TestWizardViewRendersRationale(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	if len(a.wizard.proposal.Rationale) == 0 {
+		t.Fatal("proposal.Rationale is empty, test fixture needs at least one sentence")
+	}
+
+	view := a.wizard.view()
+	if !strings.Contains(view, a.wizard.proposal.Rationale[0]) {
+		t.Fatalf("wizard.view() = %q, want the first Rationale sentence", view)
+	}
+}
+
+// TestWizardViewRendersWarning saturates every thread of node 1 with vm1's
+// pending pin, then opens the wizard for vm2 (forced onto node 1 by its
+// hostdev) so Propose has to share threads and returns a Warning. Covers
+// wizard.view's warning rendering.
+func TestWizardViewRendersWarning(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"vm1": vm1XML, "vm2": vm2XML}, vm2PCINode)
+	runScan(t, a)
+	enterEdit(a)
+
+	a.queue.Add(model.PendingOp{
+		Kind:    model.OpPin,
+		VM:      "vm1",
+		Pins:    map[int][]int{0: {2}, 1: {3}, 2: {6}, 3: {7}},
+		MemNode: 1,
+		Summary: "vm1: pin",
+	})
+
+	a.tab = 2
+	a.vmSel = vmIndex(t, a, "vm2")
+	sendKey(a, 'p')
+
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open for vm2", a.status)
+	}
+	if len(a.wizard.proposal.Warnings) == 0 {
+		t.Fatal("proposal.Warnings is empty, want a contended-node warning (node 1 is fully claimed by vm1)")
+	}
+
+	view := a.wizard.view()
+	if !strings.Contains(view, a.wizard.proposal.Warnings[0]) {
+		t.Fatalf("wizard.view() = %q, want the Warning sentence", view)
+	}
+}
+
+// TestWizardManualViewShowsSelectedCount covers the manual screen's
+// "selected N/M" line.
+func TestWizardManualViewShowsSelectedCount(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	sendKey(a, 'm')
+	if a.wizard == nil || a.wizard.screen != manualScreen {
+		t.Fatal("manual screen did not open")
+	}
+
+	view := a.wizard.view()
+	if !strings.Contains(view, "selected 2/2") {
+		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
+	}
+}
+
+// TestWizardProposalHighlightsProposedThreads forces a color-emitting
+// profile (the test harness otherwise renders styles as plain text) and
+// checks the proposal screen's node map actually emits ANSI codes for its
+// proposed threads, covering renderNodeMap/nodeMapCell's highlight branch.
+func TestWizardProposalHighlightsProposedThreads(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+
+	view := a.wizard.view()
+	if !strings.Contains(view, "\x1b[") {
+		t.Fatalf("wizard.view() = %q, want ANSI escapes from the highlight style on proposed threads", view)
+	}
+}
+
+// TestPinRefusedReadOnly mirrors TestStripRefusedReadOnly for the 'p' key:
+// outside edit mode it must refuse without opening a wizard.
+func TestPinRefusedReadOnly(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+
+	if a.wizard != nil {
+		t.Fatal("wizard opened in read-only mode, want refused")
+	}
+	if !strings.Contains(a.status, "press e to enter edit mode first") {
+		t.Fatalf("status = %q, want the edit-mode hint", a.status)
 	}
 }

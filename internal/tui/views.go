@@ -252,6 +252,9 @@ func pinsSummary(topo *hostinfo.Topology, v *model.VM) string {
 			}
 		}
 	}
+	if len(nodes) == 0 {
+		return "unknown"
+	}
 	if len(nodes) > 1 {
 		return "cross-node"
 	}
@@ -270,11 +273,7 @@ func intListOrDash(ids []int) string {
 	if len(ids) == 0 {
 		return "-"
 	}
-	parts := make([]string, len(ids))
-	for i, id := range ids {
-		parts[i] = strconv.Itoa(id)
-	}
-	return strings.Join(parts, ",")
+	return hostinfo.FormatCPUList(ids)
 }
 
 // gpuNodeCol renders a VM's gpu-node column: "-" with no passthrough

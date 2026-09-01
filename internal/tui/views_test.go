@@ -221,3 +221,68 @@ func TestCursorClampAndOtherTabsInert(t *testing.T) {
 		t.Fatalf("cursor = %d after down arrow (4 cores total), want clamped to 3", a.cursor)
 	}
 }
+
+// TestPinsSummary covers all five branches directly: pinned (single node,
+// every vcpu pinned), unpinned, partial (some vcpus unpinned), cross-node
+// (pinned threads span more than one node), and unknown (a pinned thread id
+// that resolves to no topology node at all -- the bug this fix round found:
+// pinsSummary used to fall through to "0 pinned -> node 0" in that case).
+func TestPinsSummary(t *testing.T) {
+	topo := testTopo() // threads 0,1,4,5 -> node 0; 2,3,6,7 -> node 1
+	cases := []struct {
+		name  string
+		pins  map[int][]int
+		vcpus int
+		want  string
+	}{
+		{"unpinned", nil, 2, "unpinned"},
+		{"partial", map[int][]int{0: {0}}, 2, "partial"},
+		{"cross-node", map[int][]int{0: {0}, 1: {2}}, 2, "cross-node"},
+		{"pinned", map[int][]int{0: {0}, 1: {1}}, 2, "2 pinned -> node 0"},
+		{"unknown", map[int][]int{0: {999}}, 1, "unknown"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := &model.VM{Pins: c.pins, VCPUs: c.vcpus}
+			if got := pinsSummary(topo, v); got != c.want {
+				t.Fatalf("pinsSummary() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestStateName(t *testing.T) {
+	cases := []struct {
+		st   libvirtio.DomState
+		want string
+	}{
+		{libvirtio.StateRunning, "running"},
+		{libvirtio.StateShutoff, "shut off"},
+		{libvirtio.StateOther, "other"},
+	}
+	for _, c := range cases {
+		if got := stateName(c.st); got != c.want {
+			t.Fatalf("stateName(%v) = %q, want %q", c.st, got, c.want)
+		}
+	}
+}
+
+func TestGPUNodeCol(t *testing.T) {
+	cases := []struct {
+		name    string
+		devices []model.Device
+		want    string
+	}{
+		{"none", nil, "-"},
+		{"unknown", []model.Device{{Addr: "0000:81:00.0", Node: -1}}, "?"},
+		{"known", []model.Device{{Addr: "0000:81:00.0", Node: 1}}, "1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := &model.VM{Devices: c.devices}
+			if got := gpuNodeCol(v); got != c.want {
+				t.Fatalf("gpuNodeCol() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

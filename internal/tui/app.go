@@ -97,6 +97,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = ""
 		}
+		a.clampVMSel()
 		return a, nil
 	case tea.MouseMsg:
 		return a.handleMouse(msg)
@@ -181,6 +182,17 @@ func (a *App) moveVMSel(delta int) {
 		return
 	}
 	a.vmSel += delta
+	a.clampVMSel()
+}
+
+// clampVMSel clamps a.vmSel into [0, len(VMs)-1] (0 with no VMs or before
+// the first scan), so a rescan that shrinks or empties the VM list never
+// leaves it pointing past the end.
+func (a *App) clampVMSel() {
+	if a.snap == nil || len(a.snap.VMs) == 0 {
+		a.vmSel = 0
+		return
+	}
 	if a.vmSel < 0 {
 		a.vmSel = 0
 	}
@@ -211,6 +223,7 @@ func (a *App) gateVMAction() *model.VM {
 	}
 	vm := a.selectedVM()
 	if vm == nil {
+		a.status = "no VM selected"
 		return nil
 	}
 	if vm.Unsupported {
@@ -241,53 +254,6 @@ func (a *App) stageStrip() (tea.Model, tea.Cmd) {
 	}
 	a.queue.Add(op)
 	a.status = "staged: " + op.Summary
-	return a, nil
-}
-
-// openWizard implements the 'p' key on the VMs tab: after the shared
-// edit-mode/supported gates and fetching the domain's current XML (for
-// StagedHash), it builds a Propose-ready projection that excludes the VM's
-// own current pins/membind -- so re-pinning an already-pinned VM does not
-// see its own claim as occupied -- and opens the wizard on the result.
-func (a *App) openWizard() (tea.Model, tea.Cmd) {
-	vm := a.gateVMAction()
-	if vm == nil {
-		return a, nil
-	}
-	xml, err := a.hv.DomainXML(vm.Name)
-	if err != nil {
-		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
-		return a, nil
-	}
-	hash := model.HashXML(xml)
-
-	ops := append(append([]model.PendingOp(nil), a.queue.Ops...), model.PendingOp{Kind: model.OpStrip, VM: vm.Name})
-	base := model.Project(a.snap, a.doms, ops)
-	proposal, err := model.Propose(base, vm.Name)
-	if err != nil {
-		a.status = err.Error()
-		return a, nil
-	}
-
-	a.wizard = newWizard(vm.Name, proposal, hash)
-	a.status = ""
-	return a, nil
-}
-
-// handleWizardKey routes a key to the open wizard, staging or discarding it
-// once the wizard reports done.
-func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	projected := model.Project(a.snap, a.doms, a.queue.Ops)
-	done, op := a.wizard.update(msg, projected)
-	if done {
-		if op != nil {
-			a.queue.Add(*op)
-			a.status = "staged: " + op.Summary
-		} else {
-			a.status = "cancelled"
-		}
-		a.wizard = nil
-	}
 	return a, nil
 }
 
@@ -460,10 +426,10 @@ func (a *App) renderBody() string {
 		return "scanning..."
 	}
 
-	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	if a.wizard != nil {
-		return a.wizard.view(projected)
+		return a.wizard.view()
 	}
+	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
 		return renderOverview(projected, a.width)
@@ -480,6 +446,10 @@ func (a *App) renderBody() string {
 }
 
 func (a *App) renderStatusBar() string {
+	if a.wizard != nil {
+		return statusBarStyle.Render(a.wizard.statusBarHint())
+	}
+
 	parts := []string{fmt.Sprintf("%d pending ops", a.queue.Len())}
 	if a.editMode && a.queue.Len() > 0 {
 		parts = append(parts, "[a]pply", "[d]iscard")

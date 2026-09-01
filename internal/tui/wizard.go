@@ -26,20 +26,26 @@ type wizard struct {
 	vm         string
 	node       int
 	proposal   *model.Proposal
+	base       *model.Snapshot // snapshot Propose was run against: the VM's own current pins/membind projected away, so its own threads read as free rather than occupied
 	screen     wizardScreen
-	cursor     int          // core index within nodeCores(s, node)
+	cursor     int          // core index within nodeCores(base, node)
 	selected   map[int]bool // thread ids selected on the manual screen
 	stagedHash string
 	status     string // transient warning shown on the manual screen only
 }
 
 // newWizard opens a wizard for vm, seeded from proposal (screen 1) with
-// stagedHash carrying the domain XML hash to stamp on the eventual op.
-func newWizard(vm string, proposal *model.Proposal, stagedHash string) *wizard {
+// stagedHash carrying the domain XML hash to stamp on the eventual op, and
+// base the self-stripped snapshot Propose ran against (openWizard's
+// projection excluding vm's own current pins/membind) -- view and
+// updateManual render against base, not the App's plain projection, so the
+// node map agrees with the proposal it is illustrating.
+func newWizard(vm string, proposal *model.Proposal, stagedHash string, base *model.Snapshot) *wizard {
 	return &wizard{
 		vm:         vm,
 		node:       proposal.Node,
 		proposal:   proposal,
+		base:       base,
 		screen:     proposalScreen,
 		stagedHash: stagedHash,
 	}
@@ -52,12 +58,12 @@ func (w *wizard) vcpus() int { return len(w.proposal.Pins) }
 // update handles one key on whichever screen is active. done reports the
 // wizard should close; when done and op is non-nil, the caller stages it,
 // else the wizard was cancelled.
-func (w *wizard) update(msg tea.KeyMsg, projected *model.Snapshot) (bool, *model.PendingOp) {
+func (w *wizard) update(msg tea.KeyMsg) (bool, *model.PendingOp) {
 	switch w.screen {
 	case proposalScreen:
 		return w.updateProposal(msg)
 	default:
-		return w.updateManual(msg, projected)
+		return w.updateManual(msg)
 	}
 }
 
@@ -78,8 +84,8 @@ func (w *wizard) updateProposal(msg tea.KeyMsg) (bool, *model.PendingOp) {
 	return false, nil
 }
 
-func (w *wizard) updateManual(msg tea.KeyMsg, projected *model.Snapshot) (bool, *model.PendingOp) {
-	cores := nodeCores(projected, w.node)
+func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp) {
+	cores := nodeCores(w.base, w.node)
 
 	switch {
 	case msg.Type == tea.KeyLeft, isRune(msg, 'h'):
@@ -152,16 +158,16 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 	}
 }
 
-// view renders the active screen against projected (the App's current
-// projected snapshot, used for the node map's live pin state).
-func (w *wizard) view(projected *model.Snapshot) string {
+// view renders the active screen against w.base (the self-stripped snapshot
+// Propose ran against, used for the node map's live pin state).
+func (w *wizard) view() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pin %s (%d vcpus) -> node %d\n\n", w.vm, w.vcpus(), w.node)
 
 	switch w.screen {
 	case proposalScreen:
 		highlight := threadSet(assignedThreads(w.proposal.Pins))
-		b.WriteString(renderNodeMap(projected, w.node, highlight, -1))
+		b.WriteString(renderNodeMap(w.base, w.node, highlight, -1))
 		b.WriteString("\n")
 		for _, r := range w.proposal.Rationale {
 			b.WriteString(r)
@@ -173,15 +179,73 @@ func (w *wizard) view(projected *model.Snapshot) string {
 		}
 		b.WriteString("\nenter accept  m manual  esc cancel")
 	case manualScreen:
-		b.WriteString(renderNodeMap(projected, w.node, w.selected, w.cursor))
+		b.WriteString(renderNodeMap(w.base, w.node, w.selected, w.cursor))
 		fmt.Fprintf(&b, "\nselected %d/%d\n", len(w.selected), w.vcpus())
 		if w.status != "" {
 			b.WriteString(w.status)
 			b.WriteString("\n")
 		}
-		b.WriteString("\nenter accept  esc back")
+		b.WriteString("\nh/l move  space toggle  enter accept  esc back")
 	}
 	return b.String()
+}
+
+// statusBarHint returns the status bar's replacement content while the
+// wizard is open: its own keys, since edit/quit/pin/strip are inert while
+// a wizard is capturing all key input.
+func (w *wizard) statusBarHint() string {
+	if w.screen == manualScreen {
+		return "[h/l] move  [space] toggle  [enter] accept  [esc] back"
+	}
+	return "[enter] accept  [m] manual  [esc] cancel"
+}
+
+// openWizard implements the 'p' key on the VMs tab: after the shared
+// edit-mode/supported gates and fetching the domain's current XML (for
+// StagedHash), it builds a Propose-ready projection that excludes the VM's
+// own current pins/membind -- so re-pinning an already-pinned VM does not
+// see its own claim as occupied -- and opens the wizard on the result. The
+// wizard keeps that same projection (base) for its own rendering, so the
+// node map it draws never disagrees with the proposal it is illustrating.
+func (a *App) openWizard() (tea.Model, tea.Cmd) {
+	vm := a.gateVMAction()
+	if vm == nil {
+		return a, nil
+	}
+	xml, err := a.hv.DomainXML(vm.Name)
+	if err != nil {
+		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
+		return a, nil
+	}
+	hash := model.HashXML(xml)
+
+	ops := append(append([]model.PendingOp(nil), a.queue.Ops...), model.PendingOp{Kind: model.OpStrip, VM: vm.Name})
+	base := model.Project(a.snap, a.doms, ops)
+	proposal, err := model.Propose(base, vm.Name)
+	if err != nil {
+		a.status = err.Error()
+		return a, nil
+	}
+
+	a.wizard = newWizard(vm.Name, proposal, hash, base)
+	a.status = ""
+	return a, nil
+}
+
+// handleWizardKey routes a key to the open wizard, staging or discarding it
+// once the wizard reports done.
+func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	done, op := a.wizard.update(msg)
+	if done {
+		if op != nil {
+			a.queue.Add(*op)
+			a.status = "staged: " + op.Summary
+		} else {
+			a.status = "cancelled"
+		}
+		a.wizard = nil
+	}
+	return a, nil
 }
 
 // nodeCores returns s.Topo.Cores restricted to node, in topology order.
@@ -217,14 +281,18 @@ func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor i
 	return b.String()
 }
 
-// nodeMapCell renders one core's two-glyph cell for the wizard's node map:
-// cursor takes precedence over highlight, which takes precedence over the
+// nodeMapCell renders one core's two-glyph cell for the wizard's node map: a
+// cursor+highlighted thread combines both (highlight style, reverse-video)
+// so the selected core under the cursor still shows its selected state; a
+// cursor-only or highlight-only thread gets just that style; otherwise the
 // thread's plain pinned/free/shared glyph.
 func nodeMapCell(s *model.Snapshot, core hostinfo.Core, highlight map[int]bool, isCursor bool) string {
 	var glyphs strings.Builder
 	for _, t := range core.Threads {
 		glyph := glyphChar(s, t)
 		switch {
+		case isCursor && highlight[t]:
+			glyph = wizardHighlightStyle.Reverse(true).Render(glyph)
 		case isCursor:
 			glyph = cursorStyle.Render(glyph)
 		case highlight[t]:
