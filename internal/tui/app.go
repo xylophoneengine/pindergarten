@@ -51,6 +51,7 @@ type App struct {
 
 	tab       int
 	cursor    int // selected core index (s.Topo.Cores) on the CPU Map tab
+	vmSel     int // selected row (s.VMs) on the VMs tab
 	editMode  bool
 	queue     model.Queue
 	snap      *model.Snapshot
@@ -58,6 +59,7 @@ type App struct {
 	scanErr   error
 	status    string
 	confirm   *confirm
+	wizard    *wizard
 	width     int
 	height    int
 	tabRanges [numTabs][2]int // X ranges recorded during the last render, row 0
@@ -124,6 +126,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.confirm != nil {
 		return a.handleConfirmKey(msg)
 	}
+	if a.wizard != nil {
+		return a.handleWizardKey(msg)
+	}
 
 	switch {
 	case msg.Type == tea.KeyCtrlC, isRune(msg, 'q'):
@@ -155,6 +160,133 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case a.tab == 1 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.moveCursor(coresPerRow)
 		return a, nil
+	case a.tab == 2 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+		a.moveVMSel(-1)
+		return a, nil
+	case a.tab == 2 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+		a.moveVMSel(1)
+		return a, nil
+	case a.tab == 2 && isRune(msg, 'p'):
+		return a.openWizard()
+	case a.tab == 2 && isRune(msg, 's'):
+		return a.stageStrip()
+	}
+	return a, nil
+}
+
+// moveVMSel shifts the VMs tab selection by delta rows, clamped to
+// [0, len(VMs)-1]. A no-op before the first scan or with no VMs.
+func (a *App) moveVMSel(delta int) {
+	if a.snap == nil || len(a.snap.VMs) == 0 {
+		return
+	}
+	a.vmSel += delta
+	if a.vmSel < 0 {
+		a.vmSel = 0
+	}
+	if max := len(a.snap.VMs) - 1; a.vmSel > max {
+		a.vmSel = max
+	}
+}
+
+// selectedVM returns the VM at a.vmSel in the raw (unprojected) snapshot,
+// or nil before the first scan or with no VMs. Name and Unsupported are
+// identical between the raw and projected snapshots (Project never adds,
+// removes, or renames VMs), so indexing the raw snapshot here stays in
+// sync with the projected one the VMs tab renders.
+func (a *App) selectedVM() *model.VM {
+	if a.snap == nil || a.vmSel < 0 || a.vmSel >= len(a.snap.VMs) {
+		return nil
+	}
+	return &a.snap.VMs[a.vmSel]
+}
+
+// gateVMAction implements the shared strip/wizard opening gates: edit mode
+// must be on and the selected VM must be supported. Returns nil (and sets
+// a.status) when the action should be refused.
+func (a *App) gateVMAction() *model.VM {
+	if !a.editMode {
+		a.status = "press e to enter edit mode first"
+		return nil
+	}
+	vm := a.selectedVM()
+	if vm == nil {
+		return nil
+	}
+	if vm.Unsupported {
+		a.status = fmt.Sprintf("%s: unsupported config, view only", vm.Name)
+		return nil
+	}
+	return vm
+}
+
+// stageStrip implements the 's' key on the VMs tab: stages an OpStrip for
+// the selected VM after the shared edit-mode/supported gates, fetching its
+// current XML for StagedHash.
+func (a *App) stageStrip() (tea.Model, tea.Cmd) {
+	vm := a.gateVMAction()
+	if vm == nil {
+		return a, nil
+	}
+	xml, err := a.hv.DomainXML(vm.Name)
+	if err != nil {
+		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
+		return a, nil
+	}
+	op := model.PendingOp{
+		Kind:       model.OpStrip,
+		VM:         vm.Name,
+		StagedHash: model.HashXML(xml),
+		Summary:    vm.Name + ": remove all pinning and memory binding",
+	}
+	a.queue.Add(op)
+	a.status = "staged: " + op.Summary
+	return a, nil
+}
+
+// openWizard implements the 'p' key on the VMs tab: after the shared
+// edit-mode/supported gates and fetching the domain's current XML (for
+// StagedHash), it builds a Propose-ready projection that excludes the VM's
+// own current pins/membind -- so re-pinning an already-pinned VM does not
+// see its own claim as occupied -- and opens the wizard on the result.
+func (a *App) openWizard() (tea.Model, tea.Cmd) {
+	vm := a.gateVMAction()
+	if vm == nil {
+		return a, nil
+	}
+	xml, err := a.hv.DomainXML(vm.Name)
+	if err != nil {
+		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
+		return a, nil
+	}
+	hash := model.HashXML(xml)
+
+	ops := append(append([]model.PendingOp(nil), a.queue.Ops...), model.PendingOp{Kind: model.OpStrip, VM: vm.Name})
+	base := model.Project(a.snap, a.doms, ops)
+	proposal, err := model.Propose(base, vm.Name)
+	if err != nil {
+		a.status = err.Error()
+		return a, nil
+	}
+
+	a.wizard = newWizard(vm.Name, proposal, hash)
+	a.status = ""
+	return a, nil
+}
+
+// handleWizardKey routes a key to the open wizard, staging or discarding it
+// once the wizard reports done.
+func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	done, op := a.wizard.update(msg, projected)
+	if done {
+		if op != nil {
+			a.queue.Add(*op)
+			a.status = "staged: " + op.Summary
+		} else {
+			a.status = "cancelled"
+		}
+		a.wizard = nil
 	}
 	return a, nil
 }
@@ -329,13 +461,16 @@ func (a *App) renderBody() string {
 	}
 
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	if a.wizard != nil {
+		return a.wizard.view(projected)
+	}
 	switch a.tab {
 	case 0:
 		return renderOverview(projected, a.width)
 	case 1:
 		return renderCPUMap(projected, a.cursor, a.width) + "\n" + cpuMapDetail(projected, a.cursor)
 	case 2:
-		return fmt.Sprintf("VMs: %d", len(projected.VMs))
+		return renderVMs(projected, a.vmSel, a.width) + "\n" + vmDetail(projected, a.vmSel)
 	case 3:
 		return fmt.Sprintf("(pending ops: %d)", a.queue.Len())
 	case 4:
@@ -348,6 +483,9 @@ func (a *App) renderStatusBar() string {
 	parts := []string{fmt.Sprintf("%d pending ops", a.queue.Len())}
 	if a.editMode && a.queue.Len() > 0 {
 		parts = append(parts, "[a]pply", "[d]iscard")
+	}
+	if a.editMode && a.tab == 2 {
+		parts = append(parts, "[p]in", "[s]trip")
 	}
 	parts = append(parts, "[e]dit", "[q]uit")
 	return statusBarStyle.Render(strings.Join(parts, "  "))

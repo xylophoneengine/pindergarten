@@ -39,4 +39,14 @@ var (
 
 	// cursorStyle marks the selected CPU map cell reverse-video.
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
+
+	// wizardHighlightStyle marks a proposed/selected thread on the pin
+	// wizard's node map, distinct from the cursor and from pendingGlyphStyle.
+	wizardHighlightStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "#1f7a3f", Dark: "#4fd07a"})
+
+	// warningStyle marks a wizard proposal's warning sentences.
+	warningStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#c0392b", Dark: "#ff5f5f"})
 )

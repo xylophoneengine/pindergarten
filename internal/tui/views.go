@@ -2,9 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
+	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
@@ -148,18 +151,9 @@ func renderCell(s *model.Snapshot, core hostinfo.Core, isCursor bool) string {
 // keeps the pinned glyph but in a distinct color. The cursor cell instead
 // renders its plain glyph reverse-video, ignoring the pending color.
 func threadGlyph(s *model.Snapshot, t int, isCursor bool) string {
+	glyph := glyphChar(s, t)
 	use := s.Use[t]
 	total := len(use.VMs) + len(use.Pending)
-
-	var glyph string
-	switch total {
-	case 0:
-		glyph = "\u25cb" // white circle: free
-	case 1:
-		glyph = "\u25cf" // black circle: pinned
-	default:
-		glyph = "\u25d0" // circle, left half black: shared
-	}
 
 	if isCursor {
 		return cursorStyle.Render(glyph)
@@ -168,6 +162,22 @@ func threadGlyph(s *model.Snapshot, t int, isCursor bool) string {
 		return pendingGlyphStyle.Render(glyph)
 	}
 	return glyph
+}
+
+// glyphChar returns thread t's plain (unstyled) glyph: pinned (solid), free,
+// or shared (2+ claimants counting VMs+Pending). Factored out of
+// threadGlyph so the wizard's node map can apply its own highlight style on
+// top of the same base glyph.
+func glyphChar(s *model.Snapshot, t int) string {
+	use := s.Use[t]
+	switch len(use.VMs) + len(use.Pending) {
+	case 0:
+		return "\u25cb" // white circle: free
+	case 1:
+		return "\u25cf" // black circle: pinned
+	default:
+		return "\u25d0" // circle, left half black: shared
+	}
 }
 
 // cpuMapDetail renders the detail panel for the core at coreIdx: its id,
@@ -211,4 +221,116 @@ func threadDetailLine(s *model.Snapshot, t int) string {
 	default:
 		return fmt.Sprintf("thread %d: %s (shared)", t, strings.Join(parts, ", "))
 	}
+}
+
+// stateName maps a domain's run state to its display word.
+func stateName(st libvirtio.DomState) string {
+	switch st {
+	case libvirtio.StateRunning:
+		return "running"
+	case libvirtio.StateShutoff:
+		return "shut off"
+	default:
+		return "other"
+	}
+}
+
+// pinsSummary renders a VM's pin-state column: "unpinned" (no pins),
+// "cross-node" (pinned threads span more than one node), "partial" (some
+// vcpus pinned, some not), or "N pinned -> node X" (every vcpu pinned, all
+// on the same node).
+func pinsSummary(topo *hostinfo.Topology, v *model.VM) string {
+	if len(v.Pins) == 0 {
+		return "unpinned"
+	}
+
+	nodes := map[int]bool{}
+	for _, threads := range v.Pins {
+		for _, t := range threads {
+			if th, ok := topo.Threads[t]; ok {
+				nodes[th.Node] = true
+			}
+		}
+	}
+	if len(nodes) > 1 {
+		return "cross-node"
+	}
+	if len(v.Pins) < v.VCPUs {
+		return "partial"
+	}
+	node := 0
+	for n := range nodes {
+		node = n
+	}
+	return fmt.Sprintf("%d pinned -> node %d", len(v.Pins), node)
+}
+
+// intListOrDash comma-joins ids, or returns "-" when ids is empty.
+func intListOrDash(ids []int) string {
+	if len(ids) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ",")
+}
+
+// gpuNodeCol renders a VM's gpu-node column: "-" with no passthrough
+// devices, "?" when it has one but the node could not be resolved, else the
+// node number.
+func gpuNodeCol(v *model.VM) string {
+	if len(v.Devices) == 0 {
+		return "-"
+	}
+	if n := v.GPUNode(); n != -1 {
+		return strconv.Itoa(n)
+	}
+	return "?"
+}
+
+// flagBadges renders one "[!]" per flag on v.
+func flagBadges(v *model.VM) string {
+	return strings.Repeat("[!]", len(v.Flags))
+}
+
+// renderVMs renders the VMs tab's hand-rolled table: name, state, vcpus,
+// mem, pins summary, mem node, gpu node, and flag badges, one row per VM
+// (s.VMs is sorted by name). The row at sel renders reverse-video. w is
+// unused for now (no wrapping beyond tabwriter's own column alignment).
+func renderVMs(s *model.Snapshot, sel int, w int) string {
+	var buf strings.Builder
+	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tSTATE\tVCPUS\tMEM\tPINS\tMEMNODE\tGPUNODE\tFLAGS")
+	for _, v := range s.VMs {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			v.Name, stateName(v.State), v.VCPUs, fmtKiB(v.MemoryKiB),
+			pinsSummary(s.Topo, &v), intListOrDash(v.MemNodes), gpuNodeCol(&v), flagBadges(&v))
+	}
+	_ = tw.Flush()
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	rowIdx := sel + 1 // row 0 is the header
+	if rowIdx >= 1 && rowIdx < len(lines) {
+		lines[rowIdx] = cursorStyle.Render(lines[rowIdx])
+	}
+	return strings.Join(lines, "\n")
+}
+
+// vmDetail renders the detail panel for the VM at index sel: its name, then
+// one "[!] <Cause> <Consequence>" line per flag (the tooltip requirement).
+// Returns "" for an out-of-range index.
+func vmDetail(s *model.Snapshot, sel int) string {
+	if sel < 0 || sel >= len(s.VMs) {
+		return ""
+	}
+	v := &s.VMs[sel]
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", v.Name)
+	for _, f := range v.Flags {
+		fmt.Fprintf(&b, "[!] %s %s\n", f.Cause, f.Consequence)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
