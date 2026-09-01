@@ -50,7 +50,9 @@ headers: `libvirt-libs` on Rocky/RHEL, `libvirt0` on Debian/Ubuntu.
   change. Defaults to a per-user location; see Backups below.
 
 pindergarten starts read-only: it can scan and display, but it will not
-write anything to libvirt or to disk. Press `e` in the running app to
+write anything to libvirt. On disk it only creates the backup directory at
+startup and writes nothing else until you unlock edit mode. Press `e` in
+the running app to
 unlock edit mode, after a confirmation prompt. Before granting edit mode,
 pindergarten writes and removes a small probe file in the backup directory
 to confirm it is actually writable; if that fails, edit mode is refused
