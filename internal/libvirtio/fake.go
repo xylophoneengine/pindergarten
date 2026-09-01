@@ -42,9 +42,12 @@ func (f *Fake) ListDomains() ([]Domain, error) {
 
 		cfg, err := ParseDomainXML(xml)
 		if err != nil {
-			// Best-effort name so the domain is still listed and
-			// identifiable even though it can't be fully parsed.
-			cfg = &DomainConfig{Name: regexpName(xml, name)}
+			// Invariant: a *DomainConfig from this package always has a
+			// non-nil VCPUPins and populated Raw. When ParseErr != nil,
+			// only Name and Raw are meaningful (best-effort name so the
+			// domain is still listed and identifiable, and Raw so a
+			// view-only domain's XML pane can still show it).
+			cfg = &DomainConfig{Name: regexpName(xml, name), Raw: xml, VCPUPins: map[int][]int{}}
 		}
 
 		doms = append(doms, Domain{Config: cfg, State: state, ParseErr: err})
@@ -61,10 +64,10 @@ func (f *Fake) DomainXML(name string) (string, error) {
 }
 
 func (f *Fake) Define(xml string) error {
+	f.Defined = append(f.Defined, xml)
 	if f.DefineErr != nil {
 		return f.DefineErr
 	}
-	f.Defined = append(f.Defined, xml)
 
 	name := ""
 	if cfg, err := ParseDomainXML(xml); err == nil {
@@ -87,7 +90,7 @@ func (f *Fake) Close() {}
 // regexpName extracts a domain name from raw XML via a best-effort regexp
 // match, falling back to fallback when no <name> element is found.
 func regexpName(raw, fallback string) string {
-	if m := fakeNameRe.FindStringSubmatch(raw); m != nil {
+	if m := fakeNameRe.FindStringSubmatch(raw); m != nil && m[1] != "" {
 		return m[1]
 	}
 	return fallback

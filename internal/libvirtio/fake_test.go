@@ -1,6 +1,9 @@
 package libvirtio
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestFakeDefineUpdates(t *testing.T) {
 	f := &Fake{XML: map[string]string{"plain-vm": plainVMXML}}
@@ -40,7 +43,8 @@ func TestFakeDefineUpdates(t *testing.T) {
 }
 
 func TestFakeUnparsableDomainListed(t *testing.T) {
-	f := &Fake{XML: map[string]string{"weird": "<domain><name>weird</name><vcpu>bogus</vcpu></domain>"}}
+	xml := "<domain><name>weird</name><vcpu>bogus</vcpu></domain>"
+	f := &Fake{XML: map[string]string{"weird": xml}}
 	doms, err := f.ListDomains()
 	if err != nil {
 		t.Fatalf("ListDomains: %v", err)
@@ -53,5 +57,23 @@ func TestFakeUnparsableDomainListed(t *testing.T) {
 	}
 	if doms[0].Config == nil || doms[0].Config.Name != "weird" {
 		t.Errorf("Config = %+v, want Name = weird", doms[0].Config)
+	}
+	if doms[0].Config.Raw != xml {
+		t.Errorf("Config.Raw = %q, want %q", doms[0].Config.Raw, xml)
+	}
+	if doms[0].Config.VCPUPins == nil {
+		t.Error("Config.VCPUPins = nil, want non-nil")
+	}
+}
+
+func TestFakeDefineErrStillAppendsToDefined(t *testing.T) {
+	wantErr := fmt.Errorf("define blocked")
+	f := &Fake{DefineErr: wantErr}
+	err := f.Define("<domain><name>x</name></domain>")
+	if err != wantErr {
+		t.Fatalf("Define err = %v, want %v", err, wantErr)
+	}
+	if len(f.Defined) != 1 || f.Defined[0] != "<domain><name>x</name></domain>" {
+		t.Errorf("Defined = %v, want [<domain><name>x</name></domain>]", f.Defined)
 	}
 }
