@@ -114,7 +114,7 @@ func (p *memNodePicker) view(width, budget int) (string, []hit) {
 
 	title := "set memory node for " + p.vm
 	body, kept := panelWrapH(title, strings.TrimRight(b.String(), "\n"), dw, budget)
-	hits = offsetHits(clipHitsToWindow(hits, kept), 1, 1)
+	hits = offsetHits(clipHitsToWindow(hits, kept, dw-2), 1, 1)
 	centered, xOff := centerDialog(body, width)
 	return centered, offsetHits(hits, 0, xOff)
 }

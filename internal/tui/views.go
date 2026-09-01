@@ -99,13 +99,32 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 
 // renderOverviewTab renders the Overview tab: one bordered panel per NUMA
 // node (side by side when each would get at least sideCardMinWidth
-// columns, else stacked), followed by a one-line-per-VM list of any
-// domains flagged Unsupported.
-func renderOverviewTab(s *model.Snapshot, w int) string {
+// columns -- each then independently height-clipped to budget, since
+// they're width-independent columns -- else stacked, showing as many full
+// cards as fit budget (fitStackedCount) rather than truncating every
+// card's content, so a short terminal with many nodes doesn't push the
+// key bar off-screen), followed by a one-line-per-VM list of any domains
+// flagged Unsupported.
+func renderOverviewTab(s *model.Snapshot, w, budget int) string {
 	cardWidths, sideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
-	panels := make([]string, len(s.Topo.Nodes))
+	bodies := make([]string, len(s.Topo.Nodes))
+	heights := make([]int, len(s.Topo.Nodes))
 	for i, node := range s.Topo.Nodes {
-		panels[i] = panel(fmt.Sprintf("node %d", node.ID), overviewNodeCard(s, node), cardWidths[i])
+		bodies[i] = overviewNodeCard(s, node)
+		heights[i] = lineCount(bodies[i]) + 2 // borders
+	}
+
+	n := len(s.Topo.Nodes)
+	if !sideBySide {
+		n = fitStackedCount(heights, budget)
+	}
+	panels := make([]string, n)
+	for i := 0; i < n; i++ {
+		h := budget
+		if !sideBySide {
+			h = heights[i]
+		}
+		panels[i], _ = panelH(fmt.Sprintf("node %d", s.Topo.Nodes[i].ID), bodies[i], cardWidths[i], h)
 	}
 	out := joinPanels(panels, sideBySide)
 
@@ -199,18 +218,20 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
 	nodePanelWidths, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
 
+	nodeHeights := make([]int, len(s.Topo.Nodes))
 	naturalNodeLines := 0
-	for _, node := range s.Topo.Nodes {
+	for i, node := range s.Topo.Nodes {
 		rows := (len(nodeCores(s, node.ID)) + coresPerRow - 1) / coresPerRow
 		if rows < 1 {
 			rows = 1
 		}
+		nodeHeights[i] = rows + 2
 		if nodeSideBySide {
-			if h := rows + 2; h > naturalNodeLines {
-				naturalNodeLines = h
+			if nodeHeights[i] > naturalNodeLines {
+				naturalNodeLines = nodeHeights[i]
 			}
 		} else {
-			naturalNodeLines += rows + 2
+			naturalNodeLines += nodeHeights[i]
 		}
 	}
 
@@ -219,24 +240,40 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		primaryBudget, secondaryBudget = splitStackedBudget(budget, naturalNodeLines+1)
 	}
 
-	nodeBudget := primaryBudget - 1 // reserve the legend line below
-	if nodeBudget < 3 {
-		nodeBudget = 3
+	nodeAreaBudget := primaryBudget - 1 // reserve the legend line below
+	if nodeAreaBudget < 3 {
+		nodeAreaBudget = 3
 	}
 
-	panels := make([]string, len(s.Topo.Nodes))
+	// When the node panels stack among themselves too (nodeSideBySide
+	// false), show as many full ones as fit nodeAreaBudget rather than
+	// giving every one that whole budget independently -- panelH never
+	// pads a panel shorter than its own natural height, so N panels each
+	// individually capped at (but not divided by) nodeAreaBudget can still
+	// sum to N times that.
+	numNodePanels := len(s.Topo.Nodes)
+	if !nodeSideBySide {
+		numNodePanels = fitStackedCount(nodeHeights, nodeAreaBudget)
+	}
+
+	panels := make([]string, numNodePanels)
 	var hits []hit
 	cumX, cumY := 0, 0
-	for i, node := range s.Topo.Nodes {
+	for i := 0; i < numNodePanels; i++ {
+		node := s.Topo.Nodes[i]
 		idx := globalCoreIndices(s, node.ID)
 		grid, gridHits := renderNodeMap(s, node.ID, nil, localCoreIndex(idx, cursor), "core")
 		for j := range gridHits {
 			gridHits[j].index = idx[gridHits[j].index]
 		}
-		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], nodeBudget)
+		h := nodeAreaBudget
+		if !nodeSideBySide {
+			h = nodeHeights[i]
+		}
+		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], h)
 		panels[i] = p
 
-		gridHits = offsetHits(clipHitsToWindow(gridHits, kept), 1, 1) // border
+		gridHits = offsetHits(clipHitsToWindow(gridHits, kept, nodePanelWidths[i]-2), 1, 1) // border
 		if nodeSideBySide {
 			hits = append(hits, offsetHits(gridHits, 0, cumX)...)
 			cumX += nodePanelWidths[i] + 1 // +1 for joinPanels' 1-column gap
@@ -265,9 +302,10 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 }
 
 // glyphChar returns thread t's plain (unstyled) glyph: pinned (solid), free,
-// or shared (2+ claimants counting VMs+Pending). Factored out of
-// threadGlyph so the wizard's node map can apply its own highlight style on
-// top of the same base glyph.
+// or shared (2+ claimants counting VMs+Pending). Factored out so
+// nodeMapCell (the CPU Map/wizard node map's shared cell renderer) can
+// apply its own cursor/highlight/pending style on top of the same base
+// glyph.
 func glyphChar(s *model.Snapshot, t int) string {
 	use := s.Use[t]
 	switch len(use.VMs) + len(use.Pending) {
@@ -440,8 +478,9 @@ func fitCell(val string, w int) string {
 
 // buildVMCols builds the VMs table's 8 columns and their per-row values
 // (s.VMs order) -- shared by renderVMs (which may drop some, to fit a
-// width) and vmsNaturalWidth (which needs to know how wide the table would
-// be with none dropped, to decide whether dropping is even necessary).
+// width) and vmsReducedWidth (which needs to know how wide the table would
+// be with its low-priority columns already dropped, to decide whether a
+// two-column layout is worth it).
 func buildVMCols(s *model.Snapshot) []vmCol {
 	cols := []vmCol{
 		{name: "NAME", cap: vmNameCap},
@@ -467,16 +506,42 @@ func buildVMCols(s *model.Snapshot) []vmCol {
 	return cols
 }
 
-// vmsNaturalWidth returns how wide the VMs table would be with every
-// column shown (NAME/PINS still capped -- those caps are permanent
-// regardless of available width, not part of the "drop columns" fallback).
-func vmsNaturalWidth(cols []vmCol) int {
-	total := 0
+// vmLowPriorityCols are the columns renderVMsTab considers already "worth
+// dropping" when deciding whether a two-column layout is worth taking:
+// GPUNODE/MEMNODE/MEM (the first three of vmDropOrder, not STATE) --
+// renderVMs itself may still drop further (including STATE) if the
+// primary panel it settles on turns out tighter still.
+var vmLowPriorityCols = []string{"GPUNODE", "MEMNODE", "MEM"}
+
+// vmsReducedWidth returns how wide the VMs table would be with
+// vmLowPriorityCols already dropped -- the width renderVMsTab checks to
+// decide a two-column layout is still worth it even when the *full*
+// (every-column) table wouldn't fit the narrower primary panel that'd
+// leave for it.
+func vmsReducedWidth(cols []vmCol) int {
+	return vmsWidthExcluding(cols, vmLowPriorityCols)
+}
+
+// vmsWidthExcluding returns how wide a table built from cols would be,
+// omitting any column whose name is in exclude.
+func vmsWidthExcluding(cols []vmCol, exclude []string) int {
+	total, n := 0, 0
 	for _, c := range cols {
+		dropped := false
+		for _, name := range exclude {
+			if c.name == name {
+				dropped = true
+				break
+			}
+		}
+		if dropped {
+			continue
+		}
 		total += vmColWidth(c)
+		n++
 	}
-	if len(cols) > 1 {
-		total += 2 * (len(cols) - 1)
+	if n > 1 {
+		total += 2 * (n - 1)
 	}
 	return total
 }
@@ -545,7 +610,11 @@ func renderVMs(cols []vmCol, sel, w, rowBudget int) (string, []hit) {
 		}
 		rows[i] = line
 	}
-	visible, offset, _ := scrollWindow(rows, rowBudget-1, sel) // -1 reserves the header row
+	dataBudget := rowBudget - 1 // reserve the header row
+	if dataBudget < 1 {
+		dataBudget = 1 // always attempt at least one data row
+	}
+	visible, offset, _ := scrollWindow(rows, dataBudget, sel)
 
 	lines := append([]string{tableHeaderStyle.Render(strings.Join(rowCells(-1), "  "))}, visible...)
 	hits := make([]hit, 0, len(visible))
@@ -616,17 +685,18 @@ func vmDetail(s *model.Snapshot, sel, width int) string {
 
 // renderVMsTab renders the VMs tab: the table panel, and a detail panel
 // (titled with the selected VM's name) below it, or beside it when wide.
-// Two-column only kicks in when the table actually fits the primary
-// panel's width with every column shown -- otherwise a merely-slightly-
-// wider terminal would counterintuitively show *less* (dropping columns
-// it didn't need to at the previous, narrower, single-column width), so it
-// stays stacked (full width) instead.
+// Two-column only kicks in when the table -- with its low-priority
+// columns (GPUNODE/MEMNODE/MEM) already dropped -- fits the primary
+// panel's width; renderVMs may then drop further still if that panel
+// turns out tighter yet. Below that (even the reduced table wouldn't fit),
+// it stays stacked at full width instead, so a merely-slightly-wider
+// terminal never counterintuitively shows *less* than a narrower one did.
 func renderVMsTab(s *model.Snapshot, sel, w, budget int) (string, []hit) {
 	cols := buildVMCols(s)
-	natural := vmsNaturalWidth(cols)
+	reduced := vmsReducedWidth(cols)
 
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
-	if sideBySide && natural > primaryW-2 {
+	if sideBySide && reduced > primaryW-2 {
 		sideBySide = false
 		primaryW, secondaryW = w, w
 	}

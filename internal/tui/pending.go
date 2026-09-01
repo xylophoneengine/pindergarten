@@ -119,12 +119,12 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// issued.
 		switch {
 		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
-			if a.flow.resultsScroll > 0 {
-				a.flow.resultsScroll--
-			}
+			a.flow.resultsScroll--
+			a.clampResultsScroll()
 			return a, nil
 		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 			a.flow.resultsScroll++
+			a.clampResultsScroll()
 			return a, nil
 		}
 		a.flow = nil
@@ -418,7 +418,7 @@ func (f *applyFlow) statusBarHint() string {
 	case flowDrift:
 		return "[d]iscard  [w] reopen wizard  [up/down] select  esc back"
 	case flowResults:
-		return "any key to dismiss"
+		return "[up/down] scroll  any other key dismisses"
 	default:
 		return "[y]es  [n]/esc cancel"
 	}

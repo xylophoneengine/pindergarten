@@ -145,25 +145,27 @@ func backupsTableWidth(widths []int) int {
 	return total + 2*(len(widths)-1)
 }
 
-// backupsTable renders the TIME/VM/OPERATION table for entries: OPERATION
+// backupsTable renders the TIME/VM/OPERATION table for visible (a slice of
+// all, already scrolled by the caller to fit its height budget): OPERATION
 // is capped (truncated with ".."), and if the table still doesn't fit w
-// even with that cap, TIME drops its seconds -- with the row at sel
-// background-highlighted and only the rows within
-// [offset, offset+len(entries)) actually laid out (the caller has already
-// sliced entries to fit its height budget; offset translates a visible row
-// back to its real index in the full list for hit-testing and selection).
-// Alongside the string it returns one "backup" hit per row, bounded to w
-// (the table's inner width, so a click in a neighboring panel in a
-// two-column layout can't land on it), 0-based relative to the table's own
-// top-left corner (row 0 is the header).
-func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
+// even with that cap, TIME drops its seconds. Column widths are computed
+// from all, not just visible -- otherwise scrolling a long, ragged-width
+// list could resize the columns out from under the visible rows on every
+// scroll tick. The row at sel is background-highlighted; offset translates
+// a visible row back to its real index in the full list for hit-testing
+// and selection. Alongside the string it returns one "backup" hit per row,
+// bounded to w (the table's inner width, so a click in a neighboring panel
+// in a two-column layout can't land on it), 0-based relative to the
+// table's own top-left corner (row 0 is the header).
+func backupsTable(all, visible []backup.Entry, sel, offset, w int) (string, []hit) {
 	names := []string{"TIME", "VM", "OPERATION"}
-	vals := backupsColVals(entries, backupTimeFormat)
-	widths := backupsColWidths(vals)
+	tf := backupTimeFormat
+	widths := backupsColWidths(backupsColVals(all, tf))
 	if backupsTableWidth(widths) > w {
-		vals = backupsColVals(entries, backupTimeFormatShort)
-		widths = backupsColWidths(vals)
+		tf = backupTimeFormatShort
+		widths = backupsColWidths(backupsColVals(all, tf))
 	}
+	vals := backupsColVals(visible, tf)
 
 	rowCells := func(row int) []string {
 		cells := make([]string, len(names))
@@ -178,8 +180,8 @@ func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
 	}
 
 	lines := []string{tableHeaderStyle.Render(strings.Join(rowCells(-1), "  "))}
-	hits := make([]hit, 0, len(entries))
-	for i := range entries {
+	hits := make([]hit, 0, len(visible))
+	for i := range visible {
 		realIdx := offset + i
 		line := strings.Join(rowCells(i), "  ")
 		if realIdx == sel {
@@ -216,29 +218,10 @@ func (a *App) renderBackupsTab(sel, w, budget int) (string, []hit) {
 	}
 
 	rowBudget := budget - 3 // 2 borders + 1 header row
-	visible, offset, _ := scrollEntries(entries, rowBudget, sel)
+	visible, offset, _ := scrollWindow(entries, rowBudget, sel)
 
-	table, hits := backupsTable(visible, sel, offset, w-2)
+	table, hits := backupsTable(entries, visible, sel, offset, w-2)
 	return panel("Backups", table, w), offsetHits(hits, 1, 1)
-}
-
-// scrollEntries mirrors scrollWindow's "keep sel visible" rule, but over a
-// []backup.Entry instead of pre-rendered lines (backupsTable needs the raw
-// entries, not lines, since it computes column widths from the visible
-// slice).
-func scrollEntries(entries []backup.Entry, budget, sel int) ([]backup.Entry, int, int) {
-	total := len(entries)
-	if budget <= 0 || total <= budget {
-		return entries, 0, 0
-	}
-	offset := sel - budget + 1
-	if offset < 0 {
-		offset = 0
-	}
-	if max := total - budget; offset > max {
-		offset = max
-	}
-	return entries[offset : offset+budget], offset, total
 }
 
 // backupsEntry returns the sel-th entry from backup.List(a.backupDir),

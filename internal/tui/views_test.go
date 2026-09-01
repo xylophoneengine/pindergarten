@@ -58,7 +58,7 @@ func snapFromXML(t *testing.T, xmls map[string]string) *model.Snapshot {
 
 func TestOverviewShowsPressure(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"overcommit-vm": overcommitNode0XML})
-	out := renderOverviewTab(s, 80)
+	out := renderOverviewTab(s, 80, 24)
 	if !strings.Contains(out, "OVER") {
 		t.Fatalf("renderOverview() = %q, want it to contain OVER", out)
 	}
@@ -66,7 +66,7 @@ func TestOverviewShowsPressure(t *testing.T) {
 
 func TestOverviewNoPressure(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
-	out := renderOverviewTab(s, 80)
+	out := renderOverviewTab(s, 80, 24)
 	if strings.Contains(out, "OVER") {
 		t.Fatalf("renderOverview() = %q, want no OVER for a node under its total", out)
 	}
@@ -77,7 +77,7 @@ func TestOverviewNoPressure(t *testing.T) {
 // alongside the existing summary line.
 func TestOverviewNodeCardsHaveBars(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
-	out := renderOverviewTab(s, 100)
+	out := renderOverviewTab(s, 100, 24)
 	if n := strings.Count(out, "memory ["); n != len(s.Topo.Nodes) {
 		t.Fatalf("renderOverviewTab() has %d \"memory [\" bars, want %d (one per node): %q", n, len(s.Topo.Nodes), out)
 	}
@@ -93,7 +93,7 @@ func TestOverviewUnknownTotalMemory(t *testing.T) {
 	topo := testTopo()
 	topo.Nodes[0].MemTotalKiB = 0
 	s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	out := renderOverviewTab(s, 100)
+	out := renderOverviewTab(s, 100, 24)
 	if !strings.Contains(out, "total unknown") {
 		t.Fatalf("renderOverviewTab() = %q, want \"total unknown\" for a node with MemTotalKiB == 0", out)
 	}

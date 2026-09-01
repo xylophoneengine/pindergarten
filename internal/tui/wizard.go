@@ -276,7 +276,7 @@ func (w *wizard) view(width, budget int) (string, []hit) {
 
 	gridBudget, infoBudget := splitStackedBudget(budget, lineCount(grid))
 	gridPanel, kept := panelH(title, grid, dw, gridBudget)
-	hits := offsetHits(clipHitsToWindow(gridHits, kept), 1, 1)
+	hits := offsetHits(clipHitsToWindow(gridHits, kept, dw-2), 1, 1)
 	infoPanel := ""
 	if infoBudget > 0 {
 		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), dw, infoBudget)
@@ -404,7 +404,6 @@ func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor i
 		b.WriteString(nodeMapCell(s, core, highlight, i == cursor))
 		col++
 	}
-	b.WriteString("\n")
 	return b.String(), hits
 }
 

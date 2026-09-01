@@ -126,6 +126,35 @@ func TestEditUnlockConfirm(t *testing.T) {
 	}
 }
 
+// TestConfirmFitsHeightBudget covers the fix for the confirm panel not
+// counting toward chrome: at a short terminal (height 10), the prompt and
+// its "[y]es" key hint must still be visible (not pushed out by
+// clampHeight's last-resort truncation), and the whole view must still fit
+// height 10.
+func TestConfirmFitsHeightBudget(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(5), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+
+	sendKey(a, 'e')
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 10 {
+		t.Fatalf("View() has %d lines, want <= 10: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "Enable edit mode") {
+		t.Fatalf("View() = %q, want the confirm prompt visible", view)
+	}
+	if !strings.Contains(view, "[y]es") {
+		t.Fatalf("View() = %q, want the \"[y]es\" hint visible", view)
+	}
+}
+
 func TestEditBlockedWhenRO(t *testing.T) {
 	a := testApp(t, true)
 
@@ -418,6 +447,100 @@ func wideCoreTopo(n int) *hostinfo.Topology {
 	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
 }
 
+// manyNodeManyCoresTopo builds a numNodes-node topology with coresPerNode
+// single-thread cores each (node 0's cores get the lower global core
+// indices, node 1's the next block, and so on), wide/tall enough per node
+// that its CPU Map panel truncates the grid horizontally and/or vertically.
+func manyNodeManyCoresTopo(numNodes, coresPerNode int) *hostinfo.Topology {
+	threads := make(map[int]hostinfo.Thread, numNodes*coresPerNode)
+	var cores []hostinfo.Core
+	nodes := make([]hostinfo.Node, numNodes)
+	for n := 0; n < numNodes; n++ {
+		nodeThreads := make([]int, 0, coresPerNode)
+		for i := 0; i < coresPerNode; i++ {
+			id := n*coresPerNode + i
+			threads[id] = hostinfo.Thread{ID: id, Core: i, Socket: n, Node: n, Sibling: -1}
+			cores = append(cores, hostinfo.Core{Socket: n, ID: i, Node: n, Threads: []int{id}})
+			nodeThreads = append(nodeThreads, id)
+		}
+		nodes[n] = hostinfo.Node{ID: n, Threads: nodeThreads, MemTotalKiB: 1000}
+	}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
+}
+
+// manyNodesTopo builds a topology with n NUMA nodes, one thread each (no
+// cores -- the Overview tab doesn't touch Topo.Cores).
+func manyNodesTopo(n int) *hostinfo.Topology {
+	threads := make(map[int]hostinfo.Thread, n)
+	nodes := make([]hostinfo.Node, n)
+	for i := 0; i < n; i++ {
+		threads[i] = hostinfo.Thread{ID: i, Core: 0, Socket: i, Node: i, Sibling: -1}
+		nodes[i] = hostinfo.Node{ID: i, Threads: []int{i}, MemTotalKiB: 1000}
+	}
+	return &hostinfo.Topology{Nodes: nodes, Threads: threads}
+}
+
+// TestOverviewHeightBudgetKeepsKeyBarVisible covers the fix for
+// renderOverviewTab never receiving a height budget: 8 NUMA node cards at
+// height 24 must still fit, with the key bar surviving (not pushed out by
+// clampHeight's last-resort truncation).
+func TestOverviewHeightBudgetKeepsKeyBarVisible(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodesTopo(8), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("View() has %d lines, want <= 24: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "[q] quit") {
+		t.Fatalf("View() = %q, want the key bar (\"[q] quit\") still visible", view)
+	}
+}
+
+// TestCPUMapClickDoesNotCrossPanelBoundary covers the fix for
+// clipHitsToWindow only clipping by row: panelH truncates an over-wide
+// node grid horizontally, but the hits recorded for the cores past that
+// truncation point used to survive anyway -- overlapping the *next*
+// node's panel once offset by its cumulative x -- so a click on node 1's
+// first core could be swallowed by one of node 0's out-of-view hits
+// (checked first, since node 0's panel is built first).
+func TestCPUMapClickDoesNotCrossPanelBoundary(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(2, 40), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "core", 40) // node 1's first core (global index 40)
+	a.Update(press(h.x0, h.y0))
+	if a.cursor != 40 {
+		t.Fatalf("cursor = %d after clicking node 1's first core, want 40 (a node-0 hit swallowed the click)", a.cursor)
+	}
+}
+
+// TestCPUMapStackedNodesHeightBudgetKeepsKeyBarVisible covers the fix for
+// each stacked CPU Map node panel independently claiming the whole
+// primary budget (rather than the budget being divided across them): 4
+// nodes with enough cores each to need several grid rows, at width 80
+// height 24 (narrow enough that both the outer CPU-map-vs-detail split
+// and the per-node panels stack), must still fit, with the key bar
+// surviving.
+func TestCPUMapStackedNodesHeightBudgetKeepsKeyBarVisible(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(4, 200), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("View() has %d lines, want <= 24: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "[q] quit") {
+		t.Fatalf("View() = %q, want the key bar (\"[q] quit\") still visible", view)
+	}
+}
+
 // TestViewWrapsWideCPUMapToWidth covers the same fix on the CPU Map tab: a
 // row of many two-glyph core cells is far wider than a narrow terminal, and
 // must not be left to overflow it.
@@ -564,15 +687,16 @@ func TestVMsTableFitsNarrowWidth(t *testing.T) {
 	}
 }
 
-// TestVMsTabTwoColumnAtWideWidth covers the wide-terminal layout: at a
-// width comfortably wider than the table's natural (all-8-columns) width,
-// the VMs tab must render the table and detail panels side by side (both
-// panel titles land on the same top-border line), not stacked.
+// TestVMsTabTwoColumnAtWideWidth covers the two-column gating: at width
+// 140 (>= twoColThreshold, and the table's low-priority columns dropped
+// would comfortably fit that primary panel even though the full table
+// wouldn't), the VMs tab must render the table and detail panels side by
+// side (both panel titles land on the same top-border line), not stacked.
 func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
 	a.tab = 2
-	a.Update(tea.WindowSizeMsg{Width: 200, Height: 24})
+	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 
 	lines := strings.Split(a.View(), "\n")
 	if len(lines) <= bodyY0 {
@@ -581,6 +705,32 @@ func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 	top := lines[bodyY0]
 	if !strings.Contains(top, "VMs") || !strings.Contains(top, "plain-vm") {
 		t.Fatalf("top border line = %q, want both the table panel's \"VMs\" title and the detail panel's \"plain-vm\" title on the same line (side by side)", top)
+	}
+}
+
+// TestVMsTabStacksJustBelowThreshold covers the other side of that gate:
+// at width 119 (just below twoColThreshold), the VMs tab must stay
+// stacked at full width, showing every column (there's no primary/
+// secondary split at all to make dropping columns necessary).
+func TestVMsTabStacksJustBelowThreshold(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 119, Height: 24})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) <= bodyY0 {
+		t.Fatalf("View() has only %d lines, want more than bodyY0=%d", len(lines), bodyY0)
+	}
+	top := lines[bodyY0]
+	if strings.Contains(top, "plain-vm") {
+		t.Fatalf("top border line = %q, want the table stacked (not the detail panel's title on the same line)", top)
+	}
+	for _, col := range []string{"NAME", "STATE", "VCPUS", "MEM", "PINS", "MEMNODE", "GPUNODE", "FLAGS"} {
+		if !strings.Contains(view, col) {
+			t.Fatalf("View() at width 119 = %q, want column %q still shown", view, col)
+		}
 	}
 }
 
@@ -663,41 +813,62 @@ func TestBackupsDiffHeightBudgetAndWheelScroll(t *testing.T) {
 	}
 }
 
+// TestBackupsDiffScrollClampsAtInputTime covers the fix for diffScroll
+// only being clamped at render time: over-scrolling far past the end (many
+// wheel-downs) used to leave a.diffScroll at a huge, unclamped value, so a
+// single wheel-up afterward changed nothing visible (render always clamped
+// it to the same true max) until enough presses "caught up". diffScroll
+// must now be clamped (written back) immediately, so it never overshoots
+// in the first place and every wheel-up moves it.
+func TestBackupsDiffScrollClampsAtInputTime(t *testing.T) {
+	a := testApp(t, false)
+	bigXML := plainVMXML + "\n" + strings.Repeat("  <!-- padding line -->\n", 300)
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	a.tab = 4
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	sendKeyType(a, tea.KeyEnter)
+	if a.diffView == "" {
+		t.Fatal("diff view did not open")
+	}
+
+	for i := 0; i < 500; i++ {
+		a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	}
+	overshot := a.diffScroll
+	if overshot > 400 {
+		t.Fatalf("diffScroll = %d after 500 wheel-downs on a ~300-line diff, want it clamped near the true end, not left to grow unbounded", overshot)
+	}
+
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	if a.diffScroll >= overshot {
+		t.Fatalf("diffScroll = %d after one wheel-up, want it to have decreased from %d", a.diffScroll, overshot)
+	}
+}
+
 // TestMouseClickInDetailPanelDoesNotChangeSelection covers the fix for row
 // hits that used to span the whole line width regardless of panel bounds:
 // in the VMs tab's side-by-side layout, a click that lands inside the
 // *detail* panel (to the right of the table) must not be mistaken for a
-// click on whatever table row happens to share that y.
+// click on whatever table row happens to share that y. (A previous version
+// of this test clicked the header row at a width where the layout was
+// actually stacked -- vacuously true regardless of the fix, since the
+// header has no hit and x didn't matter. This one targets a real VM row's
+// y, at a width that genuinely goes side by side, and clicks well past
+// that row's own hit into the detail panel beside it.)
 func TestMouseClickInDetailPanelDoesNotChangeSelection(t *testing.T) {
-	a := testApp(t, false)
+	a, _ := pendingFakeAppMulti(t, map[string]string{"plain-vm": plainVMXML, "vm1": vm1XML})
 	runScan(t, a)
 	a.tab = 2
 	a.vmSel = 0
 	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	_ = a.View() // record hits
 
-	a.Update(press(130, bodyY0+1))
+	h := findHit(t, a, "vm", 1) // the second VM row
+	a.Update(press(h.x1+20, h.y0))
 	if a.vmSel != 0 {
-		t.Fatalf("vmSel = %d after a click at x=130 (inside the detail panel), want unchanged 0", a.vmSel)
-	}
-}
-
-// TestVMsTableShowsAllColumnsAtReasonableWidth covers the fix for a
-// merely-wider terminal (crossing the two-column threshold) counter-
-// intuitively showing *fewer* columns: at width 120, with a table whose
-// natural (all-8-columns) width comfortably fits, every column must still
-// appear (whether stacked or side-by-side).
-func TestVMsTableShowsAllColumnsAtReasonableWidth(t *testing.T) {
-	a := testApp(t, false)
-	runScan(t, a)
-	a.tab = 2
-	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
-
-	view := a.View()
-	for _, col := range []string{"NAME", "STATE", "VCPUS", "MEM", "PINS", "MEMNODE", "GPUNODE", "FLAGS"} {
-		if !strings.Contains(view, col) {
-			t.Fatalf("View() at width 120 = %q, want column %q still shown", view, col)
-		}
+		t.Fatalf("vmSel = %d after a click well past the row's own hit (into the detail panel), want unchanged 0", a.vmSel)
 	}
 }
 

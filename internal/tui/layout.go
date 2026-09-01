@@ -249,6 +249,28 @@ func panelWrapH(title, body string, w, h int) (string, int) {
 	return panelInner(title, strings.Join(lines, "\n"), w), budget
 }
 
+// fitStackedCount returns how many of n stacked panels (heights[i] lines
+// each, borders included) fit within budget lines total, always at least
+// 1 (so something renders even when the very first panel alone exceeds
+// budget). Used wherever panels stack vertically with no "selected" one to
+// keep visible (Overview's per-node cards, the CPU Map's per-node panels
+// when they don't fit side by side): dividing the budget evenly across
+// every panel instead would force each one so short that panelH's own
+// height floor (a border needs at least 3 lines) makes their sum overflow
+// budget again -- showing fewer full-height panels reads better anyway
+// than many truncated slivers.
+func fitStackedCount(heights []int, budget int) int {
+	used, n := 0, 0
+	for _, h := range heights {
+		if n > 0 && used+h > budget {
+			break
+		}
+		used += h
+		n++
+	}
+	return n
+}
+
 // minSecondaryBudget is the smallest height budget worth giving a stacked
 // tab's secondary (detail) panel; below that it's dropped entirely rather
 // than rendered as an unreadable sliver.
@@ -275,16 +297,23 @@ func splitStackedBudget(budget, primaryNaturalLines int) (primary, secondary int
 	return need, budget - need
 }
 
-// scrollWindow slices lines (already-built content, one row per visual
-// line) down to at most budget lines, keeping index `keep` visible by
-// pinning it to the bottom edge once the content overflows. The offset is
-// always recomputed fresh from (len(lines), keep, budget) -- callers don't
-// need to persist any scroll state for this. offset/total are both 0 when
+// scrollWindow slices items (already-built content, one row per visual
+// line/entry -- a []string of rendered lines, a []backup.Entry, etc.) down
+// to at most budget of them, keeping index `keep` visible by pinning it to
+// the bottom edge once the content overflows. The offset is always
+// recomputed fresh from (len(items), keep, budget) -- callers don't need
+// to persist any scroll state for this. budget <= 0 means there's no room
+// at all: the window is empty (not the full, unclipped input -- a caller
+// that then unconditionally prepends its own header/border lines still
+// gets just those, not the whole table). offset/total are both 0 when
 // nothing was trimmed.
-func scrollWindow(lines []string, budget, keep int) (window []string, offset, total int) {
-	total = len(lines)
-	if budget <= 0 || total <= budget {
-		return lines, 0, 0
+func scrollWindow[T any](items []T, budget, keep int) (window []T, offset, total int) {
+	total = len(items)
+	if budget <= 0 {
+		return nil, 0, 0
+	}
+	if total <= budget {
+		return items, 0, 0
 	}
 	offset = keep - budget + 1
 	if offset < 0 {
@@ -293,7 +322,7 @@ func scrollWindow(lines []string, budget, keep int) (window []string, offset, to
 	if max := total - budget; offset > max {
 		offset = max
 	}
-	return lines[offset : offset+budget], offset, total
+	return items[offset : offset+budget], offset, total
 }
 
 // clampScroll clamps an explicit (user-driven) scroll offset into
@@ -312,11 +341,15 @@ func clampScroll(offset, budget, total int) int {
 }
 
 // windowAt slices lines to at most budget of them, starting at an explicit
-// (already-clamped-by-the-caller-via-clampScroll) offset. offset/total are
-// both 0 when nothing was trimmed, matching scrollWindow's convention.
+// offset (clamped into range here). budget <= 0 means there's no room at
+// all: the window is empty, matching scrollWindow's own convention.
+// offset/total are both 0 when nothing was trimmed.
 func windowAt(lines []string, budget, offset int) (window []string, usedOffset, total int) {
 	total = len(lines)
-	if budget <= 0 || total <= budget {
+	if budget <= 0 {
+		return nil, 0, 0
+	}
+	if total <= budget {
 		return lines, 0, 0
 	}
 	offset = clampScroll(offset, budget, total)
@@ -333,17 +366,22 @@ func scrollFooter(offset, shown, total int) string {
 	return fmt.Sprintf("lines %d-%d of %d", offset+1, offset+shown, total)
 }
 
-// clipHitsToWindow drops hits whose row falls outside [0, budget) --
-// for content that was simply top-truncated (no scroll offset) to fit a
-// height budget, e.g. a CPU Map node panel or a wizard/mem-node-picker
-// panel.
-func clipHitsToWindow(hits []hit, budget int) []hit {
-	if budget <= 0 {
+// clipHitsToWindow drops hits whose row falls outside [0, hBudget), or
+// whose x1 exceeds wBudget (pass 0 to skip the column check) -- for
+// content that was simply truncated (top-down for height via panelH/
+// panelWrapH, or right-edge for width via panel/panelH's own
+// truncateLines) to fit a budget, e.g. a CPU Map node panel or a wizard/
+// mem-node-picker panel. Without the column check, a hit recorded for a
+// cell past a panel's truncated right edge would survive with its
+// original (too-wide) x-range, which -- once offset by a neighboring
+// panel's own x position -- can overlap that neighbor's hits entirely.
+func clipHitsToWindow(hits []hit, hBudget, wBudget int) []hit {
+	if hBudget <= 0 {
 		return nil
 	}
 	out := make([]hit, 0, len(hits))
 	for _, h := range hits {
-		if h.y0 < budget {
+		if h.y0 < hBudget && (wBudget <= 0 || h.x1 <= wBudget) {
 			out = append(out, h)
 		}
 	}

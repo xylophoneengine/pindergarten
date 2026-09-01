@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -25,14 +26,35 @@ func TestBackupsTableCapsOperationThenDropsSeconds(t *testing.T) {
 	longOp := strings.Repeat("pin many vcpus across every numa node ", 3)
 	entries := []backup.Entry{{Meta: backup.Meta{VM: "vm", Op: longOp}}}
 
-	out, _ := backupsTable(entries, 0, 0, 54)
+	out, _ := backupsTable(entries, entries, 0, 0, 54)
 	if !strings.Contains(out, "..") {
 		t.Fatalf("backupsTable() = %q, want the long OPERATION truncated with \"..\"", out)
 	}
 	// A zero-value time formats as "0001-01-01 00:00:00Z" with the full
 	// format (seconds included); once dropped it reads "...00:00Z".
 	if !strings.Contains(out, "0001-01-01 00:00Z") {
-		t.Fatalf("backupsTable() = %q, want TIME's seconds dropped once capping OPERATION alone still doesn't fit width 60", out)
+		t.Fatalf("backupsTable() = %q, want TIME's seconds dropped once capping OPERATION alone still doesn't fit width 54", out)
+	}
+}
+
+// TestBackupsTableWidthsComeFromAllEntriesNotJustVisible covers the fix
+// for column widths being computed from the visible (scrolled) slice:
+// a long VM name elsewhere in the full list must still widen the VM
+// column, even when that entry itself has scrolled out of view --
+// otherwise the columns would resize out from under the visible rows on
+// every scroll tick.
+func TestBackupsTableWidthsComeFromAllEntriesNotJustVisible(t *testing.T) {
+	short := backup.Entry{Meta: backup.Meta{VM: "vm", Op: "pin"}}
+	long := backup.Entry{Meta: backup.Meta{VM: "a-very-long-vm-name", Op: "pin"}}
+
+	withLong, _ := backupsTable([]backup.Entry{long, short}, []backup.Entry{short}, 0, 0, 200)
+	withoutLong, _ := backupsTable([]backup.Entry{short}, []backup.Entry{short}, 0, 0, 200)
+
+	rowWith := strings.Split(withLong, "\n")[1]
+	rowWithout := strings.Split(withoutLong, "\n")[1]
+	if lipgloss.Width(rowWith) <= lipgloss.Width(rowWithout) {
+		t.Fatalf("visible row width %d (all includes a long VM name) should exceed %d (all doesn't), want column widths computed from all entries, not just the visible slice",
+			lipgloss.Width(rowWith), lipgloss.Width(rowWithout))
 	}
 }
 

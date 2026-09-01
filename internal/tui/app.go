@@ -22,9 +22,9 @@ type ScanFn func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error)
 // numTabs is len(tabNames), fixed as a const so it can size tabRanges.
 const numTabs = 5
 
-// tabNames are the tabs, in order. The active one is rendered wrapped in
-// brackets, e.g. "[VMs]" -- keep that marker stable, since tests key off
-// it.
+// tabNames are the tabs, in order. The active one renders as a filled
+// accent pill (see renderTabs/tabActiveStyle); tests check which is
+// active via a.tab / activeTabName, not by grepping a text marker.
 var tabNames = [numTabs]string{"Overview", "CPU Map", "VMs", "Pending", "Backups"}
 
 // confirm is a pending yes/no prompt. While set, Update handles only
@@ -231,9 +231,7 @@ func (a *App) scrollWheel(delta int) {
 			a.moveFlowSel(delta)
 		case flowResults:
 			a.flow.resultsScroll += delta
-			if a.flow.resultsScroll < 0 {
-				a.flow.resultsScroll = 0
-			}
+			a.clampResultsScroll()
 		}
 		return
 	}
@@ -242,9 +240,7 @@ func (a *App) scrollWheel(delta int) {
 	}
 	if a.tab == 4 && a.diffView != "" {
 		a.diffScroll += delta
-		if a.diffScroll < 0 {
-			a.diffScroll = 0
-		}
+		a.clampDiffScroll()
 		return
 	}
 	a.scrollActive(delta)
@@ -322,11 +318,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// instead of just closing the diff.
 		switch {
 		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
-			if a.diffScroll > 0 {
-				a.diffScroll--
-			}
+			a.diffScroll--
+			a.clampDiffScroll()
 		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 			a.diffScroll++
+			a.clampDiffScroll()
 		default:
 			a.diffView = ""
 			a.diffScroll = 0
@@ -610,9 +606,24 @@ func (a *App) View() string {
 	}
 	keyBar := a.wrapProse(a.renderStatusBar())
 
+	// The confirm panel is rendered before the body budget is computed
+	// (and its line count folded into chrome) so the body never claims
+	// lines the confirm panel needs -- otherwise clampHeight's last-resort
+	// truncation could cut into the confirm panel itself (even its prompt
+	// text) rather than just trimming the body.
+	confirmPanel := ""
+	if a.confirm != nil {
+		w := effectiveWidth(a.width)
+		panel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
+		confirmPanel, _ = centerDialog(panel, w)
+	}
+
 	chrome := 2 + lineCount(keyBar) // tab row + header + key bar
 	if statusLine != "" {
 		chrome += lineCount(statusLine)
+	}
+	if confirmPanel != "" {
+		chrome += lineCount(confirmPanel)
 	}
 	body, hits := a.renderBody(a.bodyBudget(chrome))
 	a.hits = offsetHits(hits, bodyY0, 0)
@@ -623,11 +634,8 @@ func (a *App) View() string {
 		b.WriteString(statusLine)
 		b.WriteString("\n")
 	}
-	if a.confirm != nil {
-		w := effectiveWidth(a.width)
-		confirmPanel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
-		centered, _ := centerDialog(confirmPanel, w)
-		b.WriteString(centered)
+	if confirmPanel != "" {
+		b.WriteString(confirmPanel)
 		b.WriteString("\n")
 	}
 	b.WriteString(keyBar)
@@ -641,6 +649,68 @@ func lineCount(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+// chromeLines recomputes how many lines View()'s chrome (everything but
+// the tab body: the tab row, header, status line, key bar, and confirm
+// panel) will use, without needing the body itself. It duplicates a small
+// part of View()'s own inline calc (kept separate so View() doesn't have
+// to render the body twice) -- shared by the diff/results scroll clamps so
+// they can re-derive the exact body budget View() will use, keeping
+// a.diffScroll/a.flow.resultsScroll from overshooting their true range.
+func (a *App) chromeLines() int {
+	statusLine := ""
+	if a.status != "" {
+		statusLine = a.wrapProse(styleStatus(a.status))
+	}
+	chrome := 2 + lineCount(a.wrapProse(a.renderStatusBar()))
+	if statusLine != "" {
+		chrome += lineCount(statusLine)
+	}
+	if a.confirm != nil {
+		w := effectiveWidth(a.width)
+		panel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
+		confirmPanel, _ := centerDialog(panel, w)
+		chrome += lineCount(confirmPanel)
+	}
+	return chrome
+}
+
+// clampDiffScroll re-clamps a.diffScroll to the Backups tab's diff view's
+// actual valid range at the current width/body-budget, writing the
+// clamped value back -- so an over-scrolled offset (e.g. from many
+// wheel-downs past the end) doesn't leave the *next* up/wheel-up
+// producing no visible change until several presses "catch up" to
+// render-time-only clamping.
+func (a *App) clampDiffScroll() {
+	if a.diffView == "" {
+		return
+	}
+	w := effectiveWidth(a.width)
+	inner := w - 2
+	if inner < 1 {
+		inner = 1
+	}
+	total := lineCount(truncateLines(colorDiff(a.diffView), inner))
+	budget := a.bodyBudget(a.chromeLines()) - 2
+	a.diffScroll = clampScroll(a.diffScroll, budget, total)
+}
+
+// clampResultsScroll is clampDiffScroll's counterpart for the apply flow's
+// results screen.
+func (a *App) clampResultsScroll() {
+	if a.flow == nil || a.flow.screen != flowResults {
+		return
+	}
+	w := effectiveWidth(a.width)
+	dw := dialogWidth(w)
+	inner := dw - 2
+	if inner < 1 {
+		inner = 1
+	}
+	budget := a.bodyBudget(a.chromeLines())
+	total := lineCount(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)))
+	a.flow.resultsScroll = clampScroll(a.flow.resultsScroll, budget-2, total)
 }
 
 // bodyBudget returns how many lines the tab body may use: a.height minus
@@ -772,7 +842,7 @@ func (a *App) renderBody(budget int) (string, []hit) {
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
-		return renderOverviewTab(projected, w), nil
+		return renderOverviewTab(projected, w, budget), nil
 	case 1:
 		return renderCPUMapTab(projected, a.cursor, w, budget)
 	case 2:
