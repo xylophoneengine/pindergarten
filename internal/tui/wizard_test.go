@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
+	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
@@ -395,11 +396,45 @@ func TestWizardManualEscResetsNode(t *testing.T) {
 	}
 }
 
-// TestWizardManualUpDownClamps covers the manual screen's up/down movement
-// (added alongside h/l): on a node with fewer cores than one row, up/down
-// must clamp rather than panic or move.
-func TestWizardManualUpDownClamps(t *testing.T) {
-	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+// manyCoresTopo returns a single-node topology with 40 single-thread
+// cores (no SMT), so the manual screen's up/down (by coresPerRow == 32)
+// has a real second partial row to move into and clamp against -- a
+// 2-core node (testTopo) can't distinguish "moves correctly" from "never
+// moves": both look identical there.
+func manyCoresTopo() *hostinfo.Topology {
+	threads := make(map[int]hostinfo.Thread, 40)
+	cores := make([]hostinfo.Core, 40)
+	nodeThreads := make([]int, 40)
+	for i := 0; i < 40; i++ {
+		threads[i] = hostinfo.Thread{ID: i, Core: i, Socket: 0, Node: 0, Sibling: -1}
+		cores[i] = hostinfo.Core{Socket: 0, ID: i, Node: 0, Threads: []int{i}}
+		nodeThreads[i] = i
+	}
+	nodes := []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 1000}}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
+}
+
+// TestWizardManualUpDownMovesAndClamps covers the manual screen's up/down
+// movement (added alongside h/l, moving by coresPerRow like the CPU Map):
+// on manyCoresTopo's 40 single-thread cores, down must actually advance
+// the cursor a full row, a second down (no full row left) must clamp
+// instead of overflowing, and up must retrace back to 0 and then clamp
+// there too.
+func TestWizardManualUpDownMovesAndClamps(t *testing.T) {
+	topo := manyCoresTopo()
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(topo, doms, noNode), domsMap, nil
+	}
+	a := New(f, scan, t.TempDir(), "test")
 	runScan(t, a)
 	enterEdit(a)
 	a.tab = 2
@@ -411,12 +446,22 @@ func TestWizardManualUpDownClamps(t *testing.T) {
 	}
 
 	sendKeyType(a, tea.KeyDown)
+	if a.wizard.cursor != coresPerRow {
+		t.Fatalf("cursor = %d, want %d after down (one full row)", a.wizard.cursor, coresPerRow)
+	}
+
+	sendKeyType(a, tea.KeyDown) // no full second row left (40 cores total): must clamp
+	if a.wizard.cursor != coresPerRow {
+		t.Fatalf("cursor = %d, want unchanged %d (clamped: no full row remains)", a.wizard.cursor, coresPerRow)
+	}
+
+	sendKeyType(a, tea.KeyUp)
 	if a.wizard.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 (down clamps: node 0 has only 2 cores, one row)", a.wizard.cursor)
+		t.Fatalf("cursor = %d, want 0 after up", a.wizard.cursor)
 	}
 	sendKeyType(a, tea.KeyUp)
 	if a.wizard.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 (up clamps at the top)", a.wizard.cursor)
+		t.Fatalf("cursor = %d, want 0 (clamped at the top)", a.wizard.cursor)
 	}
 }
 
@@ -575,7 +620,7 @@ func TestWizardManualViewShowsSelectedCount(t *testing.T) {
 	if !strings.Contains(view, "selected 2/2") {
 		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
 	}
-	if !strings.Contains(a.View(), "[h/l/up/down] move") {
+	if !strings.Contains(a.View(), "[h/l/j/k/up/down] move") {
 		t.Fatalf("View() = %q, want the manual-screen key hint in the status bar", a.View())
 	}
 }

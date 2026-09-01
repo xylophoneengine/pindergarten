@@ -273,7 +273,7 @@ func (w *wizard) view() string {
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
 	if w.screen == manualScreen {
-		return "[h/l/up/down] move  [n] node  [space] toggle  [enter] accept  [esc] back"
+		return "[h/l/j/k/up/down] move  [n] node  [space] toggle  [enter] accept  [esc] back"
 	}
 	return "[enter] accept  [m] manual  [esc] cancel"
 }

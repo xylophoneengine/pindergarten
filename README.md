@@ -133,7 +133,7 @@ Pin wizard (after `p`):
 | `enter` | proposal | accept the proposed pin placement |
 | `m` | proposal | switch to manual thread selection |
 | `esc` | proposal / manual | cancel back out (to VMs tab / to proposal, resetting any node override) |
-| `h`/`l`, up/down | manual | move the cursor across the node's cores |
+| `h`/`l`/`j`/`k`, up/down | manual | move the cursor across the node's cores |
 | `n` | manual | cycle the target node; warns, but never blocks, if it now differs from the VM's GPU node |
 | `space` | manual | toggle the thread pair under the cursor |
 | `enter` | manual | accept the manual selection, once it matches the VM's vCPU count |
@@ -148,6 +148,7 @@ Apply review and drift (after `a`, while applying):
 | `d` | drift screen | discard the drifted operation |
 | `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data (closes the drift screen even if other operations are still drifted) |
 | `esc` | drift screen | close back to browsing; every operation, drifted or not, stays queued untouched |
+| any key | results screen | dismiss the results screen and rescan |
 
 ## Why NUMA pinning matters
 

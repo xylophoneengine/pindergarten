@@ -124,7 +124,11 @@ func (p *memNodePicker) hasNode(node int) bool {
 
 // openMemNodePicker implements the 'n' key on the VMs tab: after the
 // shared edit-mode/supported gates and fetching the domain's current XML
-// (for StagedHash), opens the node picker.
+// (for StagedHash), opens the node picker against the *projected* VM (raw
+// snapshot plus any already-staged ops, mirroring openWizard's own use of
+// model.Project) -- so pressing 'n' right after 'p' on the same VM sees
+// the just-staged pins, not the stale on-disk ones, and "vcpu pinning
+// unchanged" stays true.
 func (a *App) openMemNodePicker() (tea.Model, tea.Cmd) {
 	vm := a.gateVMAction()
 	if vm == nil {
@@ -135,7 +139,8 @@ func (a *App) openMemNodePicker() (tea.Model, tea.Cmd) {
 		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
 		return a, nil
 	}
-	a.memPicker = newMemNodePicker(vm, model.HashXML(xml), xml, a.snap)
+	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	a.memPicker = newMemNodePicker(projected.VM(vm.Name), model.HashXML(xml), xml, projected)
 	a.status = ""
 	return a, nil
 }

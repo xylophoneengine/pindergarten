@@ -67,6 +67,88 @@ func TestMemNodeStagesOp(t *testing.T) {
 	}
 }
 
+// TestMemNodeUsesProjectedPins covers the fix for pressing 'n' right after
+// 'p' on the same VM: the picker must see the just-staged pins (via the
+// projected snapshot), not the stale on-disk ones, so a memory-only change
+// afterward genuinely leaves vcpu pinning unchanged instead of silently
+// replacing the staged pin op with an unpinned one.
+func TestMemNodeUsesProjectedPins(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	sendKeyType(a, tea.KeyEnter) // accept the proposal
+	if a.wizard != nil {
+		t.Fatal("wizard still open after accepting the proposal")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 after staging the pin", a.queue.Len())
+	}
+	stagedOp := a.queue.Ops[0]
+	if len(stagedOp.Pins) == 0 {
+		t.Fatal("test setup: staged pin op has no Pins")
+	}
+
+	sendKey(a, 'n')
+	if a.memPicker == nil {
+		t.Fatalf("status = %q, mem-node picker did not open", a.status)
+	}
+
+	otherNode := 0
+	if stagedOp.MemNode == 0 {
+		otherNode = 1
+	}
+	sendKey(a, rune('0'+otherNode))
+
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 (the mem-node op replaces the same VM's staged op)", a.queue.Len())
+	}
+	op := a.queue.Ops[0]
+	if len(op.Pins) != len(stagedOp.Pins) {
+		t.Fatalf("op.Pins = %v, want the previously staged pins %v", op.Pins, stagedOp.Pins)
+	}
+	for vcpu, threads := range stagedOp.Pins {
+		got := op.Pins[vcpu]
+		if len(got) != len(threads) || got[0] != threads[0] {
+			t.Fatalf("op.Pins[%d] = %v, want %v", vcpu, got, threads)
+		}
+	}
+	if op.MemNode != otherNode {
+		t.Fatalf("op.MemNode = %d, want %d", op.MemNode, otherNode)
+	}
+	if !strings.Contains(op.Summary, "vcpu pinning unchanged") {
+		t.Fatalf("op.Summary = %q, want it to say vcpu pinning unchanged", op.Summary)
+	}
+}
+
+// TestMemNodeInvalidDigitStagesNothing covers hasNode's guard: a digit
+// that names no topology node must leave the picker open and stage
+// nothing.
+func TestMemNodeInvalidDigitStagesNothing(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'n')
+	if a.memPicker == nil {
+		t.Fatal("mem-node picker did not open")
+	}
+
+	sendKey(a, '5') // testTopo only has nodes 0 and 1
+	if a.memPicker == nil {
+		t.Fatal("mem-node picker closed after an invalid digit, want it to stay open")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d, want 0 (an invalid digit must not stage anything)", a.queue.Len())
+	}
+}
+
 // TestMemNodeKeepsExistingPins covers an already-pinned VM: Pins in the
 // staged op must equal its current pins verbatim (unchanged), only
 // MemNode moves.

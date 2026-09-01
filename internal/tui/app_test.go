@@ -202,6 +202,62 @@ func TestMouseClickSwitchesTab(t *testing.T) {
 	}
 }
 
+// TestStatusClearsOnTabSwitch covers the digit-key, Tab-key, and mouse
+// tab-switch paths: each must clear a stale a.status, since it belonged to
+// whatever the user was doing on the tab they're leaving.
+func TestStatusClearsOnTabSwitch(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_ = a.View() // record tabRanges
+
+	a.status = "leftover"
+	sendKey(a, '3') // digit path, tab differs from current (0)
+	if a.status != "" {
+		t.Fatalf("status = %q after a digit tab switch, want cleared", a.status)
+	}
+
+	a.status = "leftover"
+	sendKeyType(a, tea.KeyTab)
+	if a.status != "" {
+		t.Fatalf("status = %q after Tab, want cleared", a.status)
+	}
+
+	a.status = "leftover"
+	rng := a.tabRanges[0] // Overview: a.tab is currently 1 (VMs) after the switches above
+	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if a.status != "" {
+		t.Fatalf("status = %q after a mouse tab click, want cleared", a.status)
+	}
+}
+
+// TestMouseIgnoredWhileWizardOpen covers handleMouse's modal guard: a
+// tab-bar click while the wizard (or mem-node picker, or apply flow) is
+// open must not switch tabs out from under it -- previously only
+// a.confirm was checked.
+func TestMouseIgnoredWhileWizardOpen(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_ = a.View() // record tabRanges
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+
+	rng := a.tabRanges[0] // Overview
+	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+
+	if a.tab != 2 {
+		t.Fatalf("a.tab = %d, want unchanged 2 (mouse must be ignored while the wizard is open)", a.tab)
+	}
+	if a.wizard == nil {
+		t.Fatal("wizard closed by a mouse click, want it to stay open")
+	}
+}
+
 func TestEditBlockedWhenBackupDirUnwritable(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: backup dir writability probe cannot fail")

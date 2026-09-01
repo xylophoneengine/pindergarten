@@ -8,9 +8,9 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 )
 
-// testTopo returns the 2-node/8-thread topology from Task 2, built
-// literally (no sysfs): node0 threads 0,1,4,5; node1 threads 2,3,6,7;
-// cores {0,4},{1,5} on node0 socket0; {2,6},{3,7} on node1 socket1.
+// testTopo returns a 2-node/8-thread topology, built literally (no
+// sysfs): node0 threads 0,1,4,5; node1 threads 2,3,6,7; cores {0,4},{1,5}
+// on node0 socket0; {2,6},{3,7} on node1 socket1.
 func testTopo() *hostinfo.Topology {
 	threads := map[int]hostinfo.Thread{
 		0: {ID: 0, Core: 0, Socket: 0, Node: 0, Sibling: 4},

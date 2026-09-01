@@ -359,6 +359,9 @@ func TestRunRestoreRefusesNameMismatch(t *testing.T) {
 	if fake.XML["gpu-vm-01"] != gpuVMXML {
 		t.Errorf("fake XML changed despite the mismatch refusal: %q", fake.XML["gpu-vm-01"])
 	}
+	if len(fake.Defined) != 0 {
+		t.Errorf("Define called %d time(s), want 0 (refuse before writing)", len(fake.Defined))
+	}
 }
 
 // verifyMismatchHV wraps a Fake but returns a fixed, wrongly-pinned XML on

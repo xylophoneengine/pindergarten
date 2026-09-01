@@ -129,7 +129,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if a.confirm != nil {
+	if a.confirm != nil || a.wizard != nil || a.memPicker != nil || a.flow != nil {
 		return a, nil
 	}
 	if msg.Y != 0 || msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
