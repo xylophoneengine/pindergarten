@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -212,7 +213,8 @@ func probeWritable(dir string) error {
 	if err := os.WriteFile(p, []byte("probe"), 0o600); err != nil {
 		return err
 	}
-	return os.Remove(p)
+	defer os.Remove(p) //nolint:errcheck // best-effort cleanup, write succeeded either way
+	return nil
 }
 
 func isRune(msg tea.KeyMsg, r rune) bool {
@@ -253,15 +255,17 @@ func (a *App) renderTabs() string {
 			label = "[" + name + "]"
 		}
 
-		start := x
-		x += len(label)
-		a.tabRanges[i] = [2]int{start, x}
-
 		style := tabInactiveStyle
 		if i == a.tab {
 			style = tabActiveStyle
 		}
-		line.WriteString(style.Render(label))
+		rendered := style.Render(label)
+
+		start := x
+		x += lipgloss.Width(rendered)
+		a.tabRanges[i] = [2]int{start, x}
+
+		line.WriteString(rendered)
 	}
 	return line.String()
 }
@@ -277,7 +281,7 @@ func (a *App) renderHeader() string {
 	}
 	rendered := badgeStyle.Render(badge)
 
-	gap := a.width - len(title) - len(badge)
+	gap := a.width - lipgloss.Width(title) - lipgloss.Width(rendered)
 	if gap < 1 {
 		gap = 1
 	}

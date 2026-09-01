@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -233,6 +234,40 @@ func TestOverviewUsesProjectedSnapshot(t *testing.T) {
 	view := a.View()
 	if !strings.Contains(view, "Overview: 1 VMs, 2 nodes") {
 		t.Fatalf("View() = %q, want overview line from projected snapshot", view)
+	}
+}
+
+func TestHeaderFitsWidthAndEndsWithBadge(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	lines := strings.Split(a.View(), "\n")
+	header := lines[1]
+	if w := lipgloss.Width(header); w > 80 {
+		t.Fatalf("header width = %d, want <= 80: %q", w, header)
+	}
+	if !strings.HasSuffix(strings.TrimRight(header, " "), "READ ONLY") {
+		t.Fatalf("header = %q, want it to end with the badge", header)
+	}
+}
+
+func TestStatusBarApplyDiscardVisibility(t *testing.T) {
+	a := testApp(t, false)
+
+	if view := a.View(); strings.Contains(view, "[a]pply") || strings.Contains(view, "[d]iscard") {
+		t.Fatalf("View() in read-only mode = %q, want no apply/discard hints", view)
+	}
+
+	sendKey(a, 'e')
+	sendKey(a, 'y')
+	if view := a.View(); strings.Contains(view, "[a]pply") || strings.Contains(view, "[d]iscard") {
+		t.Fatalf("View() in edit mode with an empty queue = %q, want no apply/discard hints", view)
+	}
+
+	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
+	view := a.View()
+	if !strings.Contains(view, "[a]pply") || !strings.Contains(view, "[d]iscard") {
+		t.Fatalf("View() in edit mode with a pending op = %q, want apply/discard hints", view)
 	}
 }
 
