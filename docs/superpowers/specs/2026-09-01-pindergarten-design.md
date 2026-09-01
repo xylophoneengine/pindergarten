@@ -1,4 +1,4 @@
-# kvm-pin-manager — Design Spec
+# pindergarten — Design Spec
 
 Date: 2026-09-01
 Status: approved design, pre-implementation
@@ -10,7 +10,7 @@ were left unpinned; their memory accumulated on one NUMA node, fragmenting
 host RAM until new VMs could not allocate memory. Managing vCPU pinning and
 NUMA memory binding by hand (virsh + mental bookkeeping) does not scale.
 
-kvm-pin-manager is a TUI that scans reality (host topology + libvirt domain
+pindergarten is a TUI that scans reality (host topology + libvirt domain
 configs), visualizes which CPU threads are pinned by which VMs, and guides
 the operator through pinning/unpinning and memory-node binding — with
 staged changes, mandatory backups, and rollback. It never trusts its own
@@ -37,7 +37,7 @@ Out of scope (hard non-goals):
 
 ## Stack
 
-- Go, single binary `kvm-pin-manager`.
+- Go, single binary `pindergarten`.
 - TUI: Bubble Tea + lipgloss + bubbles (Charm stack). Mouse + keyboard
   over SSH.
 - Libvirt: official cgo bindings `libvirt.org/go/libvirt` (the Red
@@ -180,8 +180,8 @@ Pick VM -> tool proposes placement:
 
 ## Backups & Rollback
 
-- Location: `/var/lib/kvm-pin-manager/backups/`; fallback
-  `~/.local/share/kvm-pin-manager/backups/` (session mode); overridable
+- Location: `/var/lib/pindergarten/backups/`; fallback
+  `~/.local/share/pindergarten/backups/` (session mode); overridable
   via flag. SELinux note for Rocky: directory under /var/lib with correct
   context; documented in README.
 - Before each domain write: full inactive-config dumpxml ->
@@ -204,7 +204,7 @@ Pick VM -> tool proposes placement:
 ## CLI
 
 ```
-kvm-pin-manager [-c URI] [--backup-dir PATH]
+pindergarten [-c URI] [--backup-dir PATH]
 ```
 
 Defaults: `-c qemu:///system`, backup dir as above.
@@ -248,7 +248,7 @@ Defaults: `-c qemu:///system`, backup dir as above.
 ## Repo Layout
 
 ```
-cmd/kvm-pin-manager/    main, CLI flags
+cmd/pindergarten/    main, CLI flags
 internal/hostinfo/      sysfs topology reader
 internal/libvirtio/     libvirt connection, domain XML read/write
 internal/model/         allocation model, conflict flags, wizard logic
