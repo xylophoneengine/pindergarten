@@ -58,7 +58,7 @@ func snapFromXML(t *testing.T, xmls map[string]string) *model.Snapshot {
 
 func TestOverviewShowsPressure(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"overcommit-vm": overcommitNode0XML})
-	out := renderOverview(s, 80)
+	out := renderOverviewTab(s, 80)
 	if !strings.Contains(out, "OVER") {
 		t.Fatalf("renderOverview() = %q, want it to contain OVER", out)
 	}
@@ -66,15 +66,29 @@ func TestOverviewShowsPressure(t *testing.T) {
 
 func TestOverviewNoPressure(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
-	out := renderOverview(s, 80)
+	out := renderOverviewTab(s, 80)
 	if strings.Contains(out, "OVER") {
 		t.Fatalf("renderOverview() = %q, want no OVER for a node under its total", out)
 	}
 }
 
+// TestOverviewNodeCardsHaveBars covers the per-node memory progress bar:
+// each node's card must contain one (bracketed, with a percentage)
+// alongside the existing summary line.
+func TestOverviewNodeCardsHaveBars(t *testing.T) {
+	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
+	out := renderOverviewTab(s, 100)
+	if n := strings.Count(out, "memory ["); n != len(s.Topo.Nodes) {
+		t.Fatalf("renderOverviewTab() has %d \"memory [\" bars, want %d (one per node): %q", n, len(s.Topo.Nodes), out)
+	}
+	if !strings.Contains(out, "%") {
+		t.Fatalf("renderOverviewTab() = %q, want a percentage in the bar line", out)
+	}
+}
+
 func TestCPUMapMarksPinned(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
-	out := renderCPUMap(s, -1, 80)
+	out, _ := renderCPUMap(s, -1, 80)
 	if !strings.Contains(out, "\u25cf") {
 		t.Fatalf("renderCPUMap() = %q, want it to contain the pinned glyph \\u25cf", out)
 	}
@@ -193,7 +207,7 @@ func singleThreadTopo() *hostinfo.Topology {
 
 func TestCPUMapNoSMTCoreDoesNotPanic(t *testing.T) {
 	s := &model.Snapshot{Topo: singleThreadTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	out := renderCPUMap(s, 0, 80)
+	out, _ := renderCPUMap(s, 0, 80)
 	if !strings.Contains(out, "node 0") {
 		t.Fatalf("renderCPUMap() = %q, want a node 0 heading", out)
 	}

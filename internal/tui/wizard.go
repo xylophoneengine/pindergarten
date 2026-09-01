@@ -234,38 +234,48 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 }
 
 // view renders the active screen against w.base (the self-stripped snapshot
-// Propose ran against, used for the node map's live pin state).
-func (w *wizard) view() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "pin %s (%d vcpus) -> node %d\n\n", w.vm, w.vcpus(), w.node)
+// Propose ran against, used for the node map's live pin state): a titled
+// node-map panel (grid content, so it truncates rather than wraps) and an
+// info panel below it (prose, so it wraps). Alongside the string it
+// returns the manual screen's per-core "wizardcore" hits, screen-absolute
+// (0-based relative to the wizard body's own top-left corner) -- the
+// proposal screen's map isn't clickable, so it reports none.
+func (w *wizard) view(width int) (string, []hit) {
+	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d", w.vm, w.vcpus(), w.node)
 
+	var grid string
+	var gridHits []hit
+	var info strings.Builder
 	switch w.screen {
 	case proposalScreen:
 		highlight := threadSet(assignedThreads(w.proposal.Pins))
-		b.WriteString(renderNodeMap(w.base, w.node, highlight, -1))
-		b.WriteString("\n")
+		grid, _ = renderNodeMap(w.base, w.node, highlight, -1)
 		for _, r := range w.proposal.Rationale {
-			b.WriteString(r)
-			b.WriteString("\n")
+			info.WriteString(r)
+			info.WriteString("\n")
 		}
 		for _, wm := range w.proposal.Warnings {
-			b.WriteString(warningStyle.Render(wm))
-			b.WriteString("\n")
+			info.WriteString(warningStyle.Render(wm))
+			info.WriteString("\n")
 		}
-		b.WriteString("\nenter accept  m manual  esc cancel")
+		info.WriteString("\n[enter] accept  [m] manual  [esc] cancel")
 	case manualScreen:
-		b.WriteString(renderNodeMap(w.base, w.node, w.selected, w.cursor))
-		fmt.Fprintf(&b, "\nselected %d/%d\n", len(w.selected), w.vcpus())
+		grid, gridHits = renderNodeMap(w.base, w.node, w.selected, w.cursor)
+		fmt.Fprintf(&info, "selected %d/%d\n", len(w.selected), w.vcpus())
 		if warn := w.crossesGPUWarning(); warn != "" {
-			b.WriteString(warningStyle.Render(warn))
-			b.WriteString("\n")
+			info.WriteString(warningStyle.Render(warn))
+			info.WriteString("\n")
 		}
 		if w.status != "" {
-			b.WriteString(w.status)
-			b.WriteString("\n")
+			info.WriteString(w.status)
+			info.WriteString("\n")
 		}
 	}
-	return b.String()
+
+	gridPanel := panel(title, grid, width)
+	hits := offsetHits(gridHits, 1, 1)
+	infoPanel := panelWrap("info", strings.TrimRight(info.String(), "\n"), width)
+	return gridPanel + "\n" + infoPanel, hits
 }
 
 // statusBarHint returns the status bar's replacement content while the
@@ -340,23 +350,30 @@ func nodeCores(s *model.Snapshot, node int) []hostinfo.Core {
 // renderNodeMap renders node's cores as a grid of two-glyph cells (mirrors
 // renderCPUMap, but scoped to one node): threads in highlight render in the
 // wizard highlight style, the core at cursor (a nodeCores index, -1 for
-// none) renders reverse-video instead.
-func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int) string {
+// none) renders reverse-video instead. Alongside the string it returns one
+// "wizardcore" hit per cell, 0-based relative to the grid's own top-left
+// corner (x0 = the cell's column * 3, mirroring renderCPUMap).
+func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int) (string, []hit) {
 	var b strings.Builder
+	var hits []hit
 	col := 0
+	row := 0
 	for i, core := range nodeCores(s, node) {
 		if col == coresPerRow {
 			b.WriteString("\n")
+			row++
 			col = 0
 		}
 		if col > 0 {
 			b.WriteString(" ")
 		}
+		x0 := col * 3
+		hits = append(hits, hit{y0: row, y1: row + 1, x0: x0, x1: x0 + 2, kind: "wizardcore", index: i})
 		b.WriteString(nodeMapCell(s, core, highlight, i == cursor))
 		col++
 	}
 	b.WriteString("\n")
-	return b.String()
+	return b.String(), hits
 }
 
 // nodeMapCell renders one core's two-glyph cell for the wizard's node map: a

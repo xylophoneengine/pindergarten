@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/apply"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -336,7 +337,8 @@ func (f *applyFlow) view(w, h int) string {
 		}
 		if f.sel >= 0 && f.sel < len(f.diffs) {
 			b.WriteString("\n")
-			b.WriteString(capDiff(f.diffs[f.sel], diffBudget(h, len(f.drifted)+6)))
+			diff := truncateLines(colorDiff(f.diffs[f.sel]), w-2)
+			b.WriteString(capDiff(diff, diffBudget(h, len(f.drifted)+6)))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n[d]iscard  [w] reopen wizard  [up/down] select  esc back")
@@ -344,14 +346,15 @@ func (f *applyFlow) view(w, h int) string {
 		for _, r := range f.results {
 			switch {
 			case r.Applied:
-				fmt.Fprintf(&b, "OK %s (backup: %s)\n", r.Op.Summary, r.BackupPath)
+				b.WriteString(statusOKStyle.Render(fmt.Sprintf("OK %s (backup: %s)", r.Op.Summary, r.BackupPath)))
 			case r.Err != nil:
-				fmt.Fprintf(&b, "FAILED %s: %v\n", r.Op.Summary, r.Err)
+				b.WriteString(statusErrStyle.Render(fmt.Sprintf("FAILED %s: %v", r.Op.Summary, r.Err)))
 			case r.Drifted:
-				fmt.Fprintf(&b, "SKIPPED %s: drifted\n", r.Op.Summary)
+				fmt.Fprintf(&b, "SKIPPED %s: drifted", r.Op.Summary)
 			default:
-				fmt.Fprintf(&b, "SKIPPED %s: not attempted\n", r.Op.Summary)
+				fmt.Fprintf(&b, "SKIPPED %s: not attempted", r.Op.Summary)
 			}
+			b.WriteString("\n")
 		}
 		b.WriteString("\nany key to dismiss")
 	}
@@ -400,25 +403,54 @@ func (f *applyFlow) statusBarHint() string {
 	}
 }
 
-// renderPending renders the Pending tab: a numbered list of q's op
-// Summaries, with the row at sel reverse-video. w is unused for now (no
-// wrapping beyond the fixed layout), mirroring renderBackups.
-func renderPending(q model.Queue, sel int, w int) string {
-	if q.Len() == 0 {
-		return "no pending operations"
+// pendingOpDetail renders the detail panel body for the selected op: its
+// full summary, the standard effect line, and a staged-hash prefix (so the
+// operator can spot-check it against the VM's current config elsewhere).
+// Returns "" for an out-of-range index.
+func pendingOpDetail(q model.Queue, sel int) string {
+	if sel < 0 || sel >= q.Len() {
+		return ""
 	}
-	var b strings.Builder
-	for i, op := range q.Ops {
-		line := fmt.Sprintf("%d. %s", i+1, op.Summary)
-		if i == sel {
-			line = cursorStyle.Render(line)
-		}
-		b.WriteString(line)
-		if i < len(q.Ops)-1 {
-			b.WriteString("\n")
-		}
+	op := q.Ops[sel]
+	hash := op.StagedHash
+	if len(hash) > 12 {
+		hash = hash[:12]
 	}
-	return b.String()
+	return fmt.Sprintf("%s\n\nbackup will be written first; takes effect on next VM boot\n\nstaged hash: %s",
+		op.Summary, hash)
+}
+
+// renderPendingTab renders the Pending tab: a numbered list panel of q's op
+// summaries (the row at sel background-highlighted), and a detail panel for
+// the selected op below it, or beside it when wide. Alongside the string it
+// returns one "pending" hit per row, 0-based relative to the list's own
+// top-left corner.
+func renderPendingTab(q model.Queue, sel, w int) (string, []hit) {
+	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
+
+	list := "no pending operations"
+	var hits []hit
+	if q.Len() > 0 {
+		lines := make([]string, len(q.Ops))
+		for i, op := range q.Ops {
+			line := fmt.Sprintf("%d. %s", i+1, op.Summary)
+			if i == sel {
+				line = selectedRowStyle.Render(line)
+			}
+			lines[i] = line
+			hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: hitWide, kind: "pending", index: i})
+		}
+		list = strings.Join(lines, "\n")
+	}
+	listPanel := panel("Pending", list, primaryW)
+	hits = offsetHits(hits, 1, 1)
+
+	detailPanel := panelWrap("detail", pendingOpDetail(q, sel), secondaryW)
+
+	if sideBySide {
+		return lipgloss.JoinHorizontal(lipgloss.Top, listPanel, " ", detailPanel), hits
+	}
+	return listPanel + "\n" + detailPanel, hits
 }
 
 // movePendingSel shifts the Pending tab's selection by delta rows, clamped

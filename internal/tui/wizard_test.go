@@ -347,7 +347,7 @@ func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
 		t.Fatalf("wizard.selected = %v, want reset to empty after cycling node", a.wizard.selected)
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if !strings.Contains(view, "GPU at 0000:81:00.0 is on node 1") {
 		t.Fatalf("view() = %q, want the crosses-GPU-node warning", view)
 	}
@@ -540,7 +540,7 @@ func TestWizardProposalShowsOwnPinsAsFree(t *testing.T) {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if strings.Contains(view, "\u25cf") {
 		t.Fatalf("wizard.view() = %q, want no pinned glyph (pinned-vm is the only VM, and its own pins must project away)", view)
 	}
@@ -562,7 +562,7 @@ func TestWizardViewRendersRationale(t *testing.T) {
 		t.Fatal("proposal.Rationale is empty, test fixture needs at least one sentence")
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if !strings.Contains(view, a.wizard.proposal.Rationale[0]) {
 		t.Fatalf("wizard.view() = %q, want the first Rationale sentence", view)
 	}
@@ -596,7 +596,7 @@ func TestWizardViewRendersWarning(t *testing.T) {
 		t.Fatal("proposal.Warnings is empty, want a contended-node warning (node 1 is fully claimed by vm1)")
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if !strings.Contains(view, a.wizard.proposal.Warnings[0]) {
 		t.Fatalf("wizard.view() = %q, want the Warning sentence", view)
 	}
@@ -616,7 +616,7 @@ func TestWizardManualViewShowsSelectedCount(t *testing.T) {
 		t.Fatal("manual screen did not open")
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if !strings.Contains(view, "selected 2/2") {
 		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
 	}
@@ -644,7 +644,7 @@ func TestWizardProposalHighlightsProposedThreads(t *testing.T) {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
 
-	view := a.wizard.view()
+	view, _ := a.wizard.view(200)
 	if !strings.Contains(view, "\x1b[") {
 		t.Fatalf("wizard.view() = %q, want ANSI escapes from the highlight style on proposed threads", view)
 	}

@@ -3,9 +3,9 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -81,35 +81,89 @@ func splitLines(s string) []string {
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
-// renderBackups renders the Backups tab as a tabwriter table (time, VM,
-// operation), one row per entry from backup.List(a.backupDir) (newest
-// first). The row at sel renders reverse-video via cursorStyle, matching
-// renderVMs. An empty dir renders "no backups in <dir>"; a List error
-// renders as an error line. w is unused for now (no wrapping beyond
-// tabwriter's own column alignment).
-func (a *App) renderBackups(sel int, w int) string {
-	entries, err := backup.List(a.backupDir)
-	if err != nil {
-		return fmt.Sprintf("error listing backups: %v", err)
-	}
-	if len(entries) == 0 {
-		return fmt.Sprintf("no backups in %s", a.backupDir)
-	}
-
-	var buf strings.Builder
-	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TIME\tVM\tOPERATION")
-	for _, e := range entries {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Meta.Time.Format(backupTimeFormat), e.Meta.VM, e.Meta.Op)
-	}
-	_ = tw.Flush()
-
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	rowIdx := sel + 1 // row 0 is the header
-	if rowIdx >= 1 && rowIdx < len(lines) {
-		lines[rowIdx] = cursorStyle.Render(lines[rowIdx])
+// colorDiff colors a diffLines-formatted diff: "+ " lines green, "- " lines
+// red, "  " context lines unstyled.
+func colorDiff(diff string) string {
+	lines := strings.Split(diff, "\n")
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "+ "):
+			lines[i] = statusOKStyle.Render(l)
+		case strings.HasPrefix(l, "- "):
+			lines[i] = statusErrStyle.Render(l)
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// backupsTable renders the TIME/VM/OPERATION table for entries (natural
+// column widths; panel() truncates as a safety net if it still doesn't
+// fit), with the row at sel background-highlighted. Alongside the string
+// it returns one "backup" hit per row, 0-based relative to the table's own
+// top-left corner (row 0 is the header).
+func backupsTable(entries []backup.Entry, sel int) (string, []hit) {
+	names := []string{"TIME", "VM", "OPERATION"}
+	vals := make([][]string, len(names))
+	for _, e := range entries {
+		vals[0] = append(vals[0], e.Meta.Time.Format(backupTimeFormat))
+		vals[1] = append(vals[1], e.Meta.VM)
+		vals[2] = append(vals[2], e.Meta.Op)
+	}
+	widths := make([]int, len(names))
+	for i, name := range names {
+		widths[i] = lipgloss.Width(name)
+		for _, v := range vals[i] {
+			if vw := lipgloss.Width(v); vw > widths[i] {
+				widths[i] = vw
+			}
+		}
+	}
+	rowCells := func(row int) []string {
+		cells := make([]string, len(names))
+		for i, name := range names {
+			val := name
+			if row >= 0 {
+				val = vals[i][row]
+			}
+			cells[i] = padRight(val, widths[i])
+		}
+		return cells
+	}
+
+	lines := []string{tableHeaderStyle.Render(strings.Join(rowCells(-1), "  "))}
+	hits := make([]hit, 0, len(entries))
+	for i := range entries {
+		line := strings.Join(rowCells(i), "  ")
+		if i == sel {
+			line = selectedRowStyle.Render(line)
+		}
+		lines = append(lines, line)
+		hits = append(hits, hit{y0: i + 1, y1: i + 2, x0: 0, x1: hitWide, kind: "backup", index: i})
+	}
+	return strings.Join(lines, "\n"), hits
+}
+
+// renderBackups renders the Backups tab's table body (no panel/border):
+// "no backups in <dir>" for an empty dir, an error line for a List error,
+// else backupsTable's TIME/VM/OPERATION table. w is currently unused
+// (panel() applies the width safety net).
+func (a *App) renderBackups(sel int, w int) (string, []hit) {
+	entries, err := backup.List(a.backupDir)
+	if err != nil {
+		return fmt.Sprintf("error listing backups: %v", err), nil
+	}
+	if len(entries) == 0 {
+		return fmt.Sprintf("no backups in %s", a.backupDir), nil
+	}
+	return backupsTable(entries, sel)
+}
+
+// renderBackupsTab renders the Backups tab: renderBackups's table (or
+// message) inside a titled panel, plus a one-line action hint.
+func (a *App) renderBackupsTab(sel, w int) (string, []hit) {
+	body, hits := a.renderBackups(sel, w)
+	body += "\n\nenter: view diff  R: restore (edit mode)"
+	return panel("Backups", body, w), offsetHits(hits, 1, 1)
 }
 
 // backupsEntry returns the sel-th entry from backup.List(a.backupDir),

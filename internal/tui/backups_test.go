@@ -43,7 +43,7 @@ func TestDiffLines(t *testing.T) {
 func TestRenderBackupsLists(t *testing.T) {
 	a := testApp(t, false)
 
-	empty := a.renderBackups(0, 80)
+	empty, _ := a.renderBackups(0, 80)
 	if !strings.Contains(empty, "no backups") {
 		t.Fatalf("renderBackups on empty dir = %q, want it to mention no backups", empty)
 	}
@@ -52,7 +52,7 @@ func TestRenderBackupsLists(t *testing.T) {
 		t.Fatalf("backup.Save: %v", err)
 	}
 
-	got := a.renderBackups(0, 80)
+	got, _ := a.renderBackups(0, 80)
 	if !strings.Contains(got, "plain-vm") {
 		t.Fatalf("renderBackups = %q, want it to contain the VM name", got)
 	}

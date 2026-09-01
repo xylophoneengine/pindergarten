@@ -92,18 +92,24 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 }
 
 // view renders the node list (with free memory) and the VM's GPU node, if
-// any.
-func (p *memNodePicker) view() string {
+// any, inside a titled panel. Alongside the string it returns one
+// "memnode" hit per node line, screen-absolute (0-based relative to the
+// picker body's own top-left corner), indexed by node ID (so a click maps
+// straight onto the same pickMemNode path as its digit key).
+func (p *memNodePicker) view(width int) (string, []hit) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "set memory node for %s\n\n", p.vm)
-	for _, n := range p.snap.Topo.Nodes {
+	var hits []hit
+	for i, n := range p.snap.Topo.Nodes {
 		fmt.Fprintf(&b, "%d) node %d  free %s\n", n.ID, n.ID, fmtKiB(model.FreeMemKiB(p.snap, n.ID)))
+		hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: hitWide, kind: "memnode", index: n.ID})
 	}
 	if p.gpuNode != -1 {
 		fmt.Fprintf(&b, "\nGPU is on node %d\n", p.gpuNode)
 	}
-	b.WriteString("\ndigit: choose node  esc cancel")
-	return b.String()
+	b.WriteString("\ndigit/click: choose node  esc cancel")
+
+	title := "set memory node for " + p.vm
+	return panelWrap(title, strings.TrimRight(b.String(), "\n"), width), offsetHits(hits, 1, 1)
 }
 
 // statusBarHint returns the status bar's replacement content while the

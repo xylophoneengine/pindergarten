@@ -75,6 +75,43 @@ type App struct {
 	width     int
 	height    int
 	tabRanges [numTabs][2]int // X ranges recorded during the last render, row 0
+	hits      []hit           // clickable body regions recorded during the last render
+}
+
+// bodyY0 is the number of lines rendered above the tab body in View: the
+// tab row (row 0) and the header line.
+const bodyY0 = 2
+
+// hitWide is used as a hit's x1 for rows meant to be clickable across their
+// whole width (VM/Pending/Backups/mem-node-picker rows), rather than one
+// bounded to an exact rendered column span.
+const hitWide = 1 << 20
+
+// hit is one clickable body region recorded during the last render, in
+// screen-absolute rows/columns (y0/x0 inclusive, y1/x1 exclusive). kind
+// names which list/grid it belongs to; index is the row/core/node index
+// within it, in the units that field's owner expects (e.g. a.vmSel for
+// "vm", a.cursor for "core").
+type hit struct {
+	y0, y1, x0, x1 int
+	kind           string
+	index          int
+}
+
+// offsetHits returns a copy of hits with dy/dx added to every y0/y1/x0/x1,
+// used to translate a nested screen's own 0-based rows/columns (e.g. a
+// panel's content, offset by its own border and header lines) into
+// screen-absolute ones.
+func offsetHits(hits []hit, dy, dx int) []hit {
+	out := make([]hit, len(hits))
+	for i, h := range hits {
+		h.y0 += dy
+		h.y1 += dy
+		h.x0 += dx
+		h.x1 += dx
+		out[i] = h
+	}
+	return out
 }
 
 var _ tea.Model = (*App)(nil)
@@ -128,6 +165,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// handleMouse routes a mouse event: only a left click on the tab row (row
+// 0) does anything, and only when no modal/screen (confirm, wizard,
+// mem-node picker, apply flow) is open.
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.confirm != nil || a.wizard != nil || a.memPicker != nil || a.flow != nil {
 		return a, nil
@@ -435,41 +475,60 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 
 // View renders the full screen: tab row (row 0, hit-tested by mouse
 // clicks), header, tab body, optional status message and confirm modal,
-// then the status bar.
+// then the status bar. Table/grid content never wraps (each render
+// function truncates its own lines to fit); status/status-bar text is
+// prose and wraps via lipgloss. A final pass truncates (never wraps) any
+// residual line that still overflows, as a last-resort safety net.
 func (a *App) View() string {
 	var b strings.Builder
 	b.WriteString(a.renderTabs())
 	b.WriteString("\n")
 	b.WriteString(a.renderHeader())
 	b.WriteString("\n")
-	b.WriteString(a.renderBody())
+	body, hits := a.renderBody()
+	a.hits = offsetHits(hits, bodyY0, 0)
+	b.WriteString(body)
 	b.WriteString("\n")
 	if a.status != "" {
-		b.WriteString(a.status)
+		b.WriteString(a.wrapProse(styleStatus(a.status)))
 		b.WriteString("\n")
 	}
 	if a.confirm != nil {
-		b.WriteString(modalStyle.Render(a.confirm.prompt))
+		b.WriteString(panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", effectiveWidth(a.width)))
 		b.WriteString("\n")
 	}
-	b.WriteString(a.renderStatusBar())
-	return a.wrapToWidth(b.String())
+	b.WriteString(a.wrapProse(a.renderStatusBar()))
+	return a.clampWidth(b.String())
 }
 
-// wrapToWidth wraps s to a.width via lipgloss (word-wrapping, hard-wrapping
-// any single token wider than a.width), so no rendered line -- tab bar,
-// header, body, status, or status bar -- can run off the right side of the
-// terminal. a.width of 0 (before the first WindowSizeMsg) is a no-op: there
-// is nothing sane to wrap to yet.
-func (a *App) wrapToWidth(s string) string {
+// wrapProse word-wraps s to a.width via lipgloss; a no-op when a.width is
+// unset (<= 0).
+func (a *App) wrapProse(s string) string {
 	if a.width <= 0 {
 		return s
 	}
 	return lipgloss.NewStyle().Width(a.width).Render(s)
 }
 
-// renderTabs renders the tab row and records each label's X range (in
-// visible columns) into a.tabRanges for mouse hit-testing.
+// clampWidth is View's last-resort safety net: truncates (never wraps) any
+// line still wider than a.width. Every render function is expected to
+// already fit on its own; this only catches what slips through (e.g. the
+// tab bar on a pathologically narrow terminal). A no-op when a.width is
+// unset (<= 0).
+func (a *App) clampWidth(s string) string {
+	if a.width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = ansiTruncate(l, a.width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderTabs renders the tab row (active tab as a filled, colored pill;
+// inactive tabs dimmed) and records each label's X range (in visible
+// columns) into a.tabRanges for mouse hit-testing.
 func (a *App) renderTabs() string {
 	var line strings.Builder
 	x := 0
@@ -494,8 +553,12 @@ func (a *App) renderTabs() string {
 	return line.String()
 }
 
+// renderHeader renders "pindergarten <version>  <uri>" (version and uri
+// dimmed) with the read-only/edit badge right-aligned.
 func (a *App) renderHeader() string {
-	title := fmt.Sprintf("pindergarten %s  %s", a.version, a.hv.URI())
+	name := "pindergarten"
+	rest := fmt.Sprintf(" %s  %s", a.version, a.hv.URI())
+	title := lipgloss.NewStyle().Bold(true).Render(name) + keyBarLabelStyle.Render(rest)
 
 	badge := "READ ONLY"
 	badgeStyle := badgeReadOnlyStyle
@@ -505,7 +568,8 @@ func (a *App) renderHeader() string {
 	}
 	rendered := badgeStyle.Render(badge)
 
-	gap := a.width - lipgloss.Width(title) - lipgloss.Width(rendered)
+	w := effectiveWidth(a.width)
+	gap := w - lipgloss.Width(title) - lipgloss.Width(rendered)
 	if gap < 1 {
 		gap = 1
 	}
@@ -513,83 +577,113 @@ func (a *App) renderHeader() string {
 }
 
 // renderBody renders the active tab's body (or the wizard/apply-flow
-// screen in its place); it never panics ahead of the first scanDoneMsg.
-func (a *App) renderBody() string {
+// screen in its place) alongside its clickable regions (0-based, relative
+// to the body's own top-left corner); it never panics ahead of the first
+// scanDoneMsg.
+func (a *App) renderBody() (string, []hit) {
+	w := effectiveWidth(a.width)
+
 	if a.snap == nil {
 		if a.scanErr != nil {
-			return fmt.Sprintf("scan error: %v", a.scanErr)
+			return fmt.Sprintf("scan error: %v", a.scanErr), nil
 		}
-		return "scanning..."
+		return "scanning...", nil
 	}
 
 	if a.wizard != nil {
-		return a.wizard.view()
+		return a.wizard.view(w)
 	}
 	if a.memPicker != nil {
-		return a.memPicker.view()
+		return a.memPicker.view(w)
 	}
 	if a.flow != nil {
-		return a.flow.view(a.width, a.height)
+		return panelWrap(flowTitle(a.flow.screen), a.flow.view(w, a.height), w), nil
 	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
-		return renderOverview(projected, a.width)
+		return renderOverviewTab(projected, w), nil
 	case 1:
-		return renderCPUMap(projected, a.cursor, a.width) + "\n" + cpuMapDetail(projected, a.cursor)
+		return renderCPUMapTab(projected, a.cursor, w)
 	case 2:
-		return renderVMs(projected, a.vmSel, a.width) + "\n" + vmDetail(projected, a.vmSel)
+		return renderVMsTab(projected, a.vmSel, w)
 	case 3:
-		return renderPending(a.queue, a.pendingSel, a.width)
+		return renderPendingTab(a.queue, a.pendingSel, w)
 	case 4:
 		if a.diffView != "" {
-			return a.diffView
+			return panel("diff", colorDiff(a.diffView), w), nil
 		}
-		return a.renderBackups(a.backupsSel, a.width)
+		return a.renderBackupsTab(a.backupsSel, w)
 	}
-	return ""
+	return "", nil
 }
 
+// flowTitle names the apply-flow panel by its current screen.
+func flowTitle(screen flowScreen) string {
+	switch screen {
+	case flowReview:
+		return "Apply"
+	case flowRunning:
+		return "Working"
+	case flowDrift:
+		return "Drift Detected"
+	case flowResults:
+		return "Results"
+	}
+	return "Apply"
+}
+
+// renderStatusBar renders the bottom key bar: "N pending ops" followed by
+// "[key] label" hints (bold key, dim label) for whatever's clickable/keyable
+// right now. While a wizard/mem-node-picker/apply-flow screen is open, its
+// own (unstyled) hint line replaces the default set.
 func (a *App) renderStatusBar() string {
-	parts := []string{fmt.Sprintf("%d pending ops", a.queue.Len())}
+	pending := fmt.Sprintf("%d pending ops", a.queue.Len())
 
 	switch {
 	case a.wizard != nil:
-		parts = append(parts, a.wizard.statusBarHint())
+		return statusBarStyle.Render(pending + "  " + a.wizard.statusBarHint())
 	case a.memPicker != nil:
-		parts = append(parts, a.memPicker.statusBarHint())
+		return statusBarStyle.Render(pending + "  " + a.memPicker.statusBarHint())
 	case a.flow != nil:
-		parts = append(parts, a.flow.statusBarHint())
-	default:
-		if a.tab == 1 {
-			parts = append(parts, "arrows/hjkl move")
-		}
-		if a.editMode && a.tab == 3 {
-			parts = append(parts, "[x] remove")
-		}
-		if a.editMode && a.queue.Len() > 0 {
-			parts = append(parts, "[a]pply")
-		}
-		if a.editMode && a.tab == 3 && a.queue.Len() > 0 {
-			// 'd' (discard all) is only routed on the Pending tab.
-			parts = append(parts, "[d]iscard")
-		}
-		if a.editMode && a.tab == 2 {
-			parts = append(parts, "[p]in", "[s]trip", "[n] mem-node")
-		}
-		if a.tab == 4 {
-			switch {
-			case a.diffView != "":
-				// Dismissing the diff isn't gated by edit mode either.
-				parts = append(parts, "any key: close")
-			case a.editMode:
-				parts = append(parts, "[R]estore", "enter diff")
-			default:
-				// 'enter' (show diff) isn't gated by edit mode; only R is.
-				parts = append(parts, "enter diff")
-			}
-		}
-		parts = append(parts, "[r]escan", "[e]dit", "[q]uit")
+		return statusBarStyle.Render(pending + "  " + a.flow.statusBarHint())
 	}
-	return statusBarStyle.Render(strings.Join(parts, "  "))
+
+	var hints []keyHint
+	if a.tab == 1 {
+		hints = append(hints, keyHint{"arrows/hjkl", "move"})
+	}
+	if a.editMode && a.tab == 3 {
+		hints = append(hints, keyHint{"x", "remove"})
+	}
+	if a.editMode && a.queue.Len() > 0 {
+		hints = append(hints, keyHint{"a", "apply"})
+	}
+	if a.editMode && a.tab == 3 && a.queue.Len() > 0 {
+		// 'd' (discard all) is only routed on the Pending tab.
+		hints = append(hints, keyHint{"d", "discard"})
+	}
+	if a.editMode && a.tab == 2 {
+		hints = append(hints, keyHint{"p", "pin"}, keyHint{"s", "strip"}, keyHint{"n", "mem-node"})
+	}
+	if a.tab == 4 {
+		switch {
+		case a.diffView != "":
+			// Dismissing the diff isn't gated by edit mode either.
+			hints = append(hints, keyHint{"any", "close"})
+		case a.editMode:
+			hints = append(hints, keyHint{"R", "restore"}, keyHint{"enter", "diff"})
+		default:
+			// 'enter' (show diff) isn't gated by edit mode; only R is.
+			hints = append(hints, keyHint{"enter", "diff"})
+		}
+	}
+	hints = append(hints, keyHint{"r", "rescan"}, keyHint{"e", "edit"}, keyHint{"q", "quit"})
+
+	parts := make([]string, 0, len(hints)+1)
+	parts = append(parts, keyBarLabelStyle.Render(pending))
+	for _, h := range hints {
+		parts = append(parts, renderKeyHint(h))
+	}
+	return strings.Join(parts, "  ")
 }

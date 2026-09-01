@@ -343,28 +343,28 @@ func TestHeaderFitsWidthAndEndsWithBadge(t *testing.T) {
 func TestStatusBarApplyDiscardVisibility(t *testing.T) {
 	a := testApp(t, false)
 
-	if view := a.View(); strings.Contains(view, "[a]pply") || strings.Contains(view, "[d]iscard") {
+	if view := a.View(); strings.Contains(view, "[a] apply") || strings.Contains(view, "[d] discard") {
 		t.Fatalf("View() in read-only mode = %q, want no apply/discard hints", view)
 	}
 
 	sendKey(a, 'e')
 	sendKey(a, 'y')
-	if view := a.View(); strings.Contains(view, "[a]pply") || strings.Contains(view, "[d]iscard") {
+	if view := a.View(); strings.Contains(view, "[a] apply") || strings.Contains(view, "[d] discard") {
 		t.Fatalf("View() in edit mode with an empty queue = %q, want no apply/discard hints", view)
 	}
 
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
 	view := a.View()
-	if !strings.Contains(view, "[a]pply") {
+	if !strings.Contains(view, "[a] apply") {
 		t.Fatalf("View() in edit mode with a pending op = %q, want the apply hint on any tab", view)
 	}
-	if strings.Contains(view, "[d]iscard") {
+	if strings.Contains(view, "[d] discard") {
 		t.Fatalf("View() on a non-Pending tab = %q, want no discard hint ('d' is only routed on the Pending tab)", view)
 	}
 
 	a.tab = 3
 	view = a.View()
-	if !strings.Contains(view, "[d]iscard") {
+	if !strings.Contains(view, "[d] discard") {
 		t.Fatalf("View() on the Pending tab with a pending op = %q, want the discard hint", view)
 	}
 }
@@ -435,6 +435,71 @@ func TestViewNoWrapBeforeWindowSize(t *testing.T) {
 	view := a.View()
 	if !strings.Contains(view, "some status") {
 		t.Fatalf("View() with width 0 = %q, want status text present, unwrapped", view)
+	}
+}
+
+// TestVMsTableFitsNarrowWidth covers the reported regression: at a narrow
+// width, VMs table rows must stay single lines (never fold, e.g. FLAGS
+// header alone on one line and "[!]" alone on the next) and every rendered
+// line must still fit the terminal.
+func TestVMsTableFitsNarrowWidth(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+
+	view := a.View()
+	for i, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > 60 {
+			t.Fatalf("line %d width = %d, want <= 60: %q", i, w, line)
+		}
+	}
+	if !strings.Contains(view, "plain-vm") {
+		t.Fatalf("View() = %q, want the VM name to still appear intact", view)
+	}
+}
+
+// TestVMsTabTwoColumnAtWideWidth covers the wide-terminal layout: at width
+// 140 the VMs tab must render the table and detail panels side by side
+// (both panel titles land on the same top-border line), not stacked.
+func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+
+	lines := strings.Split(a.View(), "\n")
+	if len(lines) <= bodyY0 {
+		t.Fatalf("View() has only %d lines, want more than bodyY0=%d", len(lines), bodyY0)
+	}
+	top := lines[bodyY0]
+	if !strings.Contains(top, "VMs") || !strings.Contains(top, "plain-vm") {
+		t.Fatalf("top border line = %q, want both the table panel's \"VMs\" title and the detail panel's \"plain-vm\" title on the same line (side by side)", top)
+	}
+}
+
+// TestSmokeRenderAllTabs is not a correctness check: it renders every tab
+// at width 120 and logs each via t.Log (run with -v) so the rendered
+// output can be inspected directly, e.g. for a visual review.
+func TestSmokeRenderAllTabs(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{
+		"pinned-vm":     pinnedNode0XML,
+		"overcommit-vm": overcommitNode0XML,
+		"plain-vm":      plainVMXML,
+	}, noNode)
+	runScan(t, a)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	enterEdit(a)
+	a.vmSel = vmIndex(t, a, "plain-vm")
+	a.queue.Add(model.PendingOp{
+		VM:         "plain-vm",
+		StagedHash: "abcdef1234567890",
+		Summary:    "plain-vm: pin 2 vcpus -> node 0 threads 0,1; memory -> node 0 (strict)",
+	})
+
+	for i, name := range tabNames {
+		a.tab = i
+		t.Logf("=== tab %d (%s) ===\n%s", i, name, a.View())
 	}
 }
 
