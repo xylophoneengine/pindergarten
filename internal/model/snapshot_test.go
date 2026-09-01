@@ -212,6 +212,30 @@ const memPressureXMLB = `<domain type='kvm'>
   <devices/>
 </domain>`
 
+const memPressureBoundaryXMLA = `<domain type='kvm'>
+  <name>vm-a</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b11</uuid>
+  <memory unit='KiB'>500</memory>
+  <vcpu>1</vcpu>
+  <numatune>
+    <memory mode='strict' nodeset='0'/>
+  </numatune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+const memPressureBoundaryXMLB = `<domain type='kvm'>
+  <name>vm-b</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b12</uuid>
+  <memory unit='KiB'>500</memory>
+  <vcpu>1</vcpu>
+  <numatune>
+    <memory mode='strict' nodeset='0'/>
+  </numatune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
 func TestMemPressure(t *testing.T) {
 	cfgA, err := libvirtio.ParseDomainXML(memPressureXMLA)
 	if err != nil {
@@ -240,6 +264,41 @@ func TestMemPressure(t *testing.T) {
 		}
 		if !vm.HasFlag(FlagMemPressure) {
 			t.Errorf("VM(%q) missing FlagMemPressure, flags = %+v", name, vm.Flags)
+		}
+	}
+}
+
+func TestMemPressureBoundary(t *testing.T) {
+	// Two VMs at 500 KiB each bound to node 0 (MemTotalKiB 1000): the sum
+	// exactly equals the node's total, which must NOT trip FlagMemPressure
+	// (the rule is strict >, not >=).
+	cfgA, err := libvirtio.ParseDomainXML(memPressureBoundaryXMLA)
+	if err != nil {
+		t.Fatalf("ParseDomainXML A: %v", err)
+	}
+	cfgB, err := libvirtio.ParseDomainXML(memPressureBoundaryXMLB)
+	if err != nil {
+		t.Fatalf("ParseDomainXML B: %v", err)
+	}
+
+	doms := []libvirtio.Domain{
+		{Config: cfgA, State: libvirtio.StateRunning},
+		{Config: cfgB, State: libvirtio.StateRunning},
+	}
+
+	snap := Build(testTopo(), doms, func(string) int { return -1 })
+
+	if snap.BoundMemKiB[0] != 1000 {
+		t.Errorf("BoundMemKiB[0] = %d, want 1000", snap.BoundMemKiB[0])
+	}
+
+	for _, name := range []string{"vm-a", "vm-b"} {
+		vm := snap.VM(name)
+		if vm == nil {
+			t.Fatalf("VM(%q) = nil", name)
+		}
+		if vm.HasFlag(FlagMemPressure) {
+			t.Errorf("VM(%q) has FlagMemPressure at exact capacity, flags = %+v", name, vm.Flags)
 		}
 	}
 }
@@ -292,6 +351,43 @@ func TestThreadUse(t *testing.T) {
 
 	if !reflect.DeepEqual(snap.VMs[0], *snap.VM("alpha")) {
 		t.Errorf("VMs not sorted by name: %v", snap.VMs)
+	}
+}
+
+// threadUseXMLSharedCpuset pins two vcpus to the exact same cpuset, so a
+// naive per-vcpupin append would list the VM twice against each thread.
+const threadUseXMLSharedCpuset = `<domain type='kvm'>
+  <name>shared-cpuset</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b13</uuid>
+  <memory unit='KiB'>1000</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='0-1'/>
+    <vcpupin vcpu='1' cpuset='0-1'/>
+  </cputune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+func TestThreadUseDedupSelfOverlap(t *testing.T) {
+	cfg, err := libvirtio.ParseDomainXML(threadUseXMLSharedCpuset)
+	if err != nil {
+		t.Fatalf("ParseDomainXML: %v", err)
+	}
+
+	snap := Build(testTopo(), []libvirtio.Domain{
+		{Config: cfg, State: libvirtio.StateRunning},
+	}, func(string) int { return -1 })
+
+	for _, thread := range []int{0, 1} {
+		got := snap.Use[thread].VMs
+		if len(got) != 1 {
+			t.Errorf("Use[%d].VMs = %v, want exactly one entry", thread, got)
+			continue
+		}
+		if got[0] != "shared-cpuset" {
+			t.Errorf("Use[%d].VMs = %v, want [shared-cpuset]", thread, got)
+		}
 	}
 }
 

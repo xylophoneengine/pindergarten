@@ -156,10 +156,14 @@ func computeFlags(topo *hostinfo.Topology, vms []VM) (map[int]ThreadUse, map[int
 		}
 		v.Flags = nil
 
+		vmThreads := map[int]bool{} // dedupe: a VM's own vcpus can share a thread
 		for _, threads := range v.Pins {
 			for _, t := range threads {
-				threadVMs[t] = append(threadVMs[t], v.Name)
+				vmThreads[t] = true
 			}
+		}
+		for t := range vmThreads {
+			threadVMs[t] = append(threadVMs[t], v.Name)
 		}
 
 		pinNodes := pinnedNodeSet(v.Pins, nodeOfThread)
@@ -285,42 +289,45 @@ func setsEqual(a, b map[int]bool) bool {
 	return true
 }
 
+// flagTexts holds the fixed Cause/Consequence sentence pair for each flag
+// kind.
+var flagTexts = map[FlagKind][2]string{
+	FlagUnpinned: {
+		"This VM's vCPUs are not pinned to any host thread.",
+		"The scheduler is free to move it across NUMA nodes, causing unpredictable latency.",
+	},
+	FlagPartialPin: {
+		"Only some of this VM's vCPUs are pinned; the rest float free.",
+		"The unpinned vCPUs can land on a different NUMA node than the pinned ones and slow down cross-vCPU communication.",
+	},
+	FlagNoMemBind: {
+		"RAM is not bound to a NUMA node.",
+		"The kernel may allocate it on either node and starve the node where GPU VMs live.",
+	},
+	FlagNodeMismatch: {
+		"The pinned vCPUs and the memory binding, or the passthrough device, sit on different NUMA nodes.",
+		"Every memory access crosses the NUMA interconnect, adding latency and stealing bandwidth from other VMs.",
+	},
+	FlagCrossNode: {
+		"This VM's vCPUs are pinned to threads on more than one NUMA node.",
+		"Memory accesses that cross nodes pay extra latency and congest the interconnect between sockets.",
+	},
+	FlagMemPressure: {
+		"The memory bound to this node exceeds the node's total RAM.",
+		"The host will swap or reclaim pages under load, causing stalls for every VM bound to this node.",
+	},
+	FlagGPUUnknownNode: {
+		"The NUMA node of a passthrough device could not be determined.",
+		"Placement decisions for this VM cannot account for the device's true node affinity.",
+	},
+	FlagUnsupported: {
+		"The domain XML could not be parsed.",
+		"This VM is shown read-only and excluded from pinning suggestions.",
+	},
+}
+
 // flagFor returns the fixed Cause/Consequence text for a flag kind.
 func flagFor(k FlagKind) Flag {
-	texts := map[FlagKind][2]string{
-		FlagUnpinned: {
-			"This VM's vCPUs are not pinned to any host thread.",
-			"The scheduler is free to move it across NUMA nodes, causing unpredictable latency.",
-		},
-		FlagPartialPin: {
-			"Only some of this VM's vCPUs are pinned; the rest float free.",
-			"The unpinned vCPUs can land on a different NUMA node than the pinned ones and slow down cross-vCPU communication.",
-		},
-		FlagNoMemBind: {
-			"RAM is not bound to a NUMA node.",
-			"The kernel may allocate it on either node and starve the node where GPU VMs live.",
-		},
-		FlagNodeMismatch: {
-			"The pinned vCPUs and the memory binding, or the passthrough device, sit on different NUMA nodes.",
-			"Every memory access crosses the NUMA interconnect, adding latency and stealing bandwidth from other VMs.",
-		},
-		FlagCrossNode: {
-			"This VM's vCPUs are pinned to threads on more than one NUMA node.",
-			"Memory accesses that cross nodes pay extra latency and congest the interconnect between sockets.",
-		},
-		FlagMemPressure: {
-			"The memory bound to this node exceeds the node's total RAM.",
-			"The host will swap or reclaim pages under load, causing stalls for every VM bound to this node.",
-		},
-		FlagGPUUnknownNode: {
-			"The NUMA node of a passthrough device could not be determined.",
-			"Placement decisions for this VM cannot account for the device's true node affinity.",
-		},
-		FlagUnsupported: {
-			"The domain XML could not be parsed.",
-			"This VM is shown read-only and excluded from pinning suggestions.",
-		},
-	}
-	t := texts[k]
+	t := flagTexts[k]
 	return Flag{Kind: k, Cause: t[0], Consequence: t[1]}
 }
