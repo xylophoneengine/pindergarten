@@ -25,6 +25,7 @@ type PendingOp struct {
 	MemNode    int    // -1 = leave numatune untouched (OpPin only)
 	BackupXML  string // OpRestore only
 	StagedHash string // sha256 hex of domain config XML at staging time
+	StagedXML  string // domain config XML at staging time (same XML StagedHash hashes), for the drift screen's diff
 	Summary    string // human line, e.g. "vm-x: pin 4 vcpus -> node 1 threads 2,3,6,7; memory -> node 1"
 }
 

@@ -20,19 +20,21 @@ type memNodePicker struct {
 	gpuNode    int           // -1 if the VM has no passthrough device with a known node
 	pinNode    int           // node vm's pins all sit on; -1 if unpinned or pinned cross-node
 	stagedHash string
+	stagedXML  string          // domain XML at open time (same XML stagedHash hashes), for the drift screen's diff
 	snap       *model.Snapshot // for rendering each node's free memory
 }
 
 // newMemNodePicker builds a picker for vm, computing gpuNode/pinNode from
 // vm's current state so the warning check has something to compare a pick
 // against.
-func newMemNodePicker(vm *model.VM, stagedHash string, snap *model.Snapshot) *memNodePicker {
+func newMemNodePicker(vm *model.VM, stagedHash, stagedXML string, snap *model.Snapshot) *memNodePicker {
 	return &memNodePicker{
 		vm:         vm.Name,
 		pins:       copyPinsMap(vm.Pins),
 		gpuNode:    vm.GPUNode(),
 		pinNode:    pinsNode(snap.Topo, vm.Pins),
 		stagedHash: stagedHash,
+		stagedXML:  stagedXML,
 		snap:       snap,
 	}
 }
@@ -84,6 +86,7 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 		Pins:       copyPinsMap(p.pins),
 		MemNode:    node,
 		StagedHash: p.stagedHash,
+		StagedXML:  p.stagedXML,
 		Summary:    fmt.Sprintf("%s: memory -> node %d (strict); vcpu pinning unchanged", p.vm, node),
 	}
 }
@@ -132,7 +135,7 @@ func (a *App) openMemNodePicker() (tea.Model, tea.Cmd) {
 		a.status = fmt.Sprintf("%s: %v", vm.Name, err)
 		return a, nil
 	}
-	a.memPicker = newMemNodePicker(vm, model.HashXML(xml), a.snap)
+	a.memPicker = newMemNodePicker(vm, model.HashXML(xml), xml, a.snap)
 	a.status = ""
 	return a, nil
 }

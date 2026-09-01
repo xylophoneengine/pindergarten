@@ -166,6 +166,28 @@ func TestQuitConfirmWithPending(t *testing.T) {
 	}
 }
 
+// TestCtrlCQuitsFromConfirmModal covers ctrl+c reaching tea.Quit from
+// every modal/screen: even with a confirm prompt open (which would
+// otherwise swallow every key but y/n/esc), ctrl+c must still quit --
+// unconditionally, unlike 'q' which asks first when ops are pending.
+func TestCtrlCQuitsFromConfirmModal(t *testing.T) {
+	a := testApp(t, false)
+	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
+
+	sendKey(a, 'q') // opens the "discard pending ops and quit?" confirm
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c while a confirm modal is open returned a nil Cmd, want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c Cmd produced %T, want tea.QuitMsg", cmd())
+	}
+}
+
 func TestMouseClickSwitchesTab(t *testing.T) {
 	a := testApp(t, false)
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

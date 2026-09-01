@@ -188,6 +188,7 @@ func (a *App) stageRestore(sel int) string {
 		VM:         e.Meta.VM,
 		BackupXML:  backupXML,
 		StagedHash: model.HashXML(current),
+		StagedXML:  current,
 		MemNode:    -1,
 		Summary: fmt.Sprintf("%s: restore config from backup %s (%s)",
 			e.Meta.VM, e.Meta.Time.Format(backupTimeFormat), e.Meta.Op),

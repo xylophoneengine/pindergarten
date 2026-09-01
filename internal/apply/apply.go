@@ -114,6 +114,13 @@ func buildXML(op model.PendingOp, xml string) (string, error) {
 	case model.OpStrip:
 		return libvirtio.StripPinning(xml)
 	case model.OpRestore:
+		cfg, err := libvirtio.ParseDomainXML(op.BackupXML)
+		if err != nil {
+			return "", fmt.Errorf("parsing backup xml: %w", err)
+		}
+		if cfg.Name != op.VM {
+			return "", fmt.Errorf("backup xml is for domain %q, not %q", cfg.Name, op.VM)
+		}
 		return op.BackupXML, nil
 	default:
 		return "", fmt.Errorf("apply: unknown op kind %v", op.Kind)

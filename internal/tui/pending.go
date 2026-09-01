@@ -25,26 +25,29 @@ const (
 // handleFlowKey and renders view in place of the tab body, mirroring how
 // the wizard replaces the body while open.
 //
-// gen guards against a stale driftCheckedMsg/applyDoneMsg being applied to
-// the wrong round: it is bumped every time a new checkDriftCmd/runApplyCmd
-// is dispatched, and the message carries the value it was bumped to, so
-// handleDriftChecked/handleApplyDone can drop anything that does not match
-// the flow's current gen.
+// Stale-message guarding (a driftCheckedMsg/applyDoneMsg arriving after its
+// round no longer applies) is done via App.flowGen, not a counter on
+// applyFlow itself -- a per-flow counter would restart at zero for every
+// new applyFlow, so a leftover message from one flow could collide with an
+// unrelated later flow's gen. See App.flowGen's doc comment.
 type applyFlow struct {
 	screen  flowScreen
 	ops     []model.PendingOp // snapshot of the queue when the review screen opened
 	drifted []model.PendingOp // ops whose VM changed since staging
+	diffs   []string          // diffLines(op.StagedXML, current live xml), same order/index as drifted
 	sel     int               // selected row in drifted, drift screen only
 	results []apply.Result
-	gen     int
 	running string // body text shown on the flowRunning screen
 }
 
 // driftCheckedMsg carries the result of running apply.CheckDrift, mapped
-// back onto the queued ops for the drifted VMs (in queue order).
+// back onto the queued ops for the drifted VMs (in queue order), plus a
+// precomputed diff of each drifted op's staged XML against its current
+// live XML.
 type driftCheckedMsg struct {
 	gen     int
 	drifted []model.PendingOp
+	diffs   []string
 	err     error
 }
 
@@ -81,11 +84,11 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Move to flowRunning immediately: once confirmed, cancelling is
 			// impossible (no case below handles a key on that screen), so
 			// there is no window where esc/n can race the in-flight Cmd.
-			a.flow.gen++
+			a.flowGen++
 			a.flow.screen = flowRunning
 			a.flow.running = "checking for drift..."
-			a.status = a.flow.running
-			return a, a.checkDriftCmd(a.flow.gen)
+			a.status = ""
+			return a, a.checkDriftCmd(a.flowGen)
 		case isRune(msg, 'n'), msg.Type == tea.KeyEsc:
 			a.flow = nil
 		}
@@ -118,8 +121,11 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // checkDriftCmd runs apply.CheckDrift against the queue and maps the
-// drifted VM names back onto their queued ops, in queue order. gen is
-// stamped onto the resulting message so a stale round can be dropped.
+// drifted VM names back onto their queued ops, in queue order, alongside a
+// precomputed diff of each drifted op's staged XML against its current
+// live XML (a second DomainXML fetch per drifted VM -- CheckDrift itself
+// only returns names). gen is stamped onto the resulting message so a
+// stale round can be dropped.
 func (a *App) checkDriftCmd(gen int) tea.Cmd {
 	ops := append([]model.PendingOp(nil), a.queue.Ops...)
 	return func() tea.Msg {
@@ -132,21 +138,30 @@ func (a *App) checkDriftCmd(gen int) tea.Cmd {
 			driftedSet[n] = true
 		}
 		var drifted []model.PendingOp
+		var diffs []string
 		for _, op := range ops {
-			if driftedSet[op.VM] {
-				drifted = append(drifted, op)
+			if !driftedSet[op.VM] {
+				continue
 			}
+			drifted = append(drifted, op)
+			current, err := a.hv.DomainXML(op.VM)
+			if err != nil {
+				diffs = append(diffs, fmt.Sprintf("error fetching current xml: %v", err))
+				continue
+			}
+			diffs = append(diffs, diffLines(op.StagedXML, current))
 		}
-		return driftCheckedMsg{gen: gen, drifted: drifted}
+		return driftCheckedMsg{gen: gen, drifted: drifted, diffs: diffs}
 	}
 }
 
 // handleDriftChecked reacts to a driftCheckedMsg: any drift opens the drift
 // screen; a clean check proceeds straight into apply.Run. A nil flow (the
 // user somehow closed it) or a stale gen (a leftover message from an
-// earlier round) is silently dropped rather than acted on.
+// earlier round, or from an entirely different flow -- App.flowGen is
+// monotonic across flows) is silently dropped rather than acted on.
 func (a *App) handleDriftChecked(msg driftCheckedMsg) (tea.Model, tea.Cmd) {
-	if a.flow == nil || msg.gen != a.flow.gen {
+	if a.flow == nil || msg.gen != a.flowGen {
 		return a, nil
 	}
 	if msg.err != nil {
@@ -157,13 +172,14 @@ func (a *App) handleDriftChecked(msg driftCheckedMsg) (tea.Model, tea.Cmd) {
 	if len(msg.drifted) > 0 {
 		a.flow.screen = flowDrift
 		a.flow.drifted = msg.drifted
+		a.flow.diffs = msg.diffs
 		a.flow.sel = 0
 		a.status = ""
 		return a, nil
 	}
+	a.flowGen++
 	a.flow.running = "applying..."
-	a.status = a.flow.running
-	return a, a.runApplyCmd(a.flow.gen)
+	return a, a.runApplyCmd(a.flowGen)
 }
 
 // runApplyCmd runs apply.Run against a snapshot of the current queue. gen
@@ -180,7 +196,7 @@ func (a *App) runApplyCmd(gen int) tea.Cmd {
 // queued so the user can inspect or discard them. A nil flow or stale gen
 // is dropped, same as handleDriftChecked.
 func (a *App) handleApplyDone(msg applyDoneMsg) (tea.Model, tea.Cmd) {
-	if a.flow == nil || msg.gen != a.flow.gen {
+	if a.flow == nil || msg.gen != a.flowGen {
 		return a, nil
 	}
 	a.flow.screen = flowResults
@@ -231,7 +247,9 @@ func (a *App) discardDrifted() {
 }
 
 // reopenDrifted implements 'w' on the drift screen: drops the selected
-// drifted op from the queue and the drift list, then issues a rescan;
+// drifted op from the queue and closes the flow outright, regardless of
+// how many other drifted ops remain -- nothing auto-applies, so the user
+// presses 'a' again to re-review and re-check whatever is still queued.
 // app.go's scanDoneMsg handling re-opens the wizard for that VM once the
 // rescan lands (see openWizardFor).
 func (a *App) reopenDrifted() (tea.Model, tea.Cmd) {
@@ -240,20 +258,21 @@ func (a *App) reopenDrifted() (tea.Model, tea.Cmd) {
 	}
 	op := a.flow.drifted[a.flow.sel]
 	a.removeQueueOp(op.VM)
-	a.dropFlowDrifted()
-	if len(a.flow.drifted) == 0 {
-		a.flow = nil
-	}
+	a.flow = nil
 	a.reopenVM = op.VM
 	a.status = "rescanning..."
 	return a, a.scanCmd()
 }
 
 // dropFlowDrifted removes the currently-selected row from a.flow.drifted
-// and clamps the selection into the shrunk list.
+// (and the matching a.flow.diffs entry, if present) and clamps the
+// selection into the shrunk list.
 func (a *App) dropFlowDrifted() {
 	d := a.flow.drifted
 	a.flow.drifted = append(d[:a.flow.sel], d[a.flow.sel+1:]...)
+	if diffs := a.flow.diffs; a.flow.sel < len(diffs) {
+		a.flow.diffs = append(diffs[:a.flow.sel], diffs[a.flow.sel+1:]...)
+	}
 	if a.flow.sel >= len(a.flow.drifted) {
 		a.flow.sel = len(a.flow.drifted) - 1
 	}
@@ -277,23 +296,24 @@ func (a *App) removeQueueOp(vm string) {
 // openWizardFor opens the pin wizard for vm by first pointing a.vmSel at
 // its index in the freshly-scanned snapshot, then delegating to openWizard.
 // A no-op if vm is no longer present (e.g. removed from libvirt between
-// staging and the rescan) -- checked via model.Snapshot.VM rather than a
-// hand-rolled lookup loop.
+// staging and the rescan).
 func (a *App) openWizardFor(vm string) {
-	if a.snap == nil || a.snap.VM(vm) == nil {
+	if a.snap == nil {
 		return
 	}
 	for i := range a.snap.VMs {
 		if a.snap.VMs[i].Name == vm {
 			a.vmSel = i
-			break
+			a.openWizard()
+			return
 		}
 	}
-	a.openWizard()
 }
 
-// view renders whichever screen f.screen selects.
-func (f *applyFlow) view(w int) string {
+// view renders whichever screen f.screen selects. h is the terminal height
+// (0 in tests that never sent a WindowSizeMsg), used only by flowDrift to
+// budget how many diff lines it can show.
+func (f *applyFlow) view(w, h int) string {
 	var b strings.Builder
 	switch f.screen {
 	case flowReview:
@@ -314,7 +334,12 @@ func (f *applyFlow) view(w int) string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
-		b.WriteString("\n[d]iscard  [w] reopen wizard  [up/down] select")
+		if f.sel >= 0 && f.sel < len(f.diffs) {
+			b.WriteString("\n")
+			b.WriteString(capDiff(f.diffs[f.sel], diffBudget(h, len(f.drifted)+6)))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n[d]iscard  [w] reopen wizard  [up/down] select  esc back")
 	case flowResults:
 		for _, r := range f.results {
 			switch {
@@ -331,6 +356,32 @@ func (f *applyFlow) view(w int) string {
 		b.WriteString("\nany key to dismiss")
 	}
 	return b.String()
+}
+
+// capDiff truncates diff to at most max lines, appending a count of how
+// many more there were when it does.
+func capDiff(diff string, max int) string {
+	lines := strings.Split(diff, "\n")
+	if len(lines) <= max {
+		return diff
+	}
+	return strings.Join(lines[:max], "\n") + fmt.Sprintf("\n... %d more lines", len(lines)-max)
+}
+
+// diffBudget returns how many diff lines the drift screen can show given
+// the terminal height h and used other lines already spent on that
+// screen's chrome (heading, op list, blank line, key hint). An unmeasured
+// h (0, e.g. before the first WindowSizeMsg -- notably in tests that never
+// send one) falls back to a generous fixed budget instead of showing
+// nothing; a genuinely short terminal still gets a floor of 3 lines.
+func diffBudget(h, used int) int {
+	if h <= 0 {
+		return 20
+	}
+	if budget := h - used; budget >= 3 {
+		return budget
+	}
+	return 3
 }
 
 // statusBarHint returns the status bar's replacement content while the

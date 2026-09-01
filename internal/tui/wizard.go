@@ -31,16 +31,17 @@ type wizard struct {
 	cursor     int          // core index within nodeCores(base, node)
 	selected   map[int]bool // thread ids selected on the manual screen
 	stagedHash string
+	stagedXML  string // domain XML at open time (same XML stagedHash hashes), for the drift screen's diff
 	status     string // transient warning shown on the manual screen only
 }
 
 // newWizard opens a wizard for vm, seeded from proposal (screen 1) with
-// stagedHash carrying the domain XML hash to stamp on the eventual op, and
-// base the self-stripped snapshot Propose ran against (openWizard's
-// projection excluding vm's own current pins/membind) -- view and
-// updateManual render against base, not the App's plain projection, so the
-// node map agrees with the proposal it is illustrating.
-func newWizard(vm string, proposal *model.Proposal, stagedHash string, base *model.Snapshot) *wizard {
+// stagedHash/stagedXML carrying the domain XML hash/text to stamp on the
+// eventual op, and base the self-stripped snapshot Propose ran against
+// (openWizard's projection excluding vm's own current pins/membind) --
+// view and updateManual render against base, not the App's plain
+// projection, so the node map agrees with the proposal it is illustrating.
+func newWizard(vm string, proposal *model.Proposal, stagedHash, stagedXML string, base *model.Snapshot) *wizard {
 	return &wizard{
 		vm:         vm,
 		node:       proposal.Node,
@@ -48,6 +49,7 @@ func newWizard(vm string, proposal *model.Proposal, stagedHash string, base *mod
 		base:       base,
 		screen:     proposalScreen,
 		stagedHash: stagedHash,
+		stagedXML:  stagedXML,
 	}
 }
 
@@ -215,7 +217,7 @@ func (w *wizard) toggleCore(cores []hostinfo.Core) {
 // the wizard's StagedHash, formatting Summary per the fixed convention.
 func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 	threads := hostinfo.FormatCPUList(assignedThreads(pins))
-	summary := fmt.Sprintf("%s: pin %d vcpus -> node %d threads %s; memory -> node %d",
+	summary := fmt.Sprintf("%s: pin %d vcpus -> node %d threads %s; memory -> node %d (strict)",
 		w.vm, len(pins), w.node, threads, w.node)
 	if w.crossesGPUWarning() != "" {
 		summary += " (crosses GPU node)"
@@ -226,6 +228,7 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 		Pins:       copyPinsMap(pins),
 		MemNode:    w.node,
 		StagedHash: w.stagedHash,
+		StagedXML:  w.stagedXML,
 		Summary:    summary,
 	}
 }
@@ -302,7 +305,7 @@ func (a *App) openWizard() (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	a.wizard = newWizard(vm.Name, proposal, hash, base)
+	a.wizard = newWizard(vm.Name, proposal, hash, xml, base)
 	a.status = ""
 	return a, nil
 }

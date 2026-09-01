@@ -329,6 +329,38 @@ func TestRunRestore(t *testing.T) {
 	}
 }
 
+// TestRunRestoreRefusesNameMismatch covers a corrupted/mismatched backup:
+// if BackupXML's own <name> does not match op.VM, Run must refuse before
+// ever calling Define, rather than silently overwriting the wrong domain's
+// live config with someone else's backup.
+func TestRunRestoreRefusesNameMismatch(t *testing.T) {
+	fake := &libvirtio.Fake{XML: map[string]string{"gpu-vm-01": gpuVMXML}}
+	dir := t.TempDir()
+
+	op := model.PendingOp{
+		Kind:       model.OpRestore,
+		VM:         "gpu-vm-01",
+		BackupXML:  plainVMXML, // <name>plain-vm</name>, not gpu-vm-01
+		StagedHash: model.HashXML(gpuVMXML),
+		Summary:    "gpu-vm-01: restore backup",
+	}
+
+	results := Run(fake, dir, "test-version", []model.PendingOp{op})
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Err == nil {
+		t.Fatal("Err = nil, want a name-mismatch error")
+	}
+	if r.Applied {
+		t.Error("Applied = true, want false")
+	}
+	if fake.XML["gpu-vm-01"] != gpuVMXML {
+		t.Errorf("fake XML changed despite the mismatch refusal: %q", fake.XML["gpu-vm-01"])
+	}
+}
+
 // verifyMismatchHV wraps a Fake but returns a fixed, wrongly-pinned XML on
 // the second and later DomainXML calls (the post-Define verify fetch),
 // regardless of what Define actually stored. This provokes Run's verify

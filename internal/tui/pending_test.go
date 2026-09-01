@@ -54,6 +54,7 @@ func stagePlainVMPin(a *App) {
 		Pins:       map[int][]int{0: {0}, 1: {1}},
 		MemNode:    0,
 		StagedHash: model.HashXML(plainVMXML),
+		StagedXML:  plainVMXML,
 		Summary:    "plain-vm: pin 2 vcpus -> node 0 threads 0,1; memory -> node 0",
 	})
 }
@@ -251,6 +252,130 @@ func TestDriftScreenEscKeepsQueued(t *testing.T) {
 	}
 	if len(f.Defined) != 0 {
 		t.Fatalf("len(f.Defined) = %d, want 0 (no writes happened)", len(f.Defined))
+	}
+}
+
+// TestDriftScreenShowsDiff covers the drift screen's per-op diff: it must
+// show what actually changed (StagedXML vs. the current live XML), not
+// just name the drifted VM.
+func TestDriftScreenShowsDiff(t *testing.T) {
+	a, f := pendingFakeApp(t, plainVMXML)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	f.XML["plain-vm"] = plainVMXML + "\n<!-- edited behind the app's back -->"
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y')
+	drain(a, cmd)
+	if a.flow == nil || a.flow.screen != flowDrift {
+		t.Fatalf("status = %q, want the drift screen open", a.status)
+	}
+
+	view := a.flow.view(a.width, a.height)
+	if !strings.Contains(view, "+ <!-- edited behind the app's back -->") {
+		t.Fatalf("view = %q, want a diff line with the changed content", view)
+	}
+}
+
+// TestCapDiff is capDiff's self-check: under budget, unchanged; over
+// budget, truncated with a trailing count of the omitted lines.
+func TestCapDiff(t *testing.T) {
+	if got := capDiff("a\nb", 3); got != "a\nb" {
+		t.Fatalf("capDiff under budget = %q, want unchanged", got)
+	}
+	want := "a\nb\nc\n... 2 more lines"
+	if got := capDiff("a\nb\nc\nd\ne", 3); got != want {
+		t.Fatalf("capDiff over budget = %q, want %q", got, want)
+	}
+}
+
+// pendingFakeAppMulti is pendingFakeApp generalized to more than one VM,
+// for tests that need to drift/stage several domains at once.
+func pendingFakeAppMulti(t *testing.T, xmls map[string]string) (*App, *libvirtio.Fake) {
+	t.Helper()
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: xmls}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(testTopo(), doms, noNode), domsMap, nil
+	}
+	return New(f, scan, t.TempDir(), "test"), f
+}
+
+// TestDriftScreenReopenClosesFlowRegardlessOfRemaining covers 'w' with more
+// than one drifted op: it must close the whole flow immediately, even
+// though the other op is still drifted and unresolved (nothing
+// auto-applies -- the user presses 'a' again to re-review).
+func TestDriftScreenReopenClosesFlowRegardlessOfRemaining(t *testing.T) {
+	a, f := pendingFakeAppMulti(t, map[string]string{"plain-vm": plainVMXML, "vm1": vm1XML})
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	a.queue.Add(model.PendingOp{
+		Kind: model.OpPin, VM: "vm1", Pins: map[int][]int{0: {2}, 1: {3}}, MemNode: 1,
+		StagedHash: model.HashXML(vm1XML), StagedXML: vm1XML, Summary: "vm1: pin",
+	})
+
+	f.XML["plain-vm"] = plainVMXML + "\n<!-- edited -->"
+	f.XML["vm1"] = vm1XML + "\n<!-- edited -->"
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y')
+	drain(a, cmd)
+	if a.flow == nil || a.flow.screen != flowDrift {
+		t.Fatalf("status = %q, want the drift screen open with both ops drifted", a.status)
+	}
+	if len(a.flow.drifted) != 2 {
+		t.Fatalf("len(flow.drifted) = %d, want 2", len(a.flow.drifted))
+	}
+
+	sendKey(a, 'w')
+	if a.flow != nil {
+		t.Fatal("flow still open after 'w', want it closed regardless of the other still-drifted op")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 (only the reopened op removed, the other stays queued)", a.queue.Len())
+	}
+}
+
+// TestFlowGenMonotonicAcrossFlows covers the fix moving the stale-message
+// guard's counter onto App: two separate applyFlow rounds (one cancelled,
+// one completed) must never see App.flowGen go backwards or repeat.
+func TestFlowGenMonotonicAcrossFlows(t *testing.T) {
+	a, _ := pendingFakeApp(t, plainVMXML)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y') // starts a drift check round; bumps flowGen
+	firstGen := a.flowGen
+	if firstGen == 0 {
+		t.Fatal("flowGen did not advance on the first round")
+	}
+	drain(a, cmd)
+	if a.flow == nil || a.flow.screen != flowResults {
+		t.Fatalf("status = %q, want the first round to reach the results screen (clean drift check)", a.status)
+	}
+
+	dismissCmd := sendKey(a, ' ') // any key dismisses the results screen -> rescan
+	if a.flow != nil {
+		t.Fatal("flow still open after dismissing the results screen")
+	}
+	drain(a, dismissCmd)
+
+	stagePlainVMPin(a)
+	sendKey(a, 'a')
+	sendKey(a, 'y')
+	if a.flowGen <= firstGen {
+		t.Fatalf("flowGen = %d after a second round, want strictly greater than the first round's %d", a.flowGen, firstGen)
 	}
 }
 

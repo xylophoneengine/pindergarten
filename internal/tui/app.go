@@ -1,6 +1,5 @@
 // Package tui is the root Bubble Tea application: tabs, the read-only/edit
-// badge, and the status bar. Tab bodies beyond one-line placeholders are
-// filled in by later tasks.
+// badge, the status bar, and every tab body.
 package tui
 
 import (
@@ -25,8 +24,8 @@ type ScanFn func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error)
 const numTabs = 5
 
 // tabNames are the tabs, in order. The active one is rendered wrapped in
-// brackets, e.g. "[VMs]" -- Tasks 12-14 must keep that marker stable since
-// tests key off it.
+// brackets, e.g. "[VMs]" -- keep that marker stable, since tests key off
+// it.
 var tabNames = [numTabs]string{"Overview", "CPU Map", "VMs", "Pending", "Backups"}
 
 // confirm is a pending yes/no prompt. While set, Update handles only
@@ -66,10 +65,16 @@ type App struct {
 	wizard     *wizard
 	memPicker  *memNodePicker
 	flow       *applyFlow
-	reopenVM   string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
-	width      int
-	height     int
-	tabRanges  [numTabs][2]int // X ranges recorded during the last render, row 0
+	// flowGen guards against a stale driftCheckedMsg/applyDoneMsg landing
+	// on the wrong round: it only ever increases (never reset per-flow),
+	// so a leftover message from an earlier flow can never collide with a
+	// later, unrelated one the way a counter restarting at zero on every
+	// new applyFlow could.
+	flowGen   int
+	reopenVM  string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
+	width     int
+	height    int
+	tabRanges [numTabs][2]int // X ranges recorded during the last render, row 0
 }
 
 var _ tea.Model = (*App)(nil)
@@ -132,7 +137,10 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	for i, rng := range a.tabRanges {
 		if msg.X >= rng[0] && msg.X < rng[1] {
-			a.tab = i
+			if i != a.tab {
+				a.tab = i
+				a.status = ""
+			}
 			break
 		}
 	}
@@ -140,6 +148,14 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyCtrlC {
+		// Hard quit from anywhere, including every modal/screen (confirm,
+		// wizard, mem-node picker, apply flow, even flowRunning): a backup
+		// is always written before any Define, and Define itself is
+		// atomic, so there is nothing ctrl+c could leave half-written.
+		// 'q' still asks first when ops are pending; ctrl+c never does.
+		return a, tea.Quit
+	}
 	if a.confirm != nil {
 		return a.handleConfirmKey(msg)
 	}
@@ -152,19 +168,19 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.flow != nil {
 		return a.handleFlowKey(msg)
 	}
-	if a.tab == 4 && a.diffView != "" && msg.Type != tea.KeyCtrlC {
-		// Any key dismisses the diff view first, before any other
-		// handling (tab-switch digits included) can see it -- otherwise a
-		// stale diff reappears if the user later returns to the Backups
-		// tab without having dismissed it (regression: see the test
-		// exercising '1' while a diff is open). ctrl+c is the one
-		// exception, so it still quits instead of just closing the diff.
+	if a.tab == 4 && a.diffView != "" {
+		// Any key dismisses the diff view first, before any other handling
+		// (tab-switch digits included) can see it -- otherwise a stale
+		// diff reappears if the user later returns to the Backups tab
+		// without having dismissed it (regression: see the test exercising
+		// '1' while a diff is open). ctrl+c already returned above, so it
+		// still quits instead of just closing the diff.
 		a.diffView = ""
 		return a, nil
 	}
 
 	switch {
-	case msg.Type == tea.KeyCtrlC, isRune(msg, 'q'):
+	case isRune(msg, 'q'):
 		return a.requestQuit()
 	case isRune(msg, 'e'):
 		a.toggleEdit()
@@ -176,12 +192,17 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.openApplyFlow()
 	case msg.Type == tea.KeyTab:
 		a.tab = (a.tab + 1) % len(tabNames)
+		a.status = ""
 		return a, nil
 	case msg.Type == tea.KeyShiftTab:
 		a.tab = (a.tab - 1 + len(tabNames)) % len(tabNames)
+		a.status = ""
 		return a, nil
 	case msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '5':
-		a.tab = int(msg.Runes[0] - '1')
+		if next := int(msg.Runes[0] - '1'); next != a.tab {
+			a.tab = next
+			a.status = ""
+		}
 		return a, nil
 	case a.tab == 1 && (msg.Type == tea.KeyLeft || isRune(msg, 'h')):
 		a.moveCursor(-1)
@@ -313,6 +334,7 @@ func (a *App) stageStrip() (tea.Model, tea.Cmd) {
 		Kind:       model.OpStrip,
 		VM:         vm.Name,
 		StagedHash: model.HashXML(xml),
+		StagedXML:  xml,
 		Summary:    vm.Name + ": remove all pinning and memory binding",
 	}
 	a.queue.Add(op)
@@ -495,7 +517,7 @@ func (a *App) renderBody() string {
 		return a.memPicker.view()
 	}
 	if a.flow != nil {
-		return a.flow.view(a.width)
+		return a.flow.view(a.width, a.height)
 	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
@@ -527,6 +549,9 @@ func (a *App) renderStatusBar() string {
 	case a.flow != nil:
 		parts = append(parts, a.flow.statusBarHint())
 	default:
+		if a.tab == 1 {
+			parts = append(parts, "arrows/hjkl move")
+		}
 		if a.editMode && a.tab == 3 {
 			parts = append(parts, "[x] remove")
 		}
@@ -540,14 +565,19 @@ func (a *App) renderStatusBar() string {
 		if a.editMode && a.tab == 2 {
 			parts = append(parts, "[p]in", "[s]trip", "[n] mem-node")
 		}
-		if a.editMode && a.tab == 4 {
-			if a.diffView != "" {
+		if a.tab == 4 {
+			switch {
+			case a.diffView != "":
+				// Dismissing the diff isn't gated by edit mode either.
 				parts = append(parts, "any key: close")
-			} else {
+			case a.editMode:
 				parts = append(parts, "[R]estore", "enter diff")
+			default:
+				// 'enter' (show diff) isn't gated by edit mode; only R is.
+				parts = append(parts, "enter diff")
 			}
 		}
-		parts = append(parts, "[e]dit", "[q]uit")
+		parts = append(parts, "[r]escan", "[e]dit", "[q]uit")
 	}
 	return statusBarStyle.Render(strings.Join(parts, "  "))
 }

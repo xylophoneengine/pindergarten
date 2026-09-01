@@ -104,17 +104,27 @@ is on; browsing and rescanning always work in read-only mode.
 | `Tab` / `Shift+Tab` | anywhere | next / previous tab |
 | mouse click | tab bar | jump to that tab |
 | arrows / `h j k l` | CPU Map | move the selected core |
-| up/down / `j k` | VMs, Backups | move the selected row |
+| up/down / `j k` | VMs, Pending, Backups | move the selected row |
 | `e` | anywhere | toggle edit mode (confirmed) |
 | `p` | VMs (edit mode) | open the pin wizard for the selected VM |
 | `s` | VMs (edit mode) | stage stripping the selected VM's existing pin |
+| `n` | VMs (edit mode) | open the set-memory-node picker for the selected VM |
 | `x` | Pending (edit mode) | remove a staged operation from the queue |
 | `a` | any tab (edit mode) | open the apply review for all staged operations |
 | `d` | Pending (edit mode) | discard all staged operations |
 | `R` | Backups (edit mode) | stage restoring the selected backup |
 | `enter` | Backups | show a diff of the selected backup's XML against the domain's current XML |
+| any key | Backups (diff shown) | close the diff and return to the list |
 | `r` | anywhere | rescan host topology and libvirt domains |
 | `q` | anywhere | quit (confirms first if operations are pending) |
+| `ctrl+c` | anywhere | quit immediately, no confirmation (a backup is already on disk before any write, and every write is atomic) |
+
+Set memory node (after `n`):
+
+| Key | Action |
+|-----|--------|
+| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node |
+| `esc` | cancel |
 
 Pin wizard (after `p`):
 
@@ -122,7 +132,9 @@ Pin wizard (after `p`):
 |-----|--------|--------|
 | `enter` | proposal | accept the proposed pin placement |
 | `m` | proposal | switch to manual thread selection |
-| `esc` | proposal / manual | cancel back out (to VMs tab / to proposal) |
+| `esc` | proposal / manual | cancel back out (to VMs tab / to proposal, resetting any node override) |
+| `h`/`l`, up/down | manual | move the cursor across the node's cores |
+| `n` | manual | cycle the target node; warns, but never blocks, if it now differs from the VM's GPU node |
 | `space` | manual | toggle the thread pair under the cursor |
 | `enter` | manual | accept the manual selection, once it matches the VM's vCPU count |
 
@@ -132,8 +144,10 @@ Apply review and drift (after `a`, while applying):
 |-----|--------|--------|
 | `y` | apply review | confirm and run the apply sequence |
 | `n` / `esc` | apply review, or any `y`/`n` confirmation | cancel |
+| up/down / `j k` | drift screen | select a drifted operation |
 | `d` | drift screen | discard the drifted operation |
-| `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data |
+| `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data (closes the drift screen even if other operations are still drifted) |
+| `esc` | drift screen | close back to browsing; every operation, drifted or not, stays queued untouched |
 
 ## Why NUMA pinning matters
 
