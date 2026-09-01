@@ -226,6 +226,48 @@ func TestSetPinningReplacesExisting(t *testing.T) {
 	}
 }
 
+// TestSetPinningEmptyPinsPreservesCputune covers the memory-node-only case
+// (the "n" VMs-tab action): an empty pins map must leave <cputune> exactly
+// as it was -- neither stripping an existing one nor fabricating an empty
+// one where there was none -- while still applying numatune.
+func TestSetPinningEmptyPinsPreservesCputune(t *testing.T) {
+	cases := []struct {
+		name string
+		xml  string
+	}{
+		{"existing cputune", gpuVMXML},
+		{"no cputune", plainVMXML},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before, err := ParseDomainXML(tc.xml)
+			if err != nil {
+				t.Fatalf("ParseDomainXML(before): %v", err)
+			}
+
+			out, err := SetPinning(tc.xml, map[int][]int{}, 0)
+			if err != nil {
+				t.Fatalf("SetPinning: %v", err)
+			}
+
+			if tc.name == "no cputune" && strings.Contains(out, "<cputune") {
+				t.Errorf("output = %q, want no <cputune> fabricated when pins is empty and none existed", out)
+			}
+
+			after, err := ParseDomainXML(out)
+			if err != nil {
+				t.Fatalf("ParseDomainXML(after): %v", err)
+			}
+			if !reflect.DeepEqual(after.VCPUPins, before.VCPUPins) {
+				t.Errorf("VCPUPins = %v, want unchanged %v", after.VCPUPins, before.VCPUPins)
+			}
+			if !reflect.DeepEqual(after.MemNodes, []int{0}) {
+				t.Errorf("MemNodes = %v, want [0]", after.MemNodes)
+			}
+		})
+	}
+}
+
 func TestStripPinning(t *testing.T) {
 	out, err := StripPinning(gpuVMXML)
 	if err != nil {

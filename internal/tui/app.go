@@ -64,6 +64,7 @@ type App struct {
 	status     string
 	confirm    *confirm
 	wizard     *wizard
+	memPicker  *memNodePicker
 	flow       *applyFlow
 	reopenVM   string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
 	width      int
@@ -145,6 +146,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.wizard != nil {
 		return a.handleWizardKey(msg)
 	}
+	if a.memPicker != nil {
+		return a.handleMemNodeKey(msg)
+	}
 	if a.flow != nil {
 		return a.handleFlowKey(msg)
 	}
@@ -201,6 +205,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.openWizard()
 	case a.tab == 2 && isRune(msg, 's'):
 		return a.stageStrip()
+	case a.tab == 2 && isRune(msg, 'n'):
+		return a.openMemNodePicker()
 	case a.tab == 3 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.movePendingSel(-1)
 		return a, nil
@@ -485,6 +491,9 @@ func (a *App) renderBody() string {
 	if a.wizard != nil {
 		return a.wizard.view()
 	}
+	if a.memPicker != nil {
+		return a.memPicker.view()
+	}
 	if a.flow != nil {
 		return a.flow.view(a.width)
 	}
@@ -513,6 +522,8 @@ func (a *App) renderStatusBar() string {
 	switch {
 	case a.wizard != nil:
 		parts = append(parts, a.wizard.statusBarHint())
+	case a.memPicker != nil:
+		parts = append(parts, a.memPicker.statusBarHint())
 	case a.flow != nil:
 		parts = append(parts, a.flow.statusBarHint())
 	default:
@@ -527,7 +538,7 @@ func (a *App) renderStatusBar() string {
 			parts = append(parts, "[d]iscard")
 		}
 		if a.editMode && a.tab == 2 {
-			parts = append(parts, "[p]in", "[s]trip")
+			parts = append(parts, "[p]in", "[s]trip", "[n] mem-node")
 		}
 		if a.editMode && a.tab == 4 {
 			if a.diffView != "" {

@@ -248,6 +248,48 @@ func TestRunStopsOnDefineError(t *testing.T) {
 	}
 }
 
+// TestRunMemNodeOnlyPreservesPins covers the memory-node-only VMs-tab
+// action end to end: Pins empty, MemNode set, against a VM that already
+// has cputune pins. Both the live domain's existing pins and the new
+// numatune binding must land.
+func TestRunMemNodeOnlyPreservesPins(t *testing.T) {
+	fake := &libvirtio.Fake{XML: map[string]string{"gpu-vm-01": gpuVMXML}}
+	dir := t.TempDir()
+
+	op := model.PendingOp{
+		Kind:       model.OpPin,
+		VM:         "gpu-vm-01",
+		Pins:       map[int][]int{},
+		MemNode:    0,
+		StagedHash: model.HashXML(gpuVMXML),
+		Summary:    "gpu-vm-01: memory -> node 0 (strict); vcpu pinning unchanged",
+	}
+
+	results := Run(fake, dir, "test-version", []model.PendingOp{op})
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Err != nil {
+		t.Fatalf("Err = %v, want nil", r.Err)
+	}
+	if !r.Applied {
+		t.Fatal("Applied = false, want true")
+	}
+
+	cfg, err := libvirtio.ParseDomainXML(fake.XML["gpu-vm-01"])
+	if err != nil {
+		t.Fatalf("ParseDomainXML(stored xml): %v", err)
+	}
+	wantPins := map[int][]int{0: {4}, 1: {68}}
+	if !reflect.DeepEqual(cfg.VCPUPins, wantPins) {
+		t.Errorf("VCPUPins = %v, want unchanged %v", cfg.VCPUPins, wantPins)
+	}
+	if !reflect.DeepEqual(cfg.MemNodes, []int{0}) {
+		t.Errorf("MemNodes = %v, want [0]", cfg.MemNodes)
+	}
+}
+
 func TestRunRestore(t *testing.T) {
 	fake := &libvirtio.Fake{XML: map[string]string{"gpu-vm-01": gpuVMXML}}
 	dir := t.TempDir()

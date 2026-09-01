@@ -141,7 +141,11 @@ func verify(h libvirtio.Hypervisor, op model.PendingOp) error {
 			return fmt.Errorf("memnodes not empty: %v", cfg.MemNodes)
 		}
 	case model.OpPin:
-		if !reflect.DeepEqual(normalizePins(cfg.VCPUPins), normalizePins(op.Pins)) {
+		// An empty Pins means "no cputune opinion" (a memory-node-only
+		// change): SetPinning leaves the live cputune untouched, which can
+		// legitimately be non-empty, so only compare when Pins says
+		// something.
+		if len(op.Pins) > 0 && !reflect.DeepEqual(normalizePins(cfg.VCPUPins), normalizePins(op.Pins)) {
 			return fmt.Errorf("vcpupins mismatch: got %v want %v", cfg.VCPUPins, op.Pins)
 		}
 		if op.MemNode >= 0 {

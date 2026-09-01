@@ -183,31 +183,37 @@ func loadDomain(raw string) (*etree.Document, *etree.Element, error) {
 
 // SetPinning replaces all vcpupin entries with pins and, when memNode >= 0,
 // sets <numatune><memory mode='strict' nodeset='<memNode>'/>. memNode < 0
-// leaves numatune untouched. Only <cputune> and <numatune> are modified;
-// everything else in raw is preserved.
+// leaves numatune untouched. An empty (or nil) pins leaves <cputune>
+// entirely untouched instead of clearing it -- callers that only want to
+// change numatune (a memory-node-only action) pass the VM's own current
+// pins back in when there are any, but an empty map means "no cputune
+// opinion here", not "erase vcpu pinning". Only <cputune> and <numatune>
+// are modified; everything else in raw is preserved.
 func SetPinning(raw string, pins map[int][]int, memNode int) (string, error) {
 	doc, domain, err := loadDomain(raw)
 	if err != nil {
 		return "", err
 	}
 
-	cputune := domain.SelectElement("cputune")
-	if cputune == nil {
-		cputune = domain.CreateElement("cputune")
-	} else {
-		for _, pin := range cputune.SelectElements("vcpupin") {
-			cputune.RemoveChild(pin)
+	if len(pins) > 0 {
+		cputune := domain.SelectElement("cputune")
+		if cputune == nil {
+			cputune = domain.CreateElement("cputune")
+		} else {
+			for _, pin := range cputune.SelectElements("vcpupin") {
+				cputune.RemoveChild(pin)
+			}
 		}
-	}
-	vcpus := make([]int, 0, len(pins))
-	for vcpu := range pins {
-		vcpus = append(vcpus, vcpu)
-	}
-	sort.Ints(vcpus)
-	for _, vcpu := range vcpus {
-		pin := cputune.CreateElement("vcpupin")
-		pin.CreateAttr("vcpu", strconv.Itoa(vcpu))
-		pin.CreateAttr("cpuset", hostinfo.FormatCPUList(pins[vcpu]))
+		vcpus := make([]int, 0, len(pins))
+		for vcpu := range pins {
+			vcpus = append(vcpus, vcpu)
+		}
+		sort.Ints(vcpus)
+		for _, vcpu := range vcpus {
+			pin := cputune.CreateElement("vcpupin")
+			pin.CreateAttr("vcpu", strconv.Itoa(vcpu))
+			pin.CreateAttr("cpuset", hostinfo.FormatCPUList(pins[vcpu]))
+		}
 	}
 
 	if memNode >= 0 {

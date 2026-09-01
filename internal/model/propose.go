@@ -46,7 +46,7 @@ func Propose(s *Snapshot, vmName string) (*Proposal, error) {
 		node = pickNode(s, vm)
 		rationale = append(rationale, fmt.Sprintf(
 			"Node %d was chosen because it has %d KiB free memory (%d KiB needed) and %d fully free core(s), the best of the host's NUMA nodes.",
-			node, freeMemKiB(s, node), vm.MemoryKiB, fullyFreeCoreCount(s, node)))
+			node, FreeMemKiB(s, node), vm.MemoryKiB, fullyFreeCoreCount(s, node)))
 	}
 
 	// Step 3 (capacity half): the node must have at least VCPUs threads in
@@ -70,7 +70,7 @@ func Propose(s *Snapshot, vmName string) (*Proposal, error) {
 	// Step 4: memory is a soft constraint. If the chosen node (forced by
 	// the GPU or picked by ranking) does not have enough free memory,
 	// proceed anyway but warn about the shortfall.
-	free := freeMemKiB(s, node)
+	free := FreeMemKiB(s, node)
 	if free < vm.MemoryKiB {
 		warnings = append(warnings, fmt.Sprintf(
 			"Node %d has only %d KiB free but this VM needs %d KiB; the memory binding proceeds anyway.",
@@ -108,11 +108,11 @@ func gpuDevice(vm *VM) *Device {
 // ID on a tie.
 func pickNode(s *Snapshot, vm *VM) int {
 	best := s.Topo.Nodes[0].ID
-	bestMemOK := freeMemKiB(s, best) >= vm.MemoryKiB
+	bestMemOK := FreeMemKiB(s, best) >= vm.MemoryKiB
 	bestFreeCores := fullyFreeCoreCount(s, best)
 
 	for _, n := range s.Topo.Nodes[1:] {
-		memOK := freeMemKiB(s, n.ID) >= vm.MemoryKiB
+		memOK := FreeMemKiB(s, n.ID) >= vm.MemoryKiB
 		freeCores := fullyFreeCoreCount(s, n.ID)
 		if betterNode(memOK, freeCores, bestMemOK, bestFreeCores) {
 			best, bestMemOK, bestFreeCores = n.ID, memOK, freeCores
@@ -132,11 +132,11 @@ func betterNode(memOK bool, freeCores int, bestMemOK bool, bestFreeCores int) bo
 	return freeCores > bestFreeCores
 }
 
-// freeMemKiB is a node's ranking-time free memory: total minus what is
+// FreeMemKiB is a node's ranking-time free memory: total minus what is
 // already bound there, floored at zero (BoundMemKiB can exceed total under
 // FlagMemPressure). Deliberately not MemFreeKiB, which is live kernel data
 // the wizard has no business consulting for a config-only proposal.
-func freeMemKiB(s *Snapshot, node int) uint64 {
+func FreeMemKiB(s *Snapshot, node int) uint64 {
 	var total uint64
 	for _, n := range s.Topo.Nodes {
 		if n.ID == node {
