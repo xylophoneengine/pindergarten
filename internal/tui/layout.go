@@ -50,18 +50,32 @@ func splitBodyWidth(w int) (primary, secondary int, sideBySide bool) {
 	return w, w, false
 }
 
-// equalSplit returns the per-card width for n equal cards across total
-// width w, and whether they fit side by side (each >= minW) rather than
-// needing to stack at full width.
-func equalSplit(w, n, minW int) (cardW int, sideBySide bool) {
+// equalSplit returns each of n cards' width across total width w (the last
+// few a column wider than the rest when w - (n-1) doesn't divide evenly by
+// n, so the row's right edge is used rather than left as a gap), and
+// whether they fit side by side (the smallest share >= minW) rather than
+// needing to stack at full width (every card then gets w).
+func equalSplit(w, n, minW int) (widths []int, sideBySide bool) {
 	if n <= 1 {
-		return w, false
+		return []int{w}, false
 	}
-	each := (w - (n - 1)) / n
-	if each >= minW {
-		return each, true
+	share := w - (n - 1) // reserve the n-1 1-column gaps between cards
+	base, extra := share/n, share%n
+	if base < minW {
+		widths = make([]int, n)
+		for i := range widths {
+			widths[i] = w
+		}
+		return widths, false
 	}
-	return w, false
+	widths = make([]int, n)
+	for i := range widths {
+		widths[i] = base
+		if i >= n-extra { // the last `extra` cards get the +1 remainder
+			widths[i]++
+		}
+	}
+	return widths, true
 }
 
 // joinPanels arranges pre-rendered equal-height-ish panels side by side
@@ -336,6 +350,38 @@ func clipHitsToWindow(hits []hit, budget int) []hit {
 	return out
 }
 
+// dialogMaxWidth is the widest a centered dialog (wizard, mem-node picker,
+// confirm, apply-flow screen) ever renders at, regardless of how wide the
+// terminal is.
+const dialogMaxWidth = 90
+
+// dialogWidth returns the width to render a centered dialog at: narrower
+// than the terminal (w-4, so it visibly floats over the body) but never
+// wider than dialogMaxWidth, so a very wide terminal doesn't stretch it
+// edge to edge.
+func dialogWidth(w int) int {
+	limit := w - 4
+	if limit > dialogMaxWidth {
+		limit = dialogMaxWidth
+	}
+	if limit < 4 {
+		limit = 4
+	}
+	return limit
+}
+
+// centerDialog horizontally centers body (already rendered at some width
+// <= w) within a total width of w. Returns the placed string plus the
+// x-offset (columns of left padding) the placement added, since a caller
+// with recorded hit regions needs to shift their x by that same amount.
+func centerDialog(body string, w int) (string, int) {
+	x := (w - lipgloss.Width(body)) / 2
+	if x < 0 {
+		x = 0
+	}
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, body), x
+}
+
 // bar renders a fixed-width single-tone ASCII progress bar, e.g.
 // "[||||......]", filled cells in fillStyle and the rest dim.
 func bar(width int, frac float64, fillStyle lipgloss.Style) string {
@@ -375,6 +421,16 @@ func barCells(inner int, frac float64) int {
 		n = inner
 	}
 	return n
+}
+
+// pluralize renders "N <noun>" with an "s" suffix unless n is exactly 1,
+// e.g. pluralize(1, "pending op") -> "1 pending op", pluralize(0, ...) and
+// pluralize(2, ...) -> "0 pending ops"/"2 pending ops".
+func pluralize(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // keyHint is one "[key] label" token in the bottom key bar.

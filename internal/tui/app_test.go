@@ -139,13 +139,21 @@ func TestEditBlockedWhenRO(t *testing.T) {
 	}
 }
 
+// activeTabName reports which tab a considers active. The tab pill's own
+// text carries no bracket/marker (both active and inactive tabs render
+// "Name" identically padded; only the style -- a filled pill vs. dimmed --
+// tells them apart), so tests check this directly rather than grepping
+// rendered output for a marker.
+func activeTabName(a *App) string {
+	return tabNames[a.tab]
+}
+
 func TestTabSwitch(t *testing.T) {
 	a := testApp(t, false)
 
 	sendKey(a, '3')
-	view := a.View()
-	if !strings.Contains(view, "[VMs]") {
-		t.Fatalf("View() after '3' = %q, want [VMs] active marker", view)
+	if got := activeTabName(a); got != "VMs" {
+		t.Fatalf("active tab after '3' = %q, want VMs", got)
 	}
 }
 
@@ -198,9 +206,8 @@ func TestMouseClickSwitchesTab(t *testing.T) {
 	rng := a.tabRanges[2] // VMs
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 
-	view := a.View()
-	if !strings.Contains(view, "[VMs]") {
-		t.Fatalf("View() after click on VMs label = %q, want [VMs] active marker", view)
+	if got := activeTabName(a); got != "VMs" {
+		t.Fatalf("active tab after click on the VMs label = %q, want VMs", got)
 	}
 }
 
@@ -657,10 +664,10 @@ func TestBackupsDiffHeightBudgetAndWheelScroll(t *testing.T) {
 }
 
 // TestMouseClickInDetailPanelDoesNotChangeSelection covers the fix for row
-// hits spanning the whole line width (hitWide): in the VMs tab's
-// side-by-side layout, a click that lands inside the *detail* panel (to
-// the right of the table) must not be mistaken for a click on whatever
-// table row happens to share that y.
+// hits that used to span the whole line width regardless of panel bounds:
+// in the VMs tab's side-by-side layout, a click that lands inside the
+// *detail* panel (to the right of the table) must not be mistaken for a
+// click on whatever table row happens to share that y.
 func TestMouseClickInDetailPanelDoesNotChangeSelection(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
@@ -717,6 +724,36 @@ func TestSmokeRenderAllTabs(t *testing.T) {
 		a.tab = i
 		t.Logf("=== tab %d (%s) ===\n%s", i, name, a.View())
 	}
+}
+
+// TestSmokeRenderFixRound1 is not a correctness check: it renders Overview,
+// the VMs tab (with 40 VMs, to show the height-budget scrolling fix), and
+// the Backups tab's diff view (a large diff, same reason) at width 120,
+// height 24, logging each via t.Log (run with -v) for the fix-round-1
+// report.
+func TestSmokeRenderFixRound1(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(40), noNode)
+	runScan(t, a)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	enterEdit(a)
+	a.vmSel = 39
+
+	a.tab = 0
+	t.Logf("=== Overview (width 120, height 24) ===\n%s", a.View())
+
+	a.tab = 2
+	t.Logf("=== VMs, 40 VMs, vmSel=39 (width 120, height 24) ===\n%s", a.View())
+
+	bigXML := plainVMXML + "\n" + strings.Repeat("  <!-- padding line -->\n", 300)
+	if _, err := backup.Save(a.backupDir, "vm00", "pin", "test", bigXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	a.tab = 4
+	sendKeyType(a, tea.KeyEnter)
+	if a.diffView == "" {
+		t.Fatal("diff view did not open")
+	}
+	t.Logf("=== Backups diff view, 300-line diff (width 120, height 24) ===\n%s", a.View())
 }
 
 func TestRescanSetsStatus(t *testing.T) {

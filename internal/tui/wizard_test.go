@@ -396,6 +396,33 @@ func TestWizardManualEscResetsNode(t *testing.T) {
 	}
 }
 
+// TestWizardDialogIsCenteredAndWidthCapped covers the wizard's dialog
+// treatment: at a terminal much wider than dialogMaxWidth, the panel must
+// be capped (its top border narrower than the terminal) and horizontally
+// centered (padded with roughly equal blank space on both sides).
+func TestWizardDialogIsCenteredAndWidthCapped(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+
+	view, _ := a.wizard.view(300, 40)
+	lines := strings.Split(view, "\n")
+	top := lines[0]
+	trimmed := strings.TrimLeft(top, " ")
+	if w := lipgloss.Width(trimmed); w >= 300 {
+		t.Fatalf("wizard dialog panel width = %d, want it capped well under the 300-column terminal", w)
+	}
+	leading := len(top) - len(trimmed)
+	if leading < 50 {
+		t.Fatalf("wizard dialog top border = %q, want it visibly centered (a large left margin at width 300)", top)
+	}
+}
+
 // TestMouseClickTogglesWizardManualCore covers a click on the wizard's
 // manual screen node map: it must move the cursor to the clicked core and
 // toggle it, same as moving there with the arrow keys and pressing space.
@@ -598,8 +625,13 @@ func TestWizardViewRendersRationale(t *testing.T) {
 	}
 
 	view, _ := a.wizard.view(200, 40)
-	if !strings.Contains(view, a.wizard.proposal.Rationale[0]) {
-		t.Fatalf("wizard.view() = %q, want the first Rationale sentence", view)
+	// The dialog is capped at dialogMaxWidth regardless of the terminal
+	// width, so a long sentence word-wraps across lines even at width 200
+	// -- check a short, guaranteed-single-line prefix rather than the
+	// whole (possibly-wrapped) sentence.
+	prefix := a.wizard.proposal.Rationale[0][:30]
+	if !strings.Contains(view, prefix) {
+		t.Fatalf("wizard.view() = %q, want the first Rationale sentence (prefix %q)", view, prefix)
 	}
 }
 
@@ -632,8 +664,12 @@ func TestWizardViewRendersWarning(t *testing.T) {
 	}
 
 	view, _ := a.wizard.view(200, 40)
-	if !strings.Contains(view, a.wizard.proposal.Warnings[0]) {
-		t.Fatalf("wizard.view() = %q, want the Warning sentence", view)
+	// See TestWizardViewRendersRationale: the dialog is capped at
+	// dialogMaxWidth regardless of the terminal width, so check a
+	// guaranteed-single-line prefix rather than the whole sentence.
+	prefix := a.wizard.proposal.Warnings[0][:30]
+	if !strings.Contains(view, prefix) {
+		t.Fatalf("wizard.view() = %q, want the Warning sentence (prefix %q)", view, prefix)
 	}
 }
 

@@ -102,10 +102,10 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 // columns, else stacked), followed by a one-line-per-VM list of any
 // domains flagged Unsupported.
 func renderOverviewTab(s *model.Snapshot, w int) string {
-	cardW, sideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
+	cardWidths, sideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
 	panels := make([]string, len(s.Topo.Nodes))
 	for i, node := range s.Topo.Nodes {
-		panels[i] = panel(fmt.Sprintf("node %d", node.ID), overviewNodeCard(s, node), cardW)
+		panels[i] = panel(fmt.Sprintf("node %d", node.ID), overviewNodeCard(s, node), cardWidths[i])
 	}
 	out := joinPanels(panels, sideBySide)
 
@@ -197,7 +197,7 @@ func localCoreIndex(idx []int, target int) int {
 // way there is for a table).
 func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
-	nodePanelW, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
+	nodePanelWidths, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
 
 	naturalNodeLines := 0
 	for _, node := range s.Topo.Nodes {
@@ -233,13 +233,13 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		for j := range gridHits {
 			gridHits[j].index = idx[gridHits[j].index]
 		}
-		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelW, nodeBudget)
+		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], nodeBudget)
 		panels[i] = p
 
 		gridHits = offsetHits(clipHitsToWindow(gridHits, kept), 1, 1) // border
 		if nodeSideBySide {
 			hits = append(hits, offsetHits(gridHits, 0, cumX)...)
-			cumX += nodePanelW + 1 // +1 for joinPanels' 1-column gap
+			cumX += nodePanelWidths[i] + 1 // +1 for joinPanels' 1-column gap
 		} else {
 			hits = append(hits, offsetHits(gridHits, cumY, 0)...)
 			cumY += lineCount(p)
@@ -555,10 +555,34 @@ func renderVMs(cols []vmCol, sel, w, rowBudget int) (string, []hit) {
 	return strings.Join(lines, "\n"), hits
 }
 
+// flagBulletIndent is the width of "- [!] " -- a flag bullet's continuation
+// lines are indented this many spaces, so wrapped text still lines up
+// under the sentence rather than the "- [!] " marker.
+const flagBulletIndent = 6
+
+// wrapFlagBullet renders one flag's "- [!] <sentence>" bullet, word-
+// wrapping the sentence to width-flagBulletIndent and indenting every
+// continuation line by flagBulletIndent spaces so it lines up under the
+// first line's text rather than restarting at column 0.
+func wrapFlagBullet(sentence string, width int) string {
+	contentW := width - flagBulletIndent
+	if contentW < 1 {
+		contentW = 1
+	}
+	lines := strings.Split(lipgloss.NewStyle().Width(contentW).Render(sentence), "\n")
+	var b strings.Builder
+	fmt.Fprintf(&b, "- %s %s", warningStyle.Render("[!]"), lines[0])
+	for _, l := range lines[1:] {
+		b.WriteString("\n" + strings.Repeat(" ", flagBulletIndent) + l)
+	}
+	return b.String()
+}
+
 // vmDetail renders the detail panel for the VM at index sel: a key/value
 // grid (state, vcpus, mem, pins, mem node, gpu node), then one "[!] <Cause>
-// <Consequence>" bullet per flag. Returns "" for an out-of-range index.
-func vmDetail(s *model.Snapshot, sel int) string {
+// <Consequence>" bullet per flag (word-wrapped to width with a hanging
+// indent under the text). Returns "" for an out-of-range index.
+func vmDetail(s *model.Snapshot, sel, width int) string {
 	if sel < 0 || sel >= len(s.VMs) {
 		return ""
 	}
@@ -584,7 +608,8 @@ func vmDetail(s *model.Snapshot, sel int) string {
 		fmt.Fprintf(&b, "%s  %s\n", padRight(r[0], keyW), r[1])
 	}
 	for _, f := range v.Flags {
-		fmt.Fprintf(&b, "- %s %s %s\n", warningStyle.Render("[!]"), f.Cause, f.Consequence)
+		b.WriteString(wrapFlagBullet(f.Cause+" "+f.Consequence, width))
+		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -621,7 +646,7 @@ func renderVMsTab(s *model.Snapshot, sel, w, budget int) (string, []hit) {
 	}
 	var detailPanel string
 	if secondaryBudget > 0 {
-		detailPanel, _ = panelWrapH(title, vmDetail(s, sel), secondaryW, secondaryBudget)
+		detailPanel, _ = panelWrapH(title, vmDetail(s, sel, secondaryW-2), secondaryW, secondaryBudget)
 	}
 
 	if sideBySide {

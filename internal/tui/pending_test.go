@@ -82,7 +82,7 @@ func TestApplyHappyPath(t *testing.T) {
 	if view := a.View(); !strings.Contains(view, "backup will be written first; takes effect on next VM boot") {
 		t.Fatalf("View() = %q, want the review screen's per-op effect line", view)
 	}
-	if view := a.View(); !strings.Contains(view, "1 pending ops") {
+	if view := a.View(); !strings.Contains(view, "1 pending op") {
 		t.Fatalf("View() = %q, want the status bar's pending-op count while the review screen is open", view)
 	}
 

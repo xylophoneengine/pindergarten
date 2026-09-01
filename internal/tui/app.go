@@ -82,11 +82,6 @@ type App struct {
 // tab row (row 0) and the header line.
 const bodyY0 = 2
 
-// hitWide is used as a hit's x1 for rows meant to be clickable across their
-// whole width (VM/Pending/Backups/mem-node-picker rows), rather than one
-// bounded to an exact rendered column span.
-const hitWide = 1 << 20
-
 // hit is one clickable body region recorded during the last render, in
 // screen-absolute rows/columns (y0/x0 inclusive, y1/x1 exclusive). kind
 // names which list/grid it belongs to; index is the row/core/node index
@@ -536,7 +531,7 @@ func (a *App) requestQuit() (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 	a.confirm = &confirm{
-		prompt: fmt.Sprintf("Discard %d pending ops and quit? [y/n]", n),
+		prompt: fmt.Sprintf("Discard %s and quit? [y/n]", pluralize(n, "pending op")),
 		yes:    func() tea.Cmd { return tea.Quit },
 	}
 	return a, nil
@@ -629,7 +624,10 @@ func (a *App) View() string {
 		b.WriteString("\n")
 	}
 	if a.confirm != nil {
-		b.WriteString(panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", effectiveWidth(a.width)))
+		w := effectiveWidth(a.width)
+		confirmPanel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
+		centered, _ := centerDialog(confirmPanel, w)
+		b.WriteString(centered)
 		b.WriteString("\n")
 	}
 	b.WriteString(keyBar)
@@ -708,16 +706,11 @@ func (a *App) renderTabs() string {
 	var line strings.Builder
 	x := 0
 	for i, name := range tabNames {
-		label := " " + name + " "
-		if i == a.tab {
-			label = "[" + name + "]"
-		}
-
 		style := tabInactiveStyle
 		if i == a.tab {
 			style = tabActiveStyle
 		}
-		rendered := style.Render(label)
+		rendered := style.Render(name)
 
 		start := x
 		x += lipgloss.Width(rendered)
@@ -820,22 +813,26 @@ func (a *App) renderDiffView(w, budget int) string {
 // can be one line per applied op and there's no other "selected row" to
 // derive a window from.
 func (a *App) renderFlow(w, budget int) string {
+	dw := dialogWidth(w)
+	var out string
 	if a.flow.screen != flowResults {
-		panel, _ := panelWrapH(flowTitle(a.flow.screen), a.flow.view(w, budget), w, budget)
-		return panel
+		out, _ = panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget)
+	} else {
+		inner := dw - 2
+		if inner < 1 {
+			inner = 1
+		}
+		lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)), "\n")
+		contentBudget := budget - 2
+		visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
+		body := strings.Join(visible, "\n")
+		if footer := scrollFooter(offset, len(visible), total); footer != "" {
+			body += "\n" + keyBarLabelStyle.Render(footer)
+		}
+		out = panelInner(flowTitle(a.flow.screen), body, dw)
 	}
-	inner := w - 2
-	if inner < 1 {
-		inner = 1
-	}
-	lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(w, budget)), "\n")
-	contentBudget := budget - 2
-	visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
-	body := strings.Join(visible, "\n")
-	if footer := scrollFooter(offset, len(visible), total); footer != "" {
-		body += "\n" + keyBarLabelStyle.Render(footer)
-	}
-	return panelInner(flowTitle(a.flow.screen), body, w)
+	centered, _ := centerDialog(out, w)
+	return centered
 }
 
 // flowTitle names the apply-flow panel by its current screen.
@@ -858,7 +855,7 @@ func flowTitle(screen flowScreen) string {
 // right now. While a wizard/mem-node-picker/apply-flow screen is open, its
 // own (unstyled) hint line replaces the default set.
 func (a *App) renderStatusBar() string {
-	pending := fmt.Sprintf("%d pending ops", a.queue.Len())
+	pending := pluralize(a.queue.Len(), "pending op")
 
 	switch {
 	case a.wizard != nil:

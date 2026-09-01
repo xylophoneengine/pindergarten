@@ -326,7 +326,10 @@ func (a *App) openWizardFor(vm string) {
 
 // view renders whichever screen f.screen selects. h is the terminal height
 // (0 in tests that never sent a WindowSizeMsg), used only by flowDrift to
-// budget how many diff lines it can show.
+// budget how many diff lines it can show. Key hints aren't repeated here
+// -- the status bar (statusBarHint) is their one place -- except the
+// per-op "backup will be written first" effect line, which isn't a key
+// hint.
 func (f *applyFlow) view(w, h int) string {
 	var b strings.Builder
 	switch f.screen {
@@ -335,26 +338,32 @@ func (f *applyFlow) view(w, h int) string {
 		for i, op := range f.ops {
 			fmt.Fprintf(&b, "%d. %s\n   backup will be written first; takes effect on next VM boot\n", i+1, op.Summary)
 		}
-		b.WriteString("\n[y] confirm  [n]/esc cancel")
 	case flowRunning:
 		b.WriteString(f.running)
 	case flowDrift:
-		b.WriteString("Drift detected -- these VMs changed since staging:\n\n")
+		var head strings.Builder
+		head.WriteString("Drift detected -- these VMs changed since staging:\n\n")
 		for i, op := range f.drifted {
 			line := fmt.Sprintf("%d. %s", i+1, op.Summary)
 			if i == f.sel {
 				line = cursorStyle.Render(line)
 			}
-			b.WriteString(line)
-			b.WriteString("\n")
+			head.WriteString(line)
+			head.WriteString("\n")
 		}
+		b.WriteString(head.String())
 		if f.sel >= 0 && f.sel < len(f.diffs) {
 			b.WriteString("\n")
 			diff := truncateLines(colorDiff(f.diffs[f.sel]), w-2)
-			b.WriteString(capDiff(diff, diffBudget(h, len(f.drifted)+6)))
+			// used counts the lines actually rendered above the diff (the
+			// heading/op-list block plus the blank line just written), not
+			// a guess derived from len(f.drifted) -- a long op Summary
+			// wrapping to more than one line, or many drifted ops, is
+			// reflected exactly rather than approximated.
+			used := lineCount(head.String()) + 1
+			b.WriteString(capDiff(diff, diffBudget(h, used)))
 			b.WriteString("\n")
 		}
-		b.WriteString("\n[d]iscard  [w] reopen wizard  [up/down] select  esc back")
 	case flowResults:
 		for _, r := range f.results {
 			switch {
@@ -369,9 +378,8 @@ func (f *applyFlow) view(w, h int) string {
 			}
 			b.WriteString("\n")
 		}
-		b.WriteString("\nany key to dismiss")
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // capDiff truncates diff to at most max lines, appending a count of how
@@ -538,7 +546,7 @@ func (a *App) discardAllPending() (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.confirm = &confirm{
-		prompt: fmt.Sprintf("Discard all %d pending ops? [y/n]", n),
+		prompt: fmt.Sprintf("Discard all %s? [y/n]", pluralize(n, "pending op")),
 		yes: func() tea.Cmd {
 			a.queue.Clear()
 			a.pendingSel = 0

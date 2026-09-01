@@ -234,14 +234,16 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 }
 
 // view renders the active screen against w.base (the self-stripped snapshot
-// Propose ran against, used for the node map's live pin state): a titled
-// node-map panel (grid content, so it truncates rather than wraps) and an
-// info panel below it (prose, so it wraps), both trimmed to fit budget.
-// Alongside the string it returns the manual screen's per-core hits,
-// screen-absolute (0-based relative to the wizard body's own top-left
-// corner) -- the proposal screen's map isn't clickable, so it reports
-// none.
+// Propose ran against, used for the node map's live pin state) as a
+// centered dialog (dialogWidth(width) wide): a titled node-map panel (grid
+// content, so it truncates rather than wraps) and an info panel below it
+// (prose, so it wraps), both trimmed to fit budget. Alongside the string
+// it returns the manual screen's per-core hits, screen-absolute (0-based
+// relative to the wizard body's own top-left corner, already shifted by
+// the centering offset) -- the proposal screen's map isn't clickable, so
+// it reports none.
 func (w *wizard) view(width, budget int) (string, []hit) {
+	dw := dialogWidth(width)
 	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d", w.vm, w.vcpus(), w.node)
 
 	var grid string
@@ -259,7 +261,6 @@ func (w *wizard) view(width, budget int) (string, []hit) {
 			info.WriteString(warningStyle.Render(wm))
 			info.WriteString("\n")
 		}
-		info.WriteString("\n[enter] accept  [m] manual  [esc] cancel")
 	case manualScreen:
 		grid, gridHits = renderNodeMap(w.base, w.node, w.selected, w.cursor, "wizardcore")
 		fmt.Fprintf(&info, "selected %d/%d\n", len(w.selected), w.vcpus())
@@ -274,16 +275,18 @@ func (w *wizard) view(width, budget int) (string, []hit) {
 	}
 
 	gridBudget, infoBudget := splitStackedBudget(budget, lineCount(grid))
-	gridPanel, kept := panelH(title, grid, width, gridBudget)
+	gridPanel, kept := panelH(title, grid, dw, gridBudget)
 	hits := offsetHits(clipHitsToWindow(gridHits, kept), 1, 1)
 	infoPanel := ""
 	if infoBudget > 0 {
-		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), width, infoBudget)
+		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), dw, infoBudget)
 	}
-	if infoPanel == "" {
-		return gridPanel, hits
+	out := gridPanel
+	if infoPanel != "" {
+		out = gridPanel + "\n" + infoPanel
 	}
-	return gridPanel + "\n" + infoPanel, hits
+	centered, xOff := centerDialog(out, width)
+	return centered, offsetHits(hits, 0, xOff)
 }
 
 // statusBarHint returns the status bar's replacement content while the

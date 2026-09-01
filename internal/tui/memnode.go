@@ -92,32 +92,37 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 }
 
 // view renders the node list (with free memory) and the VM's GPU node, if
-// any, inside a titled panel, trimmed to fit budget. Alongside the string
-// it returns one "memnode" hit per node line (dropped if scrolled out of
-// view), screen-absolute (0-based relative to the picker body's own
-// top-left corner), indexed by node ID (so a click maps straight onto the
-// same pickMemNode path as its digit key).
+// any, inside a titled panel, trimmed to fit budget, as a centered dialog
+// (dialogWidth(width) wide). Alongside the string it returns one "memnode"
+// hit per node line (dropped if scrolled out of view), bounded to the
+// panel's inner width (so a click in the blank space centering leaves
+// beside it can't land on it), screen-absolute (0-based relative to the
+// picker body's own top-left corner, already shifted by the centering
+// offset) and indexed by node ID (so a click maps straight onto the same
+// pickMemNode path as its digit key).
 func (p *memNodePicker) view(width, budget int) (string, []hit) {
+	dw := dialogWidth(width)
 	var b strings.Builder
 	var hits []hit
 	for i, n := range p.snap.Topo.Nodes {
 		fmt.Fprintf(&b, "%d) node %d  free %s\n", n.ID, n.ID, fmtKiB(model.FreeMemKiB(p.snap, n.ID)))
-		hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: hitWide, kind: "memnode", index: n.ID})
+		hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: dw - 2, kind: "memnode", index: n.ID})
 	}
 	if p.gpuNode != -1 {
 		fmt.Fprintf(&b, "\nGPU is on node %d\n", p.gpuNode)
 	}
-	b.WriteString("\ndigit/click: choose node  esc cancel")
 
 	title := "set memory node for " + p.vm
-	body, kept := panelWrapH(title, strings.TrimRight(b.String(), "\n"), width, budget)
-	return body, offsetHits(clipHitsToWindow(hits, kept), 1, 1)
+	body, kept := panelWrapH(title, strings.TrimRight(b.String(), "\n"), dw, budget)
+	hits = offsetHits(clipHitsToWindow(hits, kept), 1, 1)
+	centered, xOff := centerDialog(body, width)
+	return centered, offsetHits(hits, 0, xOff)
 }
 
 // statusBarHint returns the status bar's replacement content while the
 // picker is open.
 func (p *memNodePicker) statusBarHint() string {
-	return "digit: choose node  esc cancel"
+	return "digit/click: choose node  esc cancel"
 }
 
 // hasNode reports whether node is one of the topology's node IDs.

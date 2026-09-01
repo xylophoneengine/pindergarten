@@ -12,8 +12,17 @@ import (
 )
 
 // backupTimeFormat renders a backup.Meta.Time (always UTC) with an explicit
-// "Z" suffix so it is never mistaken for local time.
-const backupTimeFormat = "2006-01-02 15:04:05Z"
+// "Z" suffix so it is never mistaken for local time. backupTimeFormatShort
+// drops the seconds, used as a fallback when the table is too narrow for
+// the full format even after OPERATION is capped.
+const (
+	backupTimeFormat      = "2006-01-02 15:04:05Z"
+	backupTimeFormatShort = "2006-01-02 15:04Z"
+)
+
+// backupOpCap is the Backups table's OPERATION column cap (truncated with
+// ".." past this many cells).
+const backupOpCap = 30
 
 // diffLines returns a line-oriented diff of a against b: lines common to
 // both (found via LCS) are prefixed "  ", lines only in a are prefixed
@@ -96,24 +105,24 @@ func colorDiff(diff string) string {
 	return strings.Join(lines, "\n")
 }
 
-// backupsTable renders the TIME/VM/OPERATION table for entries (natural
-// column widths; panel() truncates as a safety net if it still doesn't
-// fit), with the row at sel background-highlighted and only the rows
-// within [offset, offset+len(entries)) actually laid out (the caller has
-// already sliced entries to fit its height budget; offset translates a
-// visible row back to its real index in the full list for hit-testing and
-// selection). Alongside the string it returns one "backup" hit per row,
-// bounded to w (the table's inner width, so a click in a neighboring panel
-// in a two-column layout can't land on it), 0-based relative to the
-// table's own top-left corner (row 0 is the header).
-func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
-	names := []string{"TIME", "VM", "OPERATION"}
-	vals := make([][]string, len(names))
+// backupsColVals builds the TIME/VM/OPERATION column values for entries
+// (formatting TIME with tf; OPERATION always capped at backupOpCap,
+// truncated with ".." -- that cap is permanent regardless of width, same
+// as the VMs table's NAME/PINS caps).
+func backupsColVals(entries []backup.Entry, tf string) [][]string {
+	vals := make([][]string, 3)
 	for _, e := range entries {
-		vals[0] = append(vals[0], e.Meta.Time.Format(backupTimeFormat))
+		vals[0] = append(vals[0], e.Meta.Time.Format(tf))
 		vals[1] = append(vals[1], e.Meta.VM)
-		vals[2] = append(vals[2], e.Meta.Op)
+		vals[2] = append(vals[2], ansiTruncate(e.Meta.Op, backupOpCap))
 	}
+	return vals
+}
+
+// backupsColWidths returns the natural (max of header and values) width
+// of each of vals' columns, against the fixed TIME/VM/OPERATION headers.
+func backupsColWidths(vals [][]string) []int {
+	names := []string{"TIME", "VM", "OPERATION"}
 	widths := make([]int, len(names))
 	for i, name := range names {
 		widths[i] = lipgloss.Width(name)
@@ -123,6 +132,39 @@ func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
 			}
 		}
 	}
+	return widths
+}
+
+// backupsTableWidth returns how wide a TIME/VM/OPERATION table built from
+// widths would be (columns plus 2-cell gaps between them).
+func backupsTableWidth(widths []int) int {
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	return total + 2*(len(widths)-1)
+}
+
+// backupsTable renders the TIME/VM/OPERATION table for entries: OPERATION
+// is capped (truncated with ".."), and if the table still doesn't fit w
+// even with that cap, TIME drops its seconds -- with the row at sel
+// background-highlighted and only the rows within
+// [offset, offset+len(entries)) actually laid out (the caller has already
+// sliced entries to fit its height budget; offset translates a visible row
+// back to its real index in the full list for hit-testing and selection).
+// Alongside the string it returns one "backup" hit per row, bounded to w
+// (the table's inner width, so a click in a neighboring panel in a
+// two-column layout can't land on it), 0-based relative to the table's own
+// top-left corner (row 0 is the header).
+func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
+	names := []string{"TIME", "VM", "OPERATION"}
+	vals := backupsColVals(entries, backupTimeFormat)
+	widths := backupsColWidths(vals)
+	if backupsTableWidth(widths) > w {
+		vals = backupsColVals(entries, backupTimeFormatShort)
+		widths = backupsColWidths(vals)
+	}
+
 	rowCells := func(row int) []string {
 		cells := make([]string, len(names))
 		for i, name := range names {
@@ -177,8 +219,7 @@ func (a *App) renderBackupsTab(sel, w, budget int) (string, []hit) {
 	visible, offset, _ := scrollEntries(entries, rowBudget, sel)
 
 	table, hits := backupsTable(visible, sel, offset, w-2)
-	body := table + "\n\nenter: view diff  R: restore (edit mode)"
-	return panel("Backups", body, w), offsetHits(hits, 1, 1)
+	return panel("Backups", table, w), offsetHits(hits, 1, 1)
 }
 
 // scrollEntries mirrors scrollWindow's "keep sel visible" rule, but over a

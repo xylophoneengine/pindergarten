@@ -17,6 +17,25 @@ import (
 var distinctBackupXML = strings.Replace(plainVMXML,
 	"<memory unit='KiB'>1000</memory>", "<memory unit='KiB'>2000</memory>", 1)
 
+// TestBackupsTableCapsOperationThenDropsSeconds covers the Backups table's
+// own width-awareness (mirroring the VMs table): OPERATION truncates with
+// ".." past backupOpCap, and once that alone still doesn't fit, TIME drops
+// its seconds.
+func TestBackupsTableCapsOperationThenDropsSeconds(t *testing.T) {
+	longOp := strings.Repeat("pin many vcpus across every numa node ", 3)
+	entries := []backup.Entry{{Meta: backup.Meta{VM: "vm", Op: longOp}}}
+
+	out, _ := backupsTable(entries, 0, 0, 54)
+	if !strings.Contains(out, "..") {
+		t.Fatalf("backupsTable() = %q, want the long OPERATION truncated with \"..\"", out)
+	}
+	// A zero-value time formats as "0001-01-01 00:00:00Z" with the full
+	// format (seconds included); once dropped it reads "...00:00Z".
+	if !strings.Contains(out, "0001-01-01 00:00Z") {
+		t.Fatalf("backupsTable() = %q, want TIME's seconds dropped once capping OPERATION alone still doesn't fit width 60", out)
+	}
+}
+
 func TestDiffLines(t *testing.T) {
 	cases := []struct {
 		name string

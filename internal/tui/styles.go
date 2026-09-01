@@ -28,14 +28,16 @@ var (
 			Padding(0, 1)
 
 	// tabActiveStyle renders the active tab as a filled, colored pill;
-	// tabInactiveStyle dims the rest. The plain-text "[Name]" marker is
-	// still applied to the label itself (see renderTabs), so existing
-	// tests keyed off it keep passing.
+	// tabInactiveStyle dims the rest. Both pad identically (0, 1) so the
+	// style -- not extra bracket/space characters -- is what marks the
+	// active tab (see renderTabs); active/inactive is queried directly
+	// (App.tab) in tests rather than by grepping for a plain-text marker.
 	tabActiveStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#ffffff"}).
-			Background(accentColor)
-	tabInactiveStyle = lipgloss.NewStyle().Foreground(dimColor)
+			Background(accentColor).
+			Padding(0, 1)
+	tabInactiveStyle = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1)
 
 	statusBarStyle = lipgloss.NewStyle().Faint(true)
 
