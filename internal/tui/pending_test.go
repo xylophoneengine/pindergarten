@@ -32,6 +32,18 @@ func pendingFakeApp(t *testing.T, xml string) (*App, *libvirtio.Fake) {
 	return New(f, scan, t.TempDir(), "test"), f
 }
 
+// changedVCPUCountXML differs from plainVMXML by vcpu count (4 instead of
+// 2): used to prove a post-rescan wizard is built from the fresh snapshot,
+// not a stale one, since it forces a different-sized proposal.
+const changedVCPUCountXML = `<domain type='kvm'>
+  <name>plain-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b01</uuid>
+  <memory unit='KiB'>1000</memory>
+  <vcpu>4</vcpu>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
 // stagePlainVMPin adds a valid OpPin for plain-vm straight to a's queue,
 // with StagedHash matching plainVMXML so drift checks pass until a test
 // deliberately mutates the fake's XML.
@@ -65,6 +77,12 @@ func TestApplyHappyPath(t *testing.T) {
 	sendKey(a, 'a')
 	if a.flow == nil {
 		t.Fatalf("status = %q, apply review flow did not open", a.status)
+	}
+	if view := a.View(); !strings.Contains(view, "backup will be written first; takes effect on next VM boot") {
+		t.Fatalf("View() = %q, want the review screen's per-op effect line", view)
+	}
+	if view := a.View(); !strings.Contains(view, "1 pending ops") {
+		t.Fatalf("View() = %q, want the status bar's pending-op count while the review screen is open", view)
 	}
 
 	cmd := sendKey(a, 'y')
@@ -128,7 +146,11 @@ func TestApplyDriftReopenWizard(t *testing.T) {
 	enterEdit(a)
 	stagePlainVMPin(a)
 
-	f.XML["plain-vm"] = plainVMXML + "\n<!-- edited behind the app's back -->"
+	// Not just drifted, but a real change (2 vcpus -> 4) that the
+	// post-rescan wizard must reflect -- pinning the scanDoneMsg-before-
+	// openWizardFor ordering in app.go (the wizard must be built from the
+	// freshly-rescanned snapshot, not the stale one from before 'w').
+	f.XML["plain-vm"] = changedVCPUCountXML
 
 	sendKey(a, 'a')
 	cmd := sendKey(a, 'y')
@@ -158,6 +180,141 @@ func TestApplyDriftReopenWizard(t *testing.T) {
 	}
 	if a.wizard.vm != "plain-vm" {
 		t.Fatalf("wizard.vm = %q, want plain-vm", a.wizard.vm)
+	}
+	if got := len(a.wizard.proposal.Pins); got != 4 {
+		t.Fatalf("len(proposal.Pins) = %d, want 4 (wizard must be built from the freshly-rescanned "+
+			"4-vcpu XML, not a stale 2-vcpu snapshot)", got)
+	}
+}
+
+// TestApplyCancelDuringDriftCheckIsIgnored covers the fixed race: pressing
+// 'y' must move the flow to flowRunning synchronously, so a following
+// esc/n while the drift-check Cmd is still in flight is ignored rather
+// than setting a.flow to nil out from under the eventual driftCheckedMsg
+// (which used to panic on the nil dereference).
+func TestApplyCancelDuringDriftCheckIsIgnored(t *testing.T) {
+	a, f := pendingFakeApp(t, plainVMXML)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	f.XML["plain-vm"] = plainVMXML + "\n<!-- edited behind the app's back -->"
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y')
+	if cmd == nil {
+		t.Fatal("'y' did not return the drift-check Cmd")
+	}
+	if a.flow == nil || a.flow.screen != flowRunning {
+		t.Fatal("flow did not move to flowRunning immediately after 'y'")
+	}
+
+	sendKeyType(a, tea.KeyEsc)
+	if a.flow == nil || a.flow.screen != flowRunning {
+		t.Fatal("esc during the in-flight drift check must not close the flow")
+	}
+
+	// Deliver the drift result: must not panic. The fake's XML drifted, so
+	// it must land on the drift screen rather than silently applying.
+	drain(a, cmd)
+
+	if a.flow == nil || a.flow.screen != flowDrift {
+		t.Fatalf("status = %q, want the drift screen open once the check resolves", a.status)
+	}
+	if len(f.Defined) != 0 {
+		t.Fatalf("len(f.Defined) = %d, want 0 (drift must still block, esc must not have let anything through)", len(f.Defined))
+	}
+}
+
+// TestDriftScreenEscKeepsQueued covers esc on the drift screen: it closes
+// the flow back to browsing without discarding anything and without
+// writing.
+func TestDriftScreenEscKeepsQueued(t *testing.T) {
+	a, f := pendingFakeApp(t, plainVMXML)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	f.XML["plain-vm"] = plainVMXML + "\n<!-- edited behind the app's back -->"
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y')
+	drain(a, cmd)
+	if a.flow == nil || a.flow.screen != flowDrift {
+		t.Fatalf("status = %q, want the drift screen open", a.status)
+	}
+
+	sendKeyType(a, tea.KeyEsc)
+	if a.flow != nil {
+		t.Fatal("flow still open after esc on the drift screen")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 (esc must leave the drifted op queued, untouched)", a.queue.Len())
+	}
+	if len(f.Defined) != 0 {
+		t.Fatalf("len(f.Defined) = %d, want 0 (no writes happened)", len(f.Defined))
+	}
+}
+
+func TestDiscardAllPending(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	a.tab = 3
+
+	sendKey(a, 'd')
+	if a.confirm == nil {
+		t.Fatal("'d' on the Pending tab did not open a confirm modal")
+	}
+	if !strings.Contains(a.View(), "Discard all") {
+		t.Fatalf("View() = %q, want the discard-all confirm prompt", a.View())
+	}
+
+	sendKey(a, 'n')
+	if a.confirm != nil {
+		t.Fatal("confirm still set after 'n'")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 (declining must not discard)", a.queue.Len())
+	}
+
+	sendKey(a, 'd')
+	sendKey(a, 'y')
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d, want 0 after confirming discard-all", a.queue.Len())
+	}
+}
+
+func TestResultsScreenDismissRescans(t *testing.T) {
+	a, _ := pendingFakeApp(t, plainVMXML)
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+
+	sendKey(a, 'a')
+	cmd := sendKey(a, 'y')
+	drain(a, cmd)
+	if a.flow == nil || a.flow.screen != flowResults {
+		t.Fatalf("status = %q, want the results screen open", a.status)
+	}
+
+	dismissCmd := sendKey(a, ' ') // any key dismisses
+	if a.flow != nil {
+		t.Fatal("flow still open after dismissing the results screen")
+	}
+	if dismissCmd == nil {
+		t.Fatal("dismissing the results screen did not return a Cmd, want a rescan Cmd")
+	}
+	if _, ok := dismissCmd().(scanDoneMsg); !ok {
+		t.Fatal("dismiss Cmd did not produce a scanDoneMsg")
+	}
+}
+
+func TestPendingTabEmptyState(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 3
+	if !strings.Contains(a.View(), "no pending operations") {
+		t.Fatalf("View() = %q, want the empty-state text", a.View())
 	}
 }
 
@@ -242,6 +399,19 @@ func TestBackupsTabRoutes(t *testing.T) {
 	sendKey(a, 'z') // any key dismisses the diff view
 	if a.diffView != "" {
 		t.Fatal("diffView not cleared after a dismiss key")
+	}
+
+	// Re-open the diff, then dismiss it with a key that would otherwise
+	// switch tabs: the dismiss must win (app.go used to check this after
+	// the tab-digit case, so '1' switched tabs and left diffView stale for
+	// whenever the user returned to tab 4).
+	sendKeyType(a, tea.KeyEnter)
+	if a.diffView == "" {
+		t.Fatal("diffView empty after re-opening it")
+	}
+	sendKey(a, '1')
+	if a.diffView != "" {
+		t.Fatal("diffView not cleared after '1' while the diff was open")
 	}
 
 	sendKey(a, 'R')

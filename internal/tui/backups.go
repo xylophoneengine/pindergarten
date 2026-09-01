@@ -125,20 +125,6 @@ func (a *App) backupsEntry(sel int) (backup.Entry, error) {
 	return entries[sel], nil
 }
 
-// vmByName returns the VM named name in the last-scanned snapshot, or nil
-// before the first scan or when no VM with that name exists.
-func (a *App) vmByName(name string) *model.VM {
-	if a.snap == nil {
-		return nil
-	}
-	for i := range a.snap.VMs {
-		if a.snap.VMs[i].Name == name {
-			return &a.snap.VMs[i]
-		}
-	}
-	return nil
-}
-
 // backupsDiff returns a diff of the VM's current domain XML against the
 // selected backup: current is the diff's "a" side (a line only there is
 // what restoring would remove) and the backup is "b" (a line only there is
@@ -180,7 +166,11 @@ func (a *App) stageRestore(sel int) string {
 	if err != nil {
 		return err.Error()
 	}
-	if vm := a.vmByName(e.Meta.VM); vm != nil && vm.Unsupported {
+	var vm *model.VM
+	if a.snap != nil {
+		vm = a.snap.VM(e.Meta.VM)
+	}
+	if vm != nil && vm.Unsupported {
 		return fmt.Sprintf("%s: unsupported config, view only", vm.Name)
 	}
 

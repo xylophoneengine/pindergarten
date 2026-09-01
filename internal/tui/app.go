@@ -148,6 +148,16 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.flow != nil {
 		return a.handleFlowKey(msg)
 	}
+	if a.tab == 4 && a.diffView != "" && msg.Type != tea.KeyCtrlC {
+		// Any key dismisses the diff view first, before any other
+		// handling (tab-switch digits included) can see it -- otherwise a
+		// stale diff reappears if the user later returns to the Backups
+		// tab without having dismissed it (regression: see the test
+		// exercising '1' while a diff is open). ctrl+c is the one
+		// exception, so it still quits instead of just closing the diff.
+		a.diffView = ""
+		return a, nil
+	}
 
 	switch {
 	case msg.Type == tea.KeyCtrlC, isRune(msg, 'q'):
@@ -201,10 +211,6 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.removeSelectedPendingOp()
 	case a.tab == 3 && isRune(msg, 'd'):
 		return a.discardAllPending()
-	case a.tab == 4 && a.diffView != "":
-		// any key dismisses the diff view back to the list
-		a.diffView = ""
-		return a, nil
 	case a.tab == 4 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown || isRune(msg, 'j') || isRune(msg, 'k')):
 		n := 0
 		if entries, err := backup.List(a.backupDir); err == nil {
@@ -514,13 +520,21 @@ func (a *App) renderStatusBar() string {
 			parts = append(parts, "[x] remove")
 		}
 		if a.editMode && a.queue.Len() > 0 {
-			parts = append(parts, "[a]pply", "[d]iscard")
+			parts = append(parts, "[a]pply")
+		}
+		if a.editMode && a.tab == 3 && a.queue.Len() > 0 {
+			// 'd' (discard all) is only routed on the Pending tab.
+			parts = append(parts, "[d]iscard")
 		}
 		if a.editMode && a.tab == 2 {
 			parts = append(parts, "[p]in", "[s]trip")
 		}
 		if a.editMode && a.tab == 4 {
-			parts = append(parts, "[R]estore", "enter diff")
+			if a.diffView != "" {
+				parts = append(parts, "any key: close")
+			} else {
+				parts = append(parts, "[R]estore", "enter diff")
+			}
 		}
 		parts = append(parts, "[e]dit", "[q]uit")
 	}

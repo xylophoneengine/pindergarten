@@ -10,11 +10,12 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
-// flowScreen is one of the three screens the apply flow can show.
+// flowScreen is one of the four screens the apply flow can show.
 type flowScreen int
 
 const (
-	flowReview flowScreen = iota
+	flowReview  flowScreen = iota
+	flowRunning            // drift check or apply in flight; no key does anything
 	flowDrift
 	flowResults
 )
@@ -23,17 +24,26 @@ const (
 // (nil when closed); while non-nil, App routes key input to
 // handleFlowKey and renders view in place of the tab body, mirroring how
 // the wizard replaces the body while open.
+//
+// gen guards against a stale driftCheckedMsg/applyDoneMsg being applied to
+// the wrong round: it is bumped every time a new checkDriftCmd/runApplyCmd
+// is dispatched, and the message carries the value it was bumped to, so
+// handleDriftChecked/handleApplyDone can drop anything that does not match
+// the flow's current gen.
 type applyFlow struct {
 	screen  flowScreen
 	ops     []model.PendingOp // snapshot of the queue when the review screen opened
 	drifted []model.PendingOp // ops whose VM changed since staging
 	sel     int               // selected row in drifted, drift screen only
 	results []apply.Result
+	gen     int
+	running string // body text shown on the flowRunning screen
 }
 
 // driftCheckedMsg carries the result of running apply.CheckDrift, mapped
 // back onto the queued ops for the drifted VMs (in queue order).
 type driftCheckedMsg struct {
+	gen     int
 	drifted []model.PendingOp
 	err     error
 }
@@ -41,6 +51,7 @@ type driftCheckedMsg struct {
 // applyDoneMsg carries the result of running apply.Run (which itself has no
 // error return: every per-op failure is carried in its Result instead).
 type applyDoneMsg struct {
+	gen     int
 	results []apply.Result
 }
 
@@ -67,10 +78,20 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case flowReview:
 		switch {
 		case isRune(msg, 'y'):
-			return a, a.checkDriftCmd()
+			// Move to flowRunning immediately: once confirmed, cancelling is
+			// impossible (no case below handles a key on that screen), so
+			// there is no window where esc/n can race the in-flight Cmd.
+			a.flow.gen++
+			a.flow.screen = flowRunning
+			a.flow.running = "checking for drift..."
+			a.status = a.flow.running
+			return a, a.checkDriftCmd(a.flow.gen)
 		case isRune(msg, 'n'), msg.Type == tea.KeyEsc:
 			a.flow = nil
 		}
+	case flowRunning:
+		// Ignore every key: the drift check or apply run is already in
+		// flight and cannot be cancelled.
 	case flowDrift:
 		switch {
 		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
@@ -81,6 +102,11 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.discardDrifted()
 		case isRune(msg, 'w'):
 			return a.reopenDrifted()
+		case msg.Type == tea.KeyEsc:
+			// Back to browsing: no writes have happened yet, so the
+			// remaining (undrifted) ops just stay queued untouched.
+			a.flow = nil
+			a.status = ""
 		}
 	case flowResults:
 		// Any key dismisses the results screen, then a rescan is issued.
@@ -92,13 +118,14 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // checkDriftCmd runs apply.CheckDrift against the queue and maps the
-// drifted VM names back onto their queued ops, in queue order.
-func (a *App) checkDriftCmd() tea.Cmd {
+// drifted VM names back onto their queued ops, in queue order. gen is
+// stamped onto the resulting message so a stale round can be dropped.
+func (a *App) checkDriftCmd(gen int) tea.Cmd {
 	ops := append([]model.PendingOp(nil), a.queue.Ops...)
 	return func() tea.Msg {
 		names, err := apply.CheckDrift(a.hv, ops)
 		if err != nil {
-			return driftCheckedMsg{err: err}
+			return driftCheckedMsg{gen: gen, err: err}
 		}
 		driftedSet := make(map[string]bool, len(names))
 		for _, n := range names {
@@ -110,13 +137,18 @@ func (a *App) checkDriftCmd() tea.Cmd {
 				drifted = append(drifted, op)
 			}
 		}
-		return driftCheckedMsg{drifted: drifted}
+		return driftCheckedMsg{gen: gen, drifted: drifted}
 	}
 }
 
 // handleDriftChecked reacts to a driftCheckedMsg: any drift opens the drift
-// screen; a clean check proceeds straight into apply.Run.
+// screen; a clean check proceeds straight into apply.Run. A nil flow (the
+// user somehow closed it) or a stale gen (a leftover message from an
+// earlier round) is silently dropped rather than acted on.
 func (a *App) handleDriftChecked(msg driftCheckedMsg) (tea.Model, tea.Cmd) {
+	if a.flow == nil || msg.gen != a.flow.gen {
+		return a, nil
+	}
 	if msg.err != nil {
 		a.status = msg.err.Error()
 		a.flow = nil
@@ -126,25 +158,34 @@ func (a *App) handleDriftChecked(msg driftCheckedMsg) (tea.Model, tea.Cmd) {
 		a.flow.screen = flowDrift
 		a.flow.drifted = msg.drifted
 		a.flow.sel = 0
+		a.status = ""
 		return a, nil
 	}
-	return a, a.runApplyCmd()
+	a.flow.running = "applying..."
+	a.status = a.flow.running
+	return a, a.runApplyCmd(a.flow.gen)
 }
 
-// runApplyCmd runs apply.Run against a snapshot of the current queue.
-func (a *App) runApplyCmd() tea.Cmd {
+// runApplyCmd runs apply.Run against a snapshot of the current queue. gen
+// is stamped onto the resulting message so a stale round can be dropped.
+func (a *App) runApplyCmd(gen int) tea.Cmd {
 	ops := append([]model.PendingOp(nil), a.queue.Ops...)
 	return func() tea.Msg {
-		return applyDoneMsg{results: apply.Run(a.hv, a.backupDir, a.version, ops)}
+		return applyDoneMsg{gen: gen, results: apply.Run(a.hv, a.backupDir, a.version, ops)}
 	}
 }
 
 // handleApplyDone reacts to an applyDoneMsg: shows the results screen and
 // clears only the ops that actually applied, leaving failed/skipped ones
-// queued so the user can inspect or discard them.
+// queued so the user can inspect or discard them. A nil flow or stale gen
+// is dropped, same as handleDriftChecked.
 func (a *App) handleApplyDone(msg applyDoneMsg) (tea.Model, tea.Cmd) {
+	if a.flow == nil || msg.gen != a.flow.gen {
+		return a, nil
+	}
 	a.flow.screen = flowResults
 	a.flow.results = msg.results
+	a.status = ""
 
 	var kept []model.PendingOp
 	for _, r := range msg.results {
@@ -153,6 +194,7 @@ func (a *App) handleApplyDone(msg applyDoneMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	a.queue.Ops = kept
+	a.clampPendingSel()
 	return a, nil
 }
 
@@ -220,31 +262,34 @@ func (a *App) dropFlowDrifted() {
 	}
 }
 
-// removeQueueOp drops the queued op for vm, if any.
+// removeQueueOp drops the queued op for vm, if any, and clamps pendingSel
+// back into range (removal can only shrink the queue).
 func (a *App) removeQueueOp(vm string) {
 	for i, op := range a.queue.Ops {
 		if op.VM == vm {
 			a.queue.Remove(i)
+			a.clampPendingSel()
 			return
 		}
 	}
 }
 
 // openWizardFor opens the pin wizard for vm by first pointing a.vmSel at
-// it in the freshly-scanned snapshot, then delegating to openWizard. A no-op
-// if vm is no longer present (e.g. removed from libvirt between staging and
-// the rescan).
+// its index in the freshly-scanned snapshot, then delegating to openWizard.
+// A no-op if vm is no longer present (e.g. removed from libvirt between
+// staging and the rescan) -- checked via model.Snapshot.VM rather than a
+// hand-rolled lookup loop.
 func (a *App) openWizardFor(vm string) {
-	if a.snap == nil {
+	if a.snap == nil || a.snap.VM(vm) == nil {
 		return
 	}
-	for i, v := range a.snap.VMs {
-		if v.Name == vm {
+	for i := range a.snap.VMs {
+		if a.snap.VMs[i].Name == vm {
 			a.vmSel = i
-			a.openWizard()
-			return
+			break
 		}
 	}
+	a.openWizard()
 }
 
 // view renders whichever screen f.screen selects.
@@ -257,6 +302,8 @@ func (f *applyFlow) view(w int) string {
 			fmt.Fprintf(&b, "%d. %s\n   backup will be written first; takes effect on next VM boot\n", i+1, op.Summary)
 		}
 		b.WriteString("\n[y] confirm  [n]/esc cancel")
+	case flowRunning:
+		b.WriteString(f.running)
 	case flowDrift:
 		b.WriteString("Drift detected -- these VMs changed since staging:\n\n")
 		for i, op := range f.drifted {
@@ -291,8 +338,10 @@ func (f *applyFlow) view(w int) string {
 // are inert while a flow screen is capturing all key input.
 func (f *applyFlow) statusBarHint() string {
 	switch f.screen {
+	case flowRunning:
+		return "please wait..."
 	case flowDrift:
-		return "[d]iscard  [w] reopen wizard  [up/down] select"
+		return "[d]iscard  [w] reopen wizard  [up/down] select  esc back"
 	case flowResults:
 		return "any key to dismiss"
 	default:
@@ -365,6 +414,10 @@ func (a *App) removeSelectedPendingOp() (tea.Model, tea.Cmd) {
 // discardAllPending implements 'd' on the Pending tab: confirms, then
 // clears the whole queue.
 func (a *App) discardAllPending() (tea.Model, tea.Cmd) {
+	if !a.editMode {
+		a.status = "press e to enter edit mode first"
+		return a, nil
+	}
 	n := a.queue.Len()
 	if n == 0 {
 		return a, nil

@@ -277,8 +277,17 @@ func TestStatusBarApplyDiscardVisibility(t *testing.T) {
 
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
 	view := a.View()
-	if !strings.Contains(view, "[a]pply") || !strings.Contains(view, "[d]iscard") {
-		t.Fatalf("View() in edit mode with a pending op = %q, want apply/discard hints", view)
+	if !strings.Contains(view, "[a]pply") {
+		t.Fatalf("View() in edit mode with a pending op = %q, want the apply hint on any tab", view)
+	}
+	if strings.Contains(view, "[d]iscard") {
+		t.Fatalf("View() on a non-Pending tab = %q, want no discard hint ('d' is only routed on the Pending tab)", view)
+	}
+
+	a.tab = 3
+	view = a.View()
+	if !strings.Contains(view, "[d]iscard") {
+		t.Fatalf("View() on the Pending tab with a pending op = %q, want the discard hint", view)
 	}
 }
 

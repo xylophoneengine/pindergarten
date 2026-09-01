@@ -191,6 +191,9 @@ func TestWizardAcceptStagesPin(t *testing.T) {
 	if a.wizard == nil {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
+	if !strings.Contains(a.View(), "0 pending ops") {
+		t.Fatalf("View() = %q, want the pending-op count prefix in the status bar while the wizard is open", a.View())
+	}
 	wantPins := a.wizard.proposal.Pins
 	wantNode := a.wizard.proposal.Node
 
