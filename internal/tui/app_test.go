@@ -438,6 +438,102 @@ func TestViewNoWrapBeforeWindowSize(t *testing.T) {
 	}
 }
 
+// findHit returns the recorded hit of the given kind/index, or fails the
+// test if none was recorded (a.View() must have been called first, since
+// hits are only refreshed on render).
+func findHit(t *testing.T, a *App, kind string, index int) hit {
+	t.Helper()
+	for _, h := range a.hits {
+		if h.kind == kind && h.index == index {
+			return h
+		}
+	}
+	t.Fatalf("no %s hit recorded for index %d (hits = %+v)", kind, index, a.hits)
+	return hit{}
+}
+
+func press(x, y int) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+}
+
+// TestMouseClickSelectsVMRow covers the fix for mouse clicks doing nothing
+// beyond the tab bar: a left click on the second VM row must select it.
+func TestMouseClickSelectsVMRow(t *testing.T) {
+	a, _ := pendingFakeAppMulti(t, map[string]string{"vm1": vm1XML, "vm2": vm2XML})
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "vm", 1)
+	a.Update(press(h.x0, h.y0))
+	if a.vmSel != 1 {
+		t.Fatalf("vmSel = %d, want 1", a.vmSel)
+	}
+}
+
+// TestMouseClickSelectsCPUMapCore covers a click on a CPU Map core cell
+// moving the cursor to that core.
+func TestMouseClickSelectsCPUMapCore(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 1
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "core", 1)
+	a.Update(press(h.x0, h.y0))
+	if a.cursor != 1 {
+		t.Fatalf("cursor = %d, want 1", a.cursor)
+	}
+}
+
+// TestMouseWheelMovesVMSel covers wheel up/down acting as the up/down key
+// on the VMs tab's active selection.
+func TestMouseWheelMovesVMSel(t *testing.T) {
+	a, _ := pendingFakeAppMulti(t, map[string]string{"vm1": vm1XML, "vm2": vm2XML})
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View()
+
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	if a.vmSel != 1 {
+		t.Fatalf("vmSel = %d after wheel down, want 1", a.vmSel)
+	}
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	if a.vmSel != 0 {
+		t.Fatalf("vmSel = %d after wheel up, want 0", a.vmSel)
+	}
+}
+
+// TestMouseIgnoredDuringApplyFlow mirrors TestMouseIgnoredWhileWizardOpen
+// for the apply flow: a tab-bar click while a flow screen is open must not
+// switch tabs out from under it.
+func TestMouseIgnoredDuringApplyFlow(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	enterEdit(a)
+	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
+	a.tab = 3
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_ = a.View()
+
+	sendKey(a, 'a')
+	if a.flow == nil {
+		t.Fatal("apply flow did not open")
+	}
+
+	rng := a.tabRanges[0]
+	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if a.tab != 3 {
+		t.Fatalf("a.tab = %d, want unchanged 3 (mouse must be ignored while the apply flow is open)", a.tab)
+	}
+	if a.flow == nil {
+		t.Fatal("flow closed by a mouse click, want it to stay open")
+	}
+}
+
 // TestVMsTableFitsNarrowWidth covers the reported regression: at a narrow
 // width, VMs table rows must stay single lines (never fold, e.g. FLAGS
 // header alone on one line and "[!]" alone on the next) and every rendered

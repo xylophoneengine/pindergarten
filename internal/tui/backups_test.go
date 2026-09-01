@@ -163,6 +163,28 @@ func TestBackupsDiff(t *testing.T) {
 	}
 }
 
+// TestMouseClickSelectsBackupRow covers a left click on a Backups row
+// selecting it (backupsSel).
+func TestMouseClickSelectsBackupRow(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", plainVMXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	if _, err := backup.Save(a.backupDir, "vm1", "strip pins", "test", vm1XML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	a.tab = 4
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "backup", 1)
+	a.Update(press(h.x0, h.y0))
+	if a.backupsSel != 1 {
+		t.Fatalf("backupsSel = %d, want 1", a.backupsSel)
+	}
+}
+
 func TestHandleBackupsKey(t *testing.T) {
 	a := testApp(t, false)
 	sel := 0

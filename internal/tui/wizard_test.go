@@ -396,6 +396,41 @@ func TestWizardManualEscResetsNode(t *testing.T) {
 	}
 }
 
+// TestMouseClickTogglesWizardManualCore covers a click on the wizard's
+// manual screen node map: it must move the cursor to the clicked core and
+// toggle it, same as moving there with the arrow keys and pressing space.
+func TestMouseClickTogglesWizardManualCore(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	sendKey(a, 'm')
+	if a.wizard.screen != manualScreen {
+		t.Fatal("'m' did not switch to the manual screen")
+	}
+	if len(a.wizard.selected) != 2 {
+		t.Fatalf("test setup: manual screen selected = %v, want the proposal's 2 default threads", a.wizard.selected)
+	}
+
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "wizardcore", 0)
+	a.Update(press(h.x0, h.y0))
+
+	if a.wizard.cursor != 0 {
+		t.Fatalf("wizard.cursor = %d, want 0 (moved to the clicked core)", a.wizard.cursor)
+	}
+	if len(a.wizard.selected) != 0 {
+		t.Fatalf("wizard.selected = %v, want empty (click toggled core 0 off, mirroring space)", a.wizard.selected)
+	}
+}
+
 // manyCoresTopo returns a single-node topology with 40 single-thread
 // cores (no SMT), so the manual screen's up/down (by coresPerRow == 32)
 // has a real second partial row to move into and clamp against -- a

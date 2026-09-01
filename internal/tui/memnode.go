@@ -158,9 +158,8 @@ func (a *App) openMemNodePicker() (tea.Model, tea.Cmd) {
 }
 
 // handleMemNodeKey routes a key to the open picker: esc cancels, a digit
-// 0-9 naming an existing node stages the op and closes the picker
-// (appending its (non-blocking) warning line, styled, to the status).
-// Anything else is ignored.
+// 0-9 naming an existing node picks it (via pickMemNode). Anything else is
+// ignored.
 func (a *App) handleMemNodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyEsc {
 		a.memPicker = nil
@@ -170,12 +169,18 @@ func (a *App) handleMemNodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type != tea.KeyRunes || len(msg.Runes) != 1 || msg.Runes[0] < '0' || msg.Runes[0] > '9' {
 		return a, nil
 	}
+	a.pickMemNode(int(msg.Runes[0] - '0'))
+	return a, nil
+}
 
-	node := int(msg.Runes[0] - '0')
+// pickMemNode stages a memory-node op for the open picker's VM if node
+// names an existing topology node (appending its (non-blocking) warning
+// line, styled, to the status), closing the picker either way once staged.
+// Shared by the digit-key handler and the node-line mouse click.
+func (a *App) pickMemNode(node int) {
 	if !a.memPicker.hasNode(node) {
-		return a, nil
+		return
 	}
-
 	op := a.memPicker.buildOp(node)
 	status := "staged: " + op.Summary
 	if warn := a.memPicker.warning(node); warn != "" {
@@ -184,5 +189,18 @@ func (a *App) handleMemNodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	a.queue.Add(op)
 	a.status = status
 	a.memPicker = nil
-	return a, nil
+}
+
+// handleMemNodeMouse routes a left click on a node line to pickMemNode,
+// same as pressing its digit.
+func (a *App) handleMemNodeMouse(msg tea.MouseMsg) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return
+	}
+	for _, h := range a.hits {
+		if h.kind == "memnode" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			a.pickMemNode(h.index)
+			return
+		}
+	}
 }

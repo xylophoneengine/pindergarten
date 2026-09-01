@@ -434,6 +434,28 @@ func TestResultsScreenDismissRescans(t *testing.T) {
 	}
 }
 
+// TestMouseClickSelectsPendingRow covers a left click on a Pending row
+// selecting it (pendingSel).
+func TestMouseClickSelectsPendingRow(t *testing.T) {
+	a, _ := pendingFakeAppMulti(t, map[string]string{"plain-vm": plainVMXML, "vm1": vm1XML})
+	runScan(t, a)
+	enterEdit(a)
+	stagePlainVMPin(a)
+	a.queue.Add(model.PendingOp{
+		Kind: model.OpPin, VM: "vm1", Pins: map[int][]int{0: {2}, 1: {3}}, MemNode: 1,
+		StagedHash: model.HashXML(vm1XML), StagedXML: vm1XML, Summary: "vm1: pin",
+	})
+	a.tab = 3
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "pending", 1)
+	a.Update(press(h.x0, h.y0))
+	if a.pendingSel != 1 {
+		t.Fatalf("pendingSel = %d, want 1", a.pendingSel)
+	}
+}
+
 func TestPendingTabEmptyState(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)

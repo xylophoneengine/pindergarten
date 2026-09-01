@@ -127,6 +127,35 @@ func TestMemNodeUsesProjectedPins(t *testing.T) {
 	}
 }
 
+// TestMouseClickPicksMemNode covers a left click on a node-picker line
+// staging the memory-node op, same as pressing its digit.
+func TestMouseClickPicksMemNode(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'n')
+	if a.memPicker == nil {
+		t.Fatalf("status = %q, mem-node picker did not open", a.status)
+	}
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "memnode", 1)
+	a.Update(press(h.x0, h.y0))
+
+	if a.memPicker != nil {
+		t.Fatal("mem-node picker still open after clicking a node line")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
+	}
+	if a.queue.Ops[0].MemNode != 1 {
+		t.Fatalf("op.MemNode = %d, want 1", a.queue.Ops[0].MemNode)
+	}
+}
+
 // TestMemNodeInvalidDigitStagesNothing covers hasNode's guard: a digit
 // that names no topology node must leave the picker open and stage
 // nothing.

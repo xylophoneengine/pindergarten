@@ -336,6 +336,24 @@ func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// handleWizardMouse routes a left click on the manual screen's node map: it
+// moves the cursor to the clicked core and toggles it, same as moving there
+// with the arrow keys and pressing space. Ignored on the proposal screen
+// (its map isn't clickable) and for anything but a left press.
+func (a *App) handleWizardMouse(msg tea.MouseMsg) {
+	if a.wizard.screen != manualScreen || msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return
+	}
+	cores := nodeCores(a.wizard.base, a.wizard.node)
+	for _, h := range a.hits {
+		if h.kind == "wizardcore" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			a.wizard.cursor = h.index
+			a.wizard.toggleCore(cores)
+			return
+		}
+	}
+}
+
 // nodeCores returns s.Topo.Cores restricted to node, in topology order.
 func nodeCores(s *model.Snapshot, node int) []hostinfo.Core {
 	var cores []hostinfo.Core

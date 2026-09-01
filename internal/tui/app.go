@@ -114,6 +114,18 @@ func offsetHits(hits []hit, dy, dx int) []hit {
 	return out
 }
 
+// wheelDelta reports whether msg is a mouse wheel event and, if so, the
+// selection delta it maps to (-1 up, +1 down) -- mirroring the up/down key.
+func wheelDelta(msg tea.MouseMsg) (delta int, ok bool) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return -1, true
+	case tea.MouseButtonWheelDown:
+		return 1, true
+	}
+	return 0, false
+}
+
 var _ tea.Model = (*App)(nil)
 
 // New constructs an App. Call its Init to kick off the first scan.
@@ -165,26 +177,89 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handleMouse routes a mouse event: only a left click on the tab row (row
-// 0) does anything, and only when no modal/screen (confirm, wizard,
-// mem-node picker, apply flow) is open.
+// handleMouse routes a mouse event: a confirm modal or the apply flow
+// swallow every click (nothing there is clickable); an open wizard or
+// mem-node picker route to their own click handling instead of the tab
+// bar/body below. Otherwise a wheel event scrolls the active tab's
+// list/grid, a left click on row 0 switches tabs, and a left click
+// elsewhere is hit-tested against a.hits (refreshed by the last View call).
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if a.confirm != nil || a.wizard != nil || a.memPicker != nil || a.flow != nil {
+	if a.confirm != nil || a.flow != nil {
 		return a, nil
 	}
-	if msg.Y != 0 || msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+	if a.wizard != nil {
+		a.handleWizardMouse(msg)
 		return a, nil
 	}
-	for i, rng := range a.tabRanges {
-		if msg.X >= rng[0] && msg.X < rng[1] {
-			if i != a.tab {
-				a.tab = i
-				a.status = ""
+	if a.memPicker != nil {
+		a.handleMemNodeMouse(msg)
+		return a, nil
+	}
+
+	if delta, ok := wheelDelta(msg); ok {
+		a.scrollActive(delta)
+		return a, nil
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return a, nil
+	}
+	if msg.Y == 0 {
+		for i, rng := range a.tabRanges {
+			if msg.X >= rng[0] && msg.X < rng[1] {
+				if i != a.tab {
+					a.tab = i
+					a.status = ""
+				}
+				return a, nil
 			}
-			break
+		}
+		return a, nil
+	}
+	a.handleBodyClick(msg)
+	return a, nil
+}
+
+// scrollActive implements the mouse-wheel-as-up/down-key contract for
+// whichever tab is active.
+func (a *App) scrollActive(delta int) {
+	switch a.tab {
+	case 1:
+		a.moveCursor(delta * coresPerRow)
+	case 2:
+		a.moveVMSel(delta)
+	case 3:
+		a.movePendingSel(delta)
+	case 4:
+		n := 0
+		if entries, err := backup.List(a.backupDir); err == nil {
+			n = len(entries)
+		}
+		kt := tea.KeyDown
+		if delta < 0 {
+			kt = tea.KeyUp
+		}
+		a.handleBackupsKey(tea.KeyMsg{Type: kt}, &a.backupsSel, n)
+	}
+}
+
+// handleBodyClick finds the recorded hit (if any) under msg's position and
+// applies it to the matching selection field.
+func (a *App) handleBodyClick(msg tea.MouseMsg) {
+	for _, h := range a.hits {
+		if msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			switch h.kind {
+			case "vm":
+				a.vmSel = h.index
+			case "pending":
+				a.pendingSel = h.index
+			case "backup":
+				a.backupsSel = h.index
+			case "core":
+				a.cursor = h.index
+			}
+			return
 		}
 	}
-	return a, nil
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
