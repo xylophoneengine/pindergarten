@@ -86,14 +86,27 @@ func TestOverviewNodeCardsHaveBars(t *testing.T) {
 	}
 }
 
+// TestOverviewUnknownTotalMemory covers a node whose MemTotalKiB is 0 (not
+// reported by sysfs): the memory bar must say "total unknown" rather than
+// a meaningless "0%".
+func TestOverviewUnknownTotalMemory(t *testing.T) {
+	topo := testTopo()
+	topo.Nodes[0].MemTotalKiB = 0
+	s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out := renderOverviewTab(s, 100)
+	if !strings.Contains(out, "total unknown") {
+		t.Fatalf("renderOverviewTab() = %q, want \"total unknown\" for a node with MemTotalKiB == 0", out)
+	}
+}
+
 func TestCPUMapMarksPinned(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
-	out, _ := renderCPUMap(s, -1, 80)
+	out, _ := renderCPUMapTab(s, -1, 80, 24)
 	if !strings.Contains(out, "\u25cf") {
-		t.Fatalf("renderCPUMap() = %q, want it to contain the pinned glyph \\u25cf", out)
+		t.Fatalf("renderCPUMapTab() = %q, want it to contain the pinned glyph \\u25cf", out)
 	}
 	if !strings.Contains(out, "\u25cb") {
-		t.Fatalf("renderCPUMap() = %q, want it to contain the free glyph \\u25cb", out)
+		t.Fatalf("renderCPUMapTab() = %q, want it to contain the free glyph \\u25cb", out)
 	}
 }
 
@@ -207,9 +220,9 @@ func singleThreadTopo() *hostinfo.Topology {
 
 func TestCPUMapNoSMTCoreDoesNotPanic(t *testing.T) {
 	s := &model.Snapshot{Topo: singleThreadTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	out, _ := renderCPUMap(s, 0, 80)
+	out, _ := renderCPUMapTab(s, 0, 80, 24)
 	if !strings.Contains(out, "node 0") {
-		t.Fatalf("renderCPUMap() = %q, want a node 0 heading", out)
+		t.Fatalf("renderCPUMapTab() = %q, want a node 0 heading", out)
 	}
 	_ = cpuMapDetail(s, 0)
 }

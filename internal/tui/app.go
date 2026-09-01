@@ -11,7 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
@@ -70,12 +69,13 @@ type App struct {
 	// so a leftover message from an earlier flow can never collide with a
 	// later, unrelated one the way a counter restarting at zero on every
 	// new applyFlow could.
-	flowGen   int
-	reopenVM  string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
-	width     int
-	height    int
-	tabRanges [numTabs][2]int // X ranges recorded during the last render, row 0
-	hits      []hit           // clickable body regions recorded during the last render
+	flowGen    int
+	reopenVM   string // set by the drift screen's 'w' key; consumed by the next scanDoneMsg
+	width      int
+	height     int
+	tabRanges  [numTabs][2]int // X ranges recorded during the last render, row 0
+	hits       []hit           // clickable body regions recorded during the last render
+	diffScroll int             // scroll offset into a.diffView, the Backups tab's long-text diff
 }
 
 // bodyY0 is the number of lines rendered above the tab body in View: the
@@ -177,13 +177,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handleMouse routes a mouse event: a confirm modal or the apply flow
-// swallow every click (nothing there is clickable); an open wizard or
-// mem-node picker route to their own click handling instead of the tab
-// bar/body below. Otherwise a wheel event scrolls the active tab's
-// list/grid, a left click on row 0 switches tabs, and a left click
-// elsewhere is hit-tested against a.hits (refreshed by the last View call).
+// handleMouse routes a mouse event. A wheel event is handled first and
+// uniformly (it works even over the confirm/wizard/mem-node-picker/
+// apply-flow screens, on whatever that screen's own scrollable content
+// is); everything else -- a confirm modal or the apply flow swallow every
+// click (nothing else there is clickable); an open wizard or mem-node
+// picker route to their own click handling instead of the tab bar/body
+// below. A left click on row 0 switches tabs, and a left click elsewhere
+// is hit-tested against a.hits (refreshed by the last View call).
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if delta, ok := wheelDelta(msg); ok {
+		a.scrollWheel(delta)
+		return a, nil
+	}
 	if a.confirm != nil || a.flow != nil {
 		return a, nil
 	}
@@ -196,10 +202,6 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	if delta, ok := wheelDelta(msg); ok {
-		a.scrollActive(delta)
-		return a, nil
-	}
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return a, nil
 	}
@@ -219,8 +221,44 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// scrollWheel implements the mouse-wheel-as-up/down-key contract: on the
+// drift screen it moves the selected drifted op; on the results screen (or
+// the Backups tab's diff view) it scrolls that long-text view; a confirm
+// modal has nothing scrollable; otherwise it falls through to whichever
+// tab/screen is active.
+func (a *App) scrollWheel(delta int) {
+	if a.confirm != nil {
+		return
+	}
+	if a.flow != nil {
+		switch a.flow.screen {
+		case flowDrift:
+			a.moveFlowSel(delta)
+		case flowResults:
+			a.flow.resultsScroll += delta
+			if a.flow.resultsScroll < 0 {
+				a.flow.resultsScroll = 0
+			}
+		}
+		return
+	}
+	if a.wizard != nil || a.memPicker != nil {
+		return
+	}
+	if a.tab == 4 && a.diffView != "" {
+		a.diffScroll += delta
+		if a.diffScroll < 0 {
+			a.diffScroll = 0
+		}
+		return
+	}
+	a.scrollActive(delta)
+}
+
 // scrollActive implements the mouse-wheel-as-up/down-key contract for
-// whichever tab is active.
+// whichever tab is active (only reached once the apply flow, diff view,
+// wizard, and mem-node picker have all had their own say -- see
+// scrollWheel).
 func (a *App) scrollActive(delta int) {
 	switch a.tab {
 	case 1:
@@ -230,15 +268,11 @@ func (a *App) scrollActive(delta int) {
 	case 3:
 		a.movePendingSel(delta)
 	case 4:
-		n := 0
-		if entries, err := backup.List(a.backupDir); err == nil {
-			n = len(entries)
-		}
 		kt := tea.KeyDown
 		if delta < 0 {
 			kt = tea.KeyUp
 		}
-		a.handleBackupsKey(tea.KeyMsg{Type: kt}, &a.backupsSel, n)
+		a.handleBackupsKey(tea.KeyMsg{Type: kt}, &a.backupsSel, a.backupsCount())
 	}
 }
 
@@ -284,13 +318,24 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleFlowKey(msg)
 	}
 	if a.tab == 4 && a.diffView != "" {
-		// Any key dismisses the diff view first, before any other handling
-		// (tab-switch digits included) can see it -- otherwise a stale
-		// diff reappears if the user later returns to the Backups tab
-		// without having dismissed it (regression: see the test exercising
-		// '1' while a diff is open). ctrl+c already returned above, so it
-		// still quits instead of just closing the diff.
-		a.diffView = ""
+		// up/down/j/k scroll a long diff (it can be hundreds of lines);
+		// any other key dismisses it, before any other handling (tab-switch
+		// digits included) can see it -- otherwise a stale diff reappears
+		// if the user later returns to the Backups tab without having
+		// dismissed it (regression: see the test exercising '1' while a
+		// diff is open). ctrl+c already returned above, so it still quits
+		// instead of just closing the diff.
+		switch {
+		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
+			if a.diffScroll > 0 {
+				a.diffScroll--
+			}
+		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
+			a.diffScroll++
+		default:
+			a.diffView = ""
+			a.diffScroll = 0
+		}
 		return a, nil
 	}
 
@@ -354,17 +399,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case a.tab == 3 && isRune(msg, 'd'):
 		return a.discardAllPending()
 	case a.tab == 4 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown || isRune(msg, 'j') || isRune(msg, 'k')):
-		n := 0
-		if entries, err := backup.List(a.backupDir); err == nil {
-			n = len(entries)
-		}
-		a.handleBackupsKey(msg, &a.backupsSel, n)
+		a.handleBackupsKey(msg, &a.backupsSel, a.backupsCount())
 		return a, nil
 	case a.tab == 4 && msg.Type == tea.KeyEnter:
 		if diff, err := a.backupsDiff(a.backupsSel); err != nil {
 			a.status = err.Error()
 		} else {
 			a.diffView = diff
+			a.diffScroll = 0
 		}
 		return a, nil
 	case a.tab == 4 && isRune(msg, 'R'):
@@ -552,28 +594,86 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 // clicks), header, tab body, optional status message and confirm modal,
 // then the status bar. Table/grid content never wraps (each render
 // function truncates its own lines to fit); status/status-bar text is
-// prose and wraps via lipgloss. A final pass truncates (never wraps) any
-// residual line that still overflows, as a last-resort safety net.
+// prose and wraps via lipgloss. Nothing before this fix clamped to
+// a.height either: bubbletea drops overflow lines from the *top* of a
+// taller-than-terminal view, which silently shifted the tab row off row 0
+// and threw every recorded mouse-hit y off by the same amount. So the body
+// is now rendered within an explicit budget (a.height minus the other
+// chrome), and a final pass truncates (never wraps, and never lets the
+// body alone push the total over budget) any residual overflow, as a
+// last-resort safety net.
 func (a *App) View() string {
 	var b strings.Builder
 	b.WriteString(a.renderTabs())
 	b.WriteString("\n")
 	b.WriteString(a.renderHeader())
 	b.WriteString("\n")
-	body, hits := a.renderBody()
+
+	statusLine := ""
+	if a.status != "" {
+		statusLine = a.wrapProse(styleStatus(a.status))
+	}
+	keyBar := a.wrapProse(a.renderStatusBar())
+
+	chrome := 2 + lineCount(keyBar) // tab row + header + key bar
+	if statusLine != "" {
+		chrome += lineCount(statusLine)
+	}
+	body, hits := a.renderBody(a.bodyBudget(chrome))
 	a.hits = offsetHits(hits, bodyY0, 0)
+
 	b.WriteString(body)
 	b.WriteString("\n")
-	if a.status != "" {
-		b.WriteString(a.wrapProse(styleStatus(a.status)))
+	if statusLine != "" {
+		b.WriteString(statusLine)
 		b.WriteString("\n")
 	}
 	if a.confirm != nil {
 		b.WriteString(panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", effectiveWidth(a.width)))
 		b.WriteString("\n")
 	}
-	b.WriteString(a.wrapProse(a.renderStatusBar()))
-	return a.clampWidth(b.String())
+	b.WriteString(keyBar)
+	return a.clampHeight(a.clampWidth(b.String()))
+}
+
+// lineCount reports how many visual lines s spans: 0 for an empty string,
+// else its newline count + 1.
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// bodyBudget returns how many lines the tab body may use: a.height minus
+// chrome (the tab row, header, status line, and key bar), floored at 3 so
+// there's always room for something. a.height of 0 (before the first
+// WindowSizeMsg) is treated as unbounded, matching effectiveWidth's own
+// convention -- there's nothing sane to budget against yet.
+func (a *App) bodyBudget(chrome int) int {
+	if a.height <= 0 {
+		return fallbackHeight
+	}
+	budget := a.height - chrome
+	if budget < 3 {
+		budget = 3
+	}
+	return budget
+}
+
+// clampHeight is View's last-resort safety net: once every render function
+// has done its own height-budgeting, this only catches what slips through
+// (e.g. an Overview with far more NUMA nodes than fit) by dropping any
+// trailing lines beyond a.height. A no-op when a.height is unset (<= 0).
+func (a *App) clampHeight(s string) string {
+	if a.height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > a.height {
+		lines = lines[:a.height]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // wrapProse word-wraps s to a.width via lipgloss; a no-op when a.width is
@@ -654,8 +754,10 @@ func (a *App) renderHeader() string {
 // renderBody renders the active tab's body (or the wizard/apply-flow
 // screen in its place) alongside its clickable regions (0-based, relative
 // to the body's own top-left corner); it never panics ahead of the first
-// scanDoneMsg.
-func (a *App) renderBody() (string, []hit) {
+// scanDoneMsg. budget is how many lines the body may use (see bodyBudget);
+// every render function either scrolls (keeping whatever's selected
+// visible) or truncates to stay within it.
+func (a *App) renderBody(budget int) (string, []hit) {
 	w := effectiveWidth(a.width)
 
 	if a.snap == nil {
@@ -666,31 +768,74 @@ func (a *App) renderBody() (string, []hit) {
 	}
 
 	if a.wizard != nil {
-		return a.wizard.view(w)
+		return a.wizard.view(w, budget)
 	}
 	if a.memPicker != nil {
-		return a.memPicker.view(w)
+		return a.memPicker.view(w, budget)
 	}
 	if a.flow != nil {
-		return panelWrap(flowTitle(a.flow.screen), a.flow.view(w, a.height), w), nil
+		return a.renderFlow(w, budget), nil
 	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
 		return renderOverviewTab(projected, w), nil
 	case 1:
-		return renderCPUMapTab(projected, a.cursor, w)
+		return renderCPUMapTab(projected, a.cursor, w, budget)
 	case 2:
-		return renderVMsTab(projected, a.vmSel, w)
+		return renderVMsTab(projected, a.vmSel, w, budget)
 	case 3:
-		return renderPendingTab(a.queue, a.pendingSel, w)
+		return renderPendingTab(a.queue, a.pendingSel, w, budget)
 	case 4:
 		if a.diffView != "" {
-			return panel("diff", colorDiff(a.diffView), w), nil
+			return a.renderDiffView(w, budget), nil
 		}
-		return a.renderBackupsTab(a.backupsSel, w)
+		return a.renderBackupsTab(a.backupsSel, w, budget)
 	}
 	return "", nil
+}
+
+// renderDiffView renders the Backups tab's long-text diff view: colored,
+// scrolled to a.diffScroll (clamped to the actual line count so an
+// over-eager scroll never runs past the end), with a "lines N-M of T"
+// footer once it doesn't all fit.
+func (a *App) renderDiffView(w, budget int) string {
+	inner := w - 2
+	if inner < 1 {
+		inner = 1
+	}
+	lines := strings.Split(truncateLines(colorDiff(a.diffView), inner), "\n")
+	contentBudget := budget - 2
+	visible, offset, total := windowAt(lines, contentBudget, a.diffScroll)
+	body := strings.Join(visible, "\n")
+	if footer := scrollFooter(offset, len(visible), total); footer != "" {
+		body += "\n" + keyBarLabelStyle.Render(footer)
+	}
+	return panelInner("diff", body, w)
+}
+
+// renderFlow renders the apply flow's active screen inside a titled panel.
+// The review/drift/running screens are prose (word-wrap); the results
+// screen scrolls like renderDiffView (via a.flow.resultsScroll), since it
+// can be one line per applied op and there's no other "selected row" to
+// derive a window from.
+func (a *App) renderFlow(w, budget int) string {
+	if a.flow.screen != flowResults {
+		panel, _ := panelWrapH(flowTitle(a.flow.screen), a.flow.view(w, budget), w, budget)
+		return panel
+	}
+	inner := w - 2
+	if inner < 1 {
+		inner = 1
+	}
+	lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(w, budget)), "\n")
+	contentBudget := budget - 2
+	visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
+	body := strings.Join(visible, "\n")
+	if footer := scrollFooter(offset, len(visible), total); footer != "" {
+		body += "\n" + keyBarLabelStyle.Render(footer)
+	}
+	return panelInner(flowTitle(a.flow.screen), body, w)
 }
 
 // flowTitle names the apply-flow panel by its current screen.

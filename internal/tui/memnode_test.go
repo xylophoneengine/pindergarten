@@ -37,7 +37,7 @@ func TestMemNodeStagesOp(t *testing.T) {
 	if a.memPicker == nil {
 		t.Fatalf("status = %q, mem-node picker did not open", a.status)
 	}
-	view, _ := a.memPicker.view(80)
+	view, _ := a.memPicker.view(80, 24)
 	if !strings.Contains(view, "node 1") {
 		t.Fatalf("picker view = %q, want it to list node 1", view)
 	}

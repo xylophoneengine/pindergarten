@@ -32,13 +32,14 @@ const (
 // new applyFlow, so a leftover message from one flow could collide with an
 // unrelated later flow's gen. See App.flowGen's doc comment.
 type applyFlow struct {
-	screen  flowScreen
-	ops     []model.PendingOp // snapshot of the queue when the review screen opened
-	drifted []model.PendingOp // ops whose VM changed since staging
-	diffs   []string          // diffLines(op.StagedXML, current live xml), same order/index as drifted
-	sel     int               // selected row in drifted, drift screen only
-	results []apply.Result
-	running string // body text shown on the flowRunning screen
+	screen        flowScreen
+	ops           []model.PendingOp // snapshot of the queue when the review screen opened
+	drifted       []model.PendingOp // ops whose VM changed since staging
+	diffs         []string          // diffLines(op.StagedXML, current live xml), same order/index as drifted
+	sel           int               // selected row in drifted, drift screen only
+	results       []apply.Result
+	resultsScroll int    // scroll offset into the results screen, up/down/wheel-driven (results has no other "selected row" to derive one from)
+	running       string // body text shown on the flowRunning screen
 }
 
 // driftCheckedMsg carries the result of running apply.CheckDrift, mapped
@@ -113,7 +114,19 @@ func (a *App) handleFlowKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = ""
 		}
 	case flowResults:
-		// Any key dismisses the results screen, then a rescan is issued.
+		// up/down/j/k scroll a long results list (one line per applied
+		// op); any other key dismisses the screen, then a rescan is
+		// issued.
+		switch {
+		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
+			if a.flow.resultsScroll > 0 {
+				a.flow.resultsScroll--
+			}
+			return a, nil
+		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
+			a.flow.resultsScroll++
+			return a, nil
+		}
 		a.flow = nil
 		a.status = "rescanning..."
 		return a, a.scanCmd()
@@ -421,12 +434,19 @@ func pendingOpDetail(q model.Queue, sel int) string {
 }
 
 // renderPendingTab renders the Pending tab: a numbered list panel of q's op
-// summaries (the row at sel background-highlighted), and a detail panel for
-// the selected op below it, or beside it when wide. Alongside the string it
-// returns one "pending" hit per row, 0-based relative to the list's own
-// top-left corner.
-func renderPendingTab(q model.Queue, sel, w int) (string, []hit) {
+// summaries (the row at sel background-highlighted, rows scrolled to keep
+// sel visible within budget), and a detail panel for the selected op below
+// it, or beside it when wide. Alongside the string it returns one
+// "pending" hit per visible row, bounded to the list panel's inner width
+// (so a click in a neighboring detail panel can't land on it), 0-based
+// relative to the list's own top-left corner.
+func renderPendingTab(q model.Queue, sel, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
+
+	primaryBudget, secondaryBudget := budget, budget
+	if !sideBySide {
+		primaryBudget, secondaryBudget = splitStackedBudget(budget, q.Len())
+	}
 
 	list := "no pending operations"
 	var hits []hit
@@ -438,17 +458,29 @@ func renderPendingTab(q model.Queue, sel, w int) (string, []hit) {
 				line = selectedRowStyle.Render(line)
 			}
 			lines[i] = line
-			hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: hitWide, kind: "pending", index: i})
 		}
-		list = strings.Join(lines, "\n")
+		visible, offset, _ := scrollWindow(lines, primaryBudget-2, sel)
+		list = strings.Join(visible, "\n")
+		for i := range visible {
+			hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: primaryW - 2, kind: "pending", index: offset + i})
+		}
 	}
 	listPanel := panel("Pending", list, primaryW)
 	hits = offsetHits(hits, 1, 1)
 
-	detailPanel := panelWrap("detail", pendingOpDetail(q, sel), secondaryW)
+	var detailPanel string
+	if secondaryBudget > 0 {
+		detailPanel, _ = panelWrapH("detail", pendingOpDetail(q, sel), secondaryW, secondaryBudget)
+	}
 
 	if sideBySide {
+		if detailPanel == "" {
+			return listPanel, hits
+		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, listPanel, " ", detailPanel), hits
+	}
+	if detailPanel == "" {
+		return listPanel, hits
 	}
 	return listPanel + "\n" + detailPanel, hits
 }

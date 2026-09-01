@@ -52,34 +52,29 @@ func nodeThreadStats(s *model.Snapshot, node hostinfo.Node) (pinned, pending, to
 	return pinned, pending, total
 }
 
-// overviewNodeCard renders one NUMA node's card body: the original
-// mem/threads/bound-vm-mem summary line (kept verbatim so existing
-// assertions on it still hold), a memory bar, a threads bar (pinned solid,
-// pending a second color), and the gpus:/vms: lists.
+// overviewNodeCard renders one NUMA node's card body: a memory bar (with
+// its used/total and, when overcommitted, a red OVER marker right next to
+// the percentage -- MemTotalKiB == 0 shows "total unknown" instead of a
+// meaningless 0%), a threads bar (pinned solid, pending a second color),
+// and the gpus:/vms: lists. The node's own id is the panel's title, not a
+// line here, and free/pinned-count figures already visible in the bars
+// aren't repeated in a separate summary line.
 func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
-	pinned := 0
-	for _, t := range node.Threads {
-		if len(s.Use[t].VMs) > 0 {
-			pinned++
-		}
-	}
 	bound := s.BoundMemKiB[node.ID]
 
 	var b strings.Builder
-	line := fmt.Sprintf("node %d  mem %s free %s  threads %d (%d pinned)  bound-vm-mem %s",
-		node.ID, fmtKiB(node.MemTotalKiB), fmtKiB(node.MemFreeKiB), len(node.Threads), pinned, fmtKiB(bound))
-	if bound > node.MemTotalKiB {
-		line += " " + overStyle.Render("OVER")
+	if node.MemTotalKiB == 0 {
+		fmt.Fprintf(&b, "memory %s total unknown  used %s\n", bar(overviewBarWidth, 0, barFilledStyle), fmtKiB(bound))
+	} else {
+		memFrac := float64(bound) / float64(node.MemTotalKiB)
+		pct := int(memFrac*100 + 0.5)
+		over := ""
+		if bound > node.MemTotalKiB {
+			over = " " + overStyle.Render("OVER")
+		}
+		fmt.Fprintf(&b, "memory %s %d%%%s  %s/%s\n", bar(overviewBarWidth, memFrac, barFilledStyle), pct, over, fmtKiB(bound), fmtKiB(node.MemTotalKiB))
 	}
-	b.WriteString(line)
-	b.WriteString("\n")
-
-	memFrac := 0.0
-	if node.MemTotalKiB > 0 {
-		memFrac = float64(bound) / float64(node.MemTotalKiB)
-	}
-	pct := int(memFrac*100 + 0.5)
-	fmt.Fprintf(&b, "memory %s %d%%  %s/%s\n", bar(overviewBarWidth, memFrac, barFilledStyle), pct, fmtKiB(bound), fmtKiB(node.MemTotalKiB))
+	fmt.Fprintf(&b, "free %s\n", fmtKiB(node.MemFreeKiB))
 
 	pinnedN, pendingN, total := nodeThreadStats(s, node)
 	pinnedFrac, pendingFrac := 0.0, 0.0
@@ -156,100 +151,117 @@ func vmsOnNode(s *model.Snapshot, node int) string {
 	return strings.Join(names, ", ")
 }
 
-// cpuMapLegend is the CPU Map panel's bottom legend line.
+// cpuMapLegend is the CPU Map block's bottom legend line, shown once below
+// every node's panel rather than repeated per panel.
 func cpuMapLegend() string {
 	return "\u25cf pinned  \u25cb free  \u25d0 shared  (" + pendingGlyphStyle.Render("yellow") + " = pending)"
 }
 
-// renderCPUMapTab renders the CPU Map tab: one bordered panel holding
-// every node's cell grid plus a legend, and a detail panel for the
-// cursor's core (below it, or beside it when wide).
-func renderCPUMapTab(s *model.Snapshot, cursor, w int) (string, []hit) {
+// cpuNodeMinWidth is the minimum per-panel width (CPU Map's per-node
+// panels) below which they stack instead of sitting side by side.
+const cpuNodeMinWidth = 20
+
+// globalCoreIndices returns, for node's cores in nodeCores(s, node) order,
+// their index in the unrestricted s.Topo.Cores -- so a local (per-node)
+// core position can be translated back to the global one the CPU Map
+// tab's cursor (and vice versa, via localCoreIndex) is expressed in.
+func globalCoreIndices(s *model.Snapshot, node int) []int {
+	var idx []int
+	for i, c := range s.Topo.Cores {
+		if c.Node == node {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// localCoreIndex returns the position of target within idx (a
+// globalCoreIndices result), or -1 if target isn't in it -- i.e. the
+// cursor belongs to a different node than the one idx was built for.
+func localCoreIndex(idx []int, target int) int {
+	for i, g := range idx {
+		if g == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// renderCPUMapTab renders the CPU Map tab: one bordered panel per NUMA
+// node (side by side when each would get at least cpuNodeMinWidth
+// columns, else stacked) holding that node's cell grid, a legend line
+// shown once below them all, and a detail panel for the cursor's core
+// (below the node panels, or beside them when wide). Node panels that
+// still don't fit the height budget are simply truncated (there's no
+// single "selected row" to keep visible across a whole node's grid the
+// way there is for a table).
+func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
+	nodePanelW, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
 
-	grid, hits := renderCPUMap(s, cursor, primaryW)
-	body := grid + "\n" + cpuMapLegend()
-	mapPanel := panel("CPU Map", body, primaryW)
-	hits = offsetHits(hits, 1, 1)
+	naturalNodeLines := 0
+	for _, node := range s.Topo.Nodes {
+		rows := (len(nodeCores(s, node.ID)) + coresPerRow - 1) / coresPerRow
+		if rows < 1 {
+			rows = 1
+		}
+		if nodeSideBySide {
+			if h := rows + 2; h > naturalNodeLines {
+				naturalNodeLines = h
+			}
+		} else {
+			naturalNodeLines += rows + 2
+		}
+	}
 
-	detailPanel := panelWrap("core detail", cpuMapDetail(s, cursor), secondaryW)
+	primaryBudget, secondaryBudget := budget, budget
+	if !sideBySide {
+		primaryBudget, secondaryBudget = splitStackedBudget(budget, naturalNodeLines+1)
+	}
+
+	nodeBudget := primaryBudget - 1 // reserve the legend line below
+	if nodeBudget < 3 {
+		nodeBudget = 3
+	}
+
+	panels := make([]string, len(s.Topo.Nodes))
+	var hits []hit
+	cumX, cumY := 0, 0
+	for i, node := range s.Topo.Nodes {
+		idx := globalCoreIndices(s, node.ID)
+		grid, gridHits := renderNodeMap(s, node.ID, nil, localCoreIndex(idx, cursor), "core")
+		for j := range gridHits {
+			gridHits[j].index = idx[gridHits[j].index]
+		}
+		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelW, nodeBudget)
+		panels[i] = p
+
+		gridHits = offsetHits(clipHitsToWindow(gridHits, kept), 1, 1) // border
+		if nodeSideBySide {
+			hits = append(hits, offsetHits(gridHits, 0, cumX)...)
+			cumX += nodePanelW + 1 // +1 for joinPanels' 1-column gap
+		} else {
+			hits = append(hits, offsetHits(gridHits, cumY, 0)...)
+			cumY += lineCount(p)
+		}
+	}
+	mapBlock := joinPanels(panels, nodeSideBySide) + "\n" + cpuMapLegend()
+
+	var detailPanel string
+	if secondaryBudget > 0 {
+		detailPanel, _ = panelWrapH("core detail", cpuMapDetail(s, cursor), secondaryW, secondaryBudget)
+	}
 
 	if sideBySide {
-		return lipgloss.JoinHorizontal(lipgloss.Top, mapPanel, " ", detailPanel), hits
-	}
-	return mapPanel + "\n" + detailPanel, hits
-}
-
-// renderCPUMap renders every node's cores as a grid of two-glyph cells (one
-// glyph per sibling thread), 32 cells per row, with a "node N" heading
-// before each node's cores. cursor is a position in s.Topo.Cores; that cell
-// renders reverse-video. Alongside the string it returns one "core" hit per
-// cell, 0-based relative to the grid's own top-left corner (x0 = the
-// cell's column * 3, since each cell is 2 glyphs wide plus a 1-column
-// separator). w is unused for now: an overlong row is truncated, not
-// wrapped, by the caller's panel().
-func renderCPUMap(s *model.Snapshot, cursor, w int) (string, []hit) {
-	var b strings.Builder
-	var hits []hit
-	curNode := -1
-	col := 0
-	row := 0
-	for i, core := range s.Topo.Cores {
-		if i == 0 || core.Node != curNode {
-			if i != 0 {
-				b.WriteString("\n\n")
-				row += 2
-			}
-			fmt.Fprintf(&b, "node %d\n", core.Node)
-			row++
-			curNode = core.Node
-			col = 0
-		} else if col == coresPerRow {
-			b.WriteString("\n")
-			row++
-			col = 0
+		if detailPanel == "" {
+			return mapBlock, hits
 		}
-		if col > 0 {
-			b.WriteString(" ")
-		}
-		x0 := col * 3
-		hits = append(hits, hit{y0: row, y1: row + 1, x0: x0, x1: x0 + 2, kind: "core", index: i})
-		b.WriteString(renderCell(s, core, i == cursor))
-		col++
+		return lipgloss.JoinHorizontal(lipgloss.Top, mapBlock, " ", detailPanel), hits
 	}
-	b.WriteString("\n")
-	return b.String(), hits
-}
-
-// renderCell renders one core's two-glyph cell. A single-thread core (no
-// SMT sibling) renders its one glyph followed by a space.
-func renderCell(s *model.Snapshot, core hostinfo.Core, isCursor bool) string {
-	var glyphs strings.Builder
-	for _, t := range core.Threads {
-		glyphs.WriteString(threadGlyph(s, t, isCursor))
+	if detailPanel == "" {
+		return mapBlock, hits
 	}
-	if len(core.Threads) == 1 {
-		glyphs.WriteString(" ")
-	}
-	return glyphs.String()
-}
-
-// threadGlyph returns the styled glyph for one thread: pinned (solid),
-// free, or shared (2+ claimants counting VMs+Pending); a pending-only claim
-// keeps the pinned glyph but in a distinct color. The cursor cell instead
-// renders its plain glyph reverse-video, ignoring the pending color.
-func threadGlyph(s *model.Snapshot, t int, isCursor bool) string {
-	glyph := glyphChar(s, t)
-	use := s.Use[t]
-	total := len(use.VMs) + len(use.Pending)
-
-	if isCursor {
-		return cursorStyle.Render(glyph)
-	}
-	if total == 1 && len(use.Pending) == 1 {
-		return pendingGlyphStyle.Render(glyph)
-	}
-	return glyph
+	return mapBlock + "\n" + detailPanel, hits
 }
 
 // glyphChar returns thread t's plain (unstyled) glyph: pinned (solid), free,
@@ -426,15 +438,11 @@ func fitCell(val string, w int) string {
 	return padRight(val, w)
 }
 
-// renderVMs renders the VMs tab's table: name, state, vcpus, mem, pins
-// summary, mem node, gpu node, and flag badges, one row per VM (s.VMs is
-// sorted by name). Rows never wrap: NAME and PINS are capped (truncated
-// with ".."), and STATE/MEM/MEMNODE/GPUNODE are dropped -- in that priority
-// -- if the table still doesn't fit w. The row at sel gets a background
-// highlight instead of full reverse video. Alongside the string it returns
-// one "vm" hit per row (whole-width, 0-based relative to the table's own
-// top-left corner: row 0 is the header).
-func renderVMs(s *model.Snapshot, sel int, w int) (string, []hit) {
+// buildVMCols builds the VMs table's 8 columns and their per-row values
+// (s.VMs order) -- shared by renderVMs (which may drop some, to fit a
+// width) and vmsNaturalWidth (which needs to know how wide the table would
+// be with none dropped, to decide whether dropping is even necessary).
+func buildVMCols(s *model.Snapshot) []vmCol {
 	cols := []vmCol{
 		{name: "NAME", cap: vmNameCap},
 		{name: "STATE"},
@@ -456,7 +464,34 @@ func renderVMs(s *model.Snapshot, sel int, w int) (string, []hit) {
 		cols[6].vals = append(cols[6].vals, gpuNodeCol(v))
 		cols[7].vals = append(cols[7].vals, flagBadges(v))
 	}
+	return cols
+}
 
+// vmsNaturalWidth returns how wide the VMs table would be with every
+// column shown (NAME/PINS still capped -- those caps are permanent
+// regardless of available width, not part of the "drop columns" fallback).
+func vmsNaturalWidth(cols []vmCol) int {
+	total := 0
+	for _, c := range cols {
+		total += vmColWidth(c)
+	}
+	if len(cols) > 1 {
+		total += 2 * (len(cols) - 1)
+	}
+	return total
+}
+
+// renderVMs renders the VMs tab's table: name, state, vcpus, mem, pins
+// summary, mem node, gpu node, and flag badges, one row per VM (s.VMs is
+// sorted by name). Rows never wrap: NAME and PINS are capped (truncated
+// with ".."), and STATE/MEM/MEMNODE/GPUNODE are dropped -- in that priority
+// -- if the table still doesn't fit w. Rows scroll (keeping sel visible)
+// to fit rowBudget; the row at sel gets a background highlight instead of
+// full reverse video. Alongside the string it returns one "vm" hit per
+// visible row, bounded to w (so a click in a neighboring panel in a
+// two-column layout can't land on it), 0-based relative to the table's own
+// top-left corner: row 0 is the header.
+func renderVMs(cols []vmCol, sel, w, rowBudget int) (string, []hit) {
 	active := make(map[string]bool, len(cols))
 	widths := make(map[string]int, len(cols))
 	for _, c := range cols {
@@ -498,16 +533,24 @@ func renderVMs(s *model.Snapshot, sel int, w int) (string, []hit) {
 		return cells
 	}
 
-	var lines []string
-	lines = append(lines, tableHeaderStyle.Render(strings.Join(rowCells(-1), "  ")))
-	hits := make([]hit, 0, len(s.VMs))
-	for i := range s.VMs {
+	nRows := 0
+	if len(cols) > 0 {
+		nRows = len(cols[0].vals)
+	}
+	rows := make([]string, nRows)
+	for i := 0; i < nRows; i++ {
 		line := strings.Join(rowCells(i), "  ")
 		if i == sel {
 			line = selectedRowStyle.Render(line)
 		}
-		lines = append(lines, line)
-		hits = append(hits, hit{y0: i + 1, y1: i + 2, x0: 0, x1: hitWide, kind: "vm", index: i})
+		rows[i] = line
+	}
+	visible, offset, _ := scrollWindow(rows, rowBudget-1, sel) // -1 reserves the header row
+
+	lines := append([]string{tableHeaderStyle.Render(strings.Join(rowCells(-1), "  "))}, visible...)
+	hits := make([]hit, 0, len(visible))
+	for i := range visible {
+		hits = append(hits, hit{y0: i + 1, y1: i + 2, x0: 0, x1: w, kind: "vm", index: offset + i})
 	}
 	return strings.Join(lines, "\n"), hits
 }
@@ -548,10 +591,27 @@ func vmDetail(s *model.Snapshot, sel int) string {
 
 // renderVMsTab renders the VMs tab: the table panel, and a detail panel
 // (titled with the selected VM's name) below it, or beside it when wide.
-func renderVMsTab(s *model.Snapshot, sel, w int) (string, []hit) {
-	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
+// Two-column only kicks in when the table actually fits the primary
+// panel's width with every column shown -- otherwise a merely-slightly-
+// wider terminal would counterintuitively show *less* (dropping columns
+// it didn't need to at the previous, narrower, single-column width), so it
+// stays stacked (full width) instead.
+func renderVMsTab(s *model.Snapshot, sel, w, budget int) (string, []hit) {
+	cols := buildVMCols(s)
+	natural := vmsNaturalWidth(cols)
 
-	table, hits := renderVMs(s, sel, primaryW-2)
+	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
+	if sideBySide && natural > primaryW-2 {
+		sideBySide = false
+		primaryW, secondaryW = w, w
+	}
+
+	primaryBudget, secondaryBudget := budget, budget
+	if !sideBySide {
+		primaryBudget, secondaryBudget = splitStackedBudget(budget, len(s.VMs)+1)
+	}
+
+	table, hits := renderVMs(cols, sel, primaryW-2, primaryBudget-2)
 	tablePanel := panel("VMs", table, primaryW)
 	hits = offsetHits(hits, 1, 1)
 
@@ -559,10 +619,19 @@ func renderVMsTab(s *model.Snapshot, sel, w int) (string, []hit) {
 	if sel >= 0 && sel < len(s.VMs) {
 		title = s.VMs[sel].Name
 	}
-	detailPanel := panelWrap(title, vmDetail(s, sel), secondaryW)
+	var detailPanel string
+	if secondaryBudget > 0 {
+		detailPanel, _ = panelWrapH(title, vmDetail(s, sel), secondaryW, secondaryBudget)
+	}
 
 	if sideBySide {
+		if detailPanel == "" {
+			return tablePanel, hits
+		}
 		return lipgloss.JoinHorizontal(lipgloss.Top, tablePanel, " ", detailPanel), hits
+	}
+	if detailPanel == "" {
+		return tablePanel, hits
 	}
 	return tablePanel + "\n" + detailPanel, hits
 }

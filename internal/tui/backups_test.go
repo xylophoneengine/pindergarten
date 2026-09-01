@@ -43,21 +43,21 @@ func TestDiffLines(t *testing.T) {
 func TestRenderBackupsLists(t *testing.T) {
 	a := testApp(t, false)
 
-	empty, _ := a.renderBackups(0, 80)
+	empty, _ := a.renderBackupsTab(0, 80, 24)
 	if !strings.Contains(empty, "no backups") {
-		t.Fatalf("renderBackups on empty dir = %q, want it to mention no backups", empty)
+		t.Fatalf("renderBackupsTab on empty dir = %q, want it to mention no backups", empty)
 	}
 
 	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", plainVMXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
 
-	got, _ := a.renderBackups(0, 80)
+	got, _ := a.renderBackupsTab(0, 80, 24)
 	if !strings.Contains(got, "plain-vm") {
-		t.Fatalf("renderBackups = %q, want it to contain the VM name", got)
+		t.Fatalf("renderBackupsTab = %q, want it to contain the VM name", got)
 	}
 	if !strings.Contains(got, "pin 2 vcpus -> node 0") {
-		t.Fatalf("renderBackups = %q, want it to contain the op description", got)
+		t.Fatalf("renderBackupsTab = %q, want it to contain the op description", got)
 	}
 }
 

@@ -98,10 +98,15 @@ func colorDiff(diff string) string {
 
 // backupsTable renders the TIME/VM/OPERATION table for entries (natural
 // column widths; panel() truncates as a safety net if it still doesn't
-// fit), with the row at sel background-highlighted. Alongside the string
-// it returns one "backup" hit per row, 0-based relative to the table's own
-// top-left corner (row 0 is the header).
-func backupsTable(entries []backup.Entry, sel int) (string, []hit) {
+// fit), with the row at sel background-highlighted and only the rows
+// within [offset, offset+len(entries)) actually laid out (the caller has
+// already sliced entries to fit its height budget; offset translates a
+// visible row back to its real index in the full list for hit-testing and
+// selection). Alongside the string it returns one "backup" hit per row,
+// bounded to w (the table's inner width, so a click in a neighboring panel
+// in a two-column layout can't land on it), 0-based relative to the
+// table's own top-left corner (row 0 is the header).
+func backupsTable(entries []backup.Entry, sel, offset, w int) (string, []hit) {
 	names := []string{"TIME", "VM", "OPERATION"}
 	vals := make([][]string, len(names))
 	for _, e := range entries {
@@ -133,37 +138,66 @@ func backupsTable(entries []backup.Entry, sel int) (string, []hit) {
 	lines := []string{tableHeaderStyle.Render(strings.Join(rowCells(-1), "  "))}
 	hits := make([]hit, 0, len(entries))
 	for i := range entries {
+		realIdx := offset + i
 		line := strings.Join(rowCells(i), "  ")
-		if i == sel {
+		if realIdx == sel {
 			line = selectedRowStyle.Render(line)
 		}
 		lines = append(lines, line)
-		hits = append(hits, hit{y0: i + 1, y1: i + 2, x0: 0, x1: hitWide, kind: "backup", index: i})
+		hits = append(hits, hit{y0: i + 1, y1: i + 2, x0: 0, x1: w, kind: "backup", index: realIdx})
 	}
 	return strings.Join(lines, "\n"), hits
 }
 
-// renderBackups renders the Backups tab's table body (no panel/border):
-// "no backups in <dir>" for an empty dir, an error line for a List error,
-// else backupsTable's TIME/VM/OPERATION table. w is currently unused
-// (panel() applies the width safety net).
-func (a *App) renderBackups(sel int, w int) (string, []hit) {
+// backupsCount returns len(backup.List(a.backupDir)), or 0 on a List error
+// -- shared by every caller that just needs the count (the key handler and
+// the mouse-wheel handler), so a single input event lists the directory
+// once rather than each caller re-listing it.
+func (a *App) backupsCount() int {
 	entries, err := backup.List(a.backupDir)
 	if err != nil {
-		return fmt.Sprintf("error listing backups: %v", err), nil
+		return 0
 	}
-	if len(entries) == 0 {
-		return fmt.Sprintf("no backups in %s", a.backupDir), nil
-	}
-	return backupsTable(entries, sel)
+	return len(entries)
 }
 
 // renderBackupsTab renders the Backups tab: renderBackups's table (or
-// message) inside a titled panel, plus a one-line action hint.
-func (a *App) renderBackupsTab(sel, w int) (string, []hit) {
-	body, hits := a.renderBackups(sel, w)
-	body += "\n\nenter: view diff  R: restore (edit mode)"
+// message) inside a titled panel, plus a one-line action hint. Rows scroll
+// (keeping sel visible) to fit budget.
+func (a *App) renderBackupsTab(sel, w, budget int) (string, []hit) {
+	entries, err := backup.List(a.backupDir)
+	if err != nil {
+		return panel("Backups", fmt.Sprintf("error listing backups: %v", err), w), nil
+	}
+	if len(entries) == 0 {
+		return panel("Backups", fmt.Sprintf("no backups in %s", a.backupDir), w), nil
+	}
+
+	rowBudget := budget - 3 // 2 borders + 1 header row
+	visible, offset, _ := scrollEntries(entries, rowBudget, sel)
+
+	table, hits := backupsTable(visible, sel, offset, w-2)
+	body := table + "\n\nenter: view diff  R: restore (edit mode)"
 	return panel("Backups", body, w), offsetHits(hits, 1, 1)
+}
+
+// scrollEntries mirrors scrollWindow's "keep sel visible" rule, but over a
+// []backup.Entry instead of pre-rendered lines (backupsTable needs the raw
+// entries, not lines, since it computes column widths from the visible
+// slice).
+func scrollEntries(entries []backup.Entry, budget, sel int) ([]backup.Entry, int, int) {
+	total := len(entries)
+	if budget <= 0 || total <= budget {
+		return entries, 0, 0
+	}
+	offset := sel - budget + 1
+	if offset < 0 {
+		offset = 0
+	}
+	if max := total - budget; offset > max {
+		offset = max
+	}
+	return entries[offset : offset+budget], offset, total
 }
 
 // backupsEntry returns the sel-th entry from backup.List(a.backupDir),

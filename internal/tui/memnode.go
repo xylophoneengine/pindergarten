@@ -92,11 +92,12 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 }
 
 // view renders the node list (with free memory) and the VM's GPU node, if
-// any, inside a titled panel. Alongside the string it returns one
-// "memnode" hit per node line, screen-absolute (0-based relative to the
-// picker body's own top-left corner), indexed by node ID (so a click maps
-// straight onto the same pickMemNode path as its digit key).
-func (p *memNodePicker) view(width int) (string, []hit) {
+// any, inside a titled panel, trimmed to fit budget. Alongside the string
+// it returns one "memnode" hit per node line (dropped if scrolled out of
+// view), screen-absolute (0-based relative to the picker body's own
+// top-left corner), indexed by node ID (so a click maps straight onto the
+// same pickMemNode path as its digit key).
+func (p *memNodePicker) view(width, budget int) (string, []hit) {
 	var b strings.Builder
 	var hits []hit
 	for i, n := range p.snap.Topo.Nodes {
@@ -109,7 +110,8 @@ func (p *memNodePicker) view(width int) (string, []hit) {
 	b.WriteString("\ndigit/click: choose node  esc cancel")
 
 	title := "set memory node for " + p.vm
-	return panelWrap(title, strings.TrimRight(b.String(), "\n"), width), offsetHits(hits, 1, 1)
+	body, kept := panelWrapH(title, strings.TrimRight(b.String(), "\n"), width, budget)
+	return body, offsetHits(clipHitsToWindow(hits, kept), 1, 1)
 }
 
 // statusBarHint returns the status bar's replacement content while the

@@ -6,6 +6,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -24,6 +25,10 @@ const sideCardMinWidth = 50
 // yet): generous enough that no table column gets dropped and nothing
 // truncates, matching the pre-panel behavior tests rely on.
 const fallbackWidth = 300
+
+// fallbackHeight mirrors fallbackWidth for a.height: generous enough that
+// nothing scrolls/truncates before the first WindowSizeMsg lands.
+const fallbackHeight = 200
 
 // effectiveWidth returns w, or fallbackWidth when w is unset (<= 0).
 func effectiveWidth(w int) int {
@@ -174,6 +179,161 @@ func panelWrap(title, body string, w int) string {
 	inner := w - 2
 	wrapped := lipgloss.NewStyle().Width(inner).Render(body)
 	return panelInner(title, wrapped, w)
+}
+
+// panelH is panel with an additional height clip: body is truncated
+// (top-down, no scroll tracking -- callers whose content has a natural
+// "keep this visible" target should pre-slice it, e.g. via scrollWindow,
+// before calling this) to at most h-2 content lines. Returns the panel
+// plus how many content lines actually survived, so the caller can drop
+// any hits recorded past that point via clipHitsToWindow.
+func panelH(title, body string, w, h int) (string, int) {
+	if w < 4 {
+		w = 4
+	}
+	if h < 3 {
+		h = 3
+	}
+	lines := strings.Split(truncateLines(body, w-2), "\n")
+	budget := h - 2
+	if budget < 1 {
+		budget = 1
+	}
+	if len(lines) > budget {
+		lines = lines[:budget]
+	} else {
+		budget = len(lines)
+	}
+	return panelInner(title, strings.Join(lines, "\n"), w), budget
+}
+
+// panelWrapH is panelWrap with the same height clip as panelH (word-wrap
+// first, then truncate top-down to at most h-2 lines). Returns the panel
+// plus how many content lines survived.
+func panelWrapH(title, body string, w, h int) (string, int) {
+	if w < 4 {
+		w = 4
+	}
+	if h < 3 {
+		h = 3
+	}
+	inner := w - 2
+	if inner < 1 {
+		inner = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(inner).Render(body)
+	lines := strings.Split(wrapped, "\n")
+	budget := h - 2
+	if budget < 1 {
+		budget = 1
+	}
+	if len(lines) > budget {
+		lines = lines[:budget]
+	} else {
+		budget = len(lines)
+	}
+	return panelInner(title, strings.Join(lines, "\n"), w), budget
+}
+
+// minSecondaryBudget is the smallest height budget worth giving a stacked
+// tab's secondary (detail) panel; below that it's dropped entirely rather
+// than rendered as an unreadable sliver.
+const minSecondaryBudget = 4
+
+// splitStackedBudget divides a stacked tab's total body-height budget
+// between its primary (table/grid) panel and its secondary (detail) one:
+// the primary gets only what it naturally needs (primaryNaturalLines + 2
+// for its borders), so a short list doesn't starve the detail panel, and
+// the secondary gets the rest -- down to a minimum reserve, below which
+// it's dropped entirely (budget 0) rather than rendered as an unreadable
+// sliver.
+func splitStackedBudget(budget, primaryNaturalLines int) (primary, secondary int) {
+	if budget <= minSecondaryBudget+3 {
+		return budget, 0
+	}
+	need := primaryNaturalLines + 2
+	if max := budget - minSecondaryBudget; need > max {
+		need = max
+	}
+	if need < 3 {
+		need = 3
+	}
+	return need, budget - need
+}
+
+// scrollWindow slices lines (already-built content, one row per visual
+// line) down to at most budget lines, keeping index `keep` visible by
+// pinning it to the bottom edge once the content overflows. The offset is
+// always recomputed fresh from (len(lines), keep, budget) -- callers don't
+// need to persist any scroll state for this. offset/total are both 0 when
+// nothing was trimmed.
+func scrollWindow(lines []string, budget, keep int) (window []string, offset, total int) {
+	total = len(lines)
+	if budget <= 0 || total <= budget {
+		return lines, 0, 0
+	}
+	offset = keep - budget + 1
+	if offset < 0 {
+		offset = 0
+	}
+	if max := total - budget; offset > max {
+		offset = max
+	}
+	return lines[offset : offset+budget], offset, total
+}
+
+// clampScroll clamps an explicit (user-driven) scroll offset into
+// [0, max(0, total-budget)].
+func clampScroll(offset, budget, total int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if budget <= 0 || total <= budget {
+		return 0
+	}
+	if max := total - budget; offset > max {
+		offset = max
+	}
+	return offset
+}
+
+// windowAt slices lines to at most budget of them, starting at an explicit
+// (already-clamped-by-the-caller-via-clampScroll) offset. offset/total are
+// both 0 when nothing was trimmed, matching scrollWindow's convention.
+func windowAt(lines []string, budget, offset int) (window []string, usedOffset, total int) {
+	total = len(lines)
+	if budget <= 0 || total <= budget {
+		return lines, 0, 0
+	}
+	offset = clampScroll(offset, budget, total)
+	return lines[offset : offset+budget], offset, total
+}
+
+// scrollFooter renders a "lines N-M of T" footer for a scrolled view, or ""
+// when nothing was trimmed (total == 0, scrollWindow/windowAt's shared
+// convention for "it all fit already").
+func scrollFooter(offset, shown, total int) string {
+	if total == 0 {
+		return ""
+	}
+	return fmt.Sprintf("lines %d-%d of %d", offset+1, offset+shown, total)
+}
+
+// clipHitsToWindow drops hits whose row falls outside [0, budget) --
+// for content that was simply top-truncated (no scroll offset) to fit a
+// height budget, e.g. a CPU Map node panel or a wizard/mem-node-picker
+// panel.
+func clipHitsToWindow(hits []hit, budget int) []hit {
+	if budget <= 0 {
+		return nil
+	}
+	out := make([]hit, 0, len(hits))
+	for _, h := range hits {
+		if h.y0 < budget {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // bar renders a fixed-width single-tone ASCII progress bar, e.g.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -321,8 +323,8 @@ func TestOverviewUsesProjectedSnapshot(t *testing.T) {
 	})
 
 	view := a.View()
-	if !strings.Contains(view, "bound-vm-mem 1000.0K") {
-		t.Fatalf("View() = %q, want the staged op's membind reflected in node 0's bound-vm-mem", view)
+	if !strings.Contains(view, "1000.0K/1000.0K") {
+		t.Fatalf("View() = %q, want the staged op's membind reflected in node 0's memory bar (bound/total)", view)
 	}
 }
 
@@ -555,14 +557,15 @@ func TestVMsTableFitsNarrowWidth(t *testing.T) {
 	}
 }
 
-// TestVMsTabTwoColumnAtWideWidth covers the wide-terminal layout: at width
-// 140 the VMs tab must render the table and detail panels side by side
-// (both panel titles land on the same top-border line), not stacked.
+// TestVMsTabTwoColumnAtWideWidth covers the wide-terminal layout: at a
+// width comfortably wider than the table's natural (all-8-columns) width,
+// the VMs tab must render the table and detail panels side by side (both
+// panel titles land on the same top-border line), not stacked.
 func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
 	a.tab = 2
-	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	a.Update(tea.WindowSizeMsg{Width: 200, Height: 24})
 
 	lines := strings.Split(a.View(), "\n")
 	if len(lines) <= bodyY0 {
@@ -571,6 +574,123 @@ func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 	top := lines[bodyY0]
 	if !strings.Contains(top, "VMs") || !strings.Contains(top, "plain-vm") {
 		t.Fatalf("top border line = %q, want both the table panel's \"VMs\" title and the detail panel's \"plain-vm\" title on the same line (side by side)", top)
+	}
+}
+
+// manyVMXMLs returns n distinct plain (unpinned) VM domain XMLs, named
+// vm0..vm(n-1), for tests that need a VM list long enough to overflow a
+// short terminal.
+func manyVMXMLs(n int) map[string]string {
+	xmls := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("vm%02d", i)
+		xmls[name] = fmt.Sprintf(`<domain type='kvm'>
+  <name>%s</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f%04d</uuid>
+  <memory unit='KiB'>1000</memory>
+  <vcpu>1</vcpu>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`, name, i)
+	}
+	return xmls
+}
+
+// TestVMsHeightBudgetKeepsSelectionVisibleAndClickable covers the fix for
+// bubbletea silently dropping lines off the *top* of a taller-than-
+// terminal view (which shifted the tab row off row 0 and threw every
+// recorded mouse-hit y off by the overflow amount): with 40 VMs at height
+// 24, the whole View() must fit in 24 lines, row 0 must still be the tab
+// row, and selecting the last VM must scroll it into view -- with a click
+// on its actual on-screen row selecting it.
+func TestVMsHeightBudgetKeepsSelectionVisibleAndClickable(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(40), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.vmSel = 39
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("View() has %d lines, want <= 24 (height budget): %q", len(lines), view)
+	}
+	if !strings.Contains(lines[0], "Overview") {
+		t.Fatalf("lines[0] = %q, want the tab row (bubbletea drops overflow from the top, so this must stay row 0)", lines[0])
+	}
+
+	h := findHit(t, a, "vm", 39)
+	a.Update(press(h.x0, h.y0))
+	if a.vmSel != 39 {
+		t.Fatalf("vmSel = %d after clicking vm 39's on-screen row, want 39 (hit y must match the actual scrolled position)", a.vmSel)
+	}
+}
+
+// TestBackupsDiffHeightBudgetAndWheelScroll covers the same fix for the
+// Backups tab's diff view: a large diff must fit the height budget, and
+// the mouse wheel must scroll it.
+func TestBackupsDiffHeightBudgetAndWheelScroll(t *testing.T) {
+	a := testApp(t, false)
+	bigXML := plainVMXML + "\n" + strings.Repeat("  <!-- padding line -->\n", 300)
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	a.tab = 4
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	sendKeyType(a, tea.KeyEnter)
+	if a.diffView == "" {
+		t.Fatal("diff view did not open")
+	}
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("View() has %d lines, want <= 24 (height budget): %q", len(lines), view)
+	}
+
+	before := a.diffScroll
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	if a.diffScroll <= before {
+		t.Fatalf("diffScroll = %d after wheel down, want > %d", a.diffScroll, before)
+	}
+}
+
+// TestMouseClickInDetailPanelDoesNotChangeSelection covers the fix for row
+// hits spanning the whole line width (hitWide): in the VMs tab's
+// side-by-side layout, a click that lands inside the *detail* panel (to
+// the right of the table) must not be mistaken for a click on whatever
+// table row happens to share that y.
+func TestMouseClickInDetailPanelDoesNotChangeSelection(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 2
+	a.vmSel = 0
+	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	_ = a.View() // record hits
+
+	a.Update(press(130, bodyY0+1))
+	if a.vmSel != 0 {
+		t.Fatalf("vmSel = %d after a click at x=130 (inside the detail panel), want unchanged 0", a.vmSel)
+	}
+}
+
+// TestVMsTableShowsAllColumnsAtReasonableWidth covers the fix for a
+// merely-wider terminal (crossing the two-column threshold) counter-
+// intuitively showing *fewer* columns: at width 120, with a table whose
+// natural (all-8-columns) width comfortably fits, every column must still
+// appear (whether stacked or side-by-side).
+func TestVMsTableShowsAllColumnsAtReasonableWidth(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+
+	view := a.View()
+	for _, col := range []string{"NAME", "STATE", "VCPUS", "MEM", "PINS", "MEMNODE", "GPUNODE", "FLAGS"} {
+		if !strings.Contains(view, col) {
+			t.Fatalf("View() at width 120 = %q, want column %q still shown", view, col)
+		}
 	}
 }
 

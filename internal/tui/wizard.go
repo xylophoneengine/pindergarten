@@ -236,11 +236,12 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 // view renders the active screen against w.base (the self-stripped snapshot
 // Propose ran against, used for the node map's live pin state): a titled
 // node-map panel (grid content, so it truncates rather than wraps) and an
-// info panel below it (prose, so it wraps). Alongside the string it
-// returns the manual screen's per-core "wizardcore" hits, screen-absolute
-// (0-based relative to the wizard body's own top-left corner) -- the
-// proposal screen's map isn't clickable, so it reports none.
-func (w *wizard) view(width int) (string, []hit) {
+// info panel below it (prose, so it wraps), both trimmed to fit budget.
+// Alongside the string it returns the manual screen's per-core hits,
+// screen-absolute (0-based relative to the wizard body's own top-left
+// corner) -- the proposal screen's map isn't clickable, so it reports
+// none.
+func (w *wizard) view(width, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d", w.vm, w.vcpus(), w.node)
 
 	var grid string
@@ -249,7 +250,7 @@ func (w *wizard) view(width int) (string, []hit) {
 	switch w.screen {
 	case proposalScreen:
 		highlight := threadSet(assignedThreads(w.proposal.Pins))
-		grid, _ = renderNodeMap(w.base, w.node, highlight, -1)
+		grid, _ = renderNodeMap(w.base, w.node, highlight, -1, "wizardcore")
 		for _, r := range w.proposal.Rationale {
 			info.WriteString(r)
 			info.WriteString("\n")
@@ -260,7 +261,7 @@ func (w *wizard) view(width int) (string, []hit) {
 		}
 		info.WriteString("\n[enter] accept  [m] manual  [esc] cancel")
 	case manualScreen:
-		grid, gridHits = renderNodeMap(w.base, w.node, w.selected, w.cursor)
+		grid, gridHits = renderNodeMap(w.base, w.node, w.selected, w.cursor, "wizardcore")
 		fmt.Fprintf(&info, "selected %d/%d\n", len(w.selected), w.vcpus())
 		if warn := w.crossesGPUWarning(); warn != "" {
 			info.WriteString(warningStyle.Render(warn))
@@ -272,9 +273,16 @@ func (w *wizard) view(width int) (string, []hit) {
 		}
 	}
 
-	gridPanel := panel(title, grid, width)
-	hits := offsetHits(gridHits, 1, 1)
-	infoPanel := panelWrap("info", strings.TrimRight(info.String(), "\n"), width)
+	gridBudget, infoBudget := splitStackedBudget(budget, lineCount(grid))
+	gridPanel, kept := panelH(title, grid, width, gridBudget)
+	hits := offsetHits(clipHitsToWindow(gridHits, kept), 1, 1)
+	infoPanel := ""
+	if infoBudget > 0 {
+		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), width, infoBudget)
+	}
+	if infoPanel == "" {
+		return gridPanel, hits
+	}
 	return gridPanel + "\n" + infoPanel, hits
 }
 
@@ -365,13 +373,16 @@ func nodeCores(s *model.Snapshot, node int) []hostinfo.Core {
 	return cores
 }
 
-// renderNodeMap renders node's cores as a grid of two-glyph cells (mirrors
-// renderCPUMap, but scoped to one node): threads in highlight render in the
+// renderNodeMap renders node's cores as a grid of two-glyph cells (also
+// used, restricted to one node at a time, for the CPU Map tab's per-node
+// panels -- see renderCPUMapTab): threads in highlight render in the
 // wizard highlight style, the core at cursor (a nodeCores index, -1 for
 // none) renders reverse-video instead. Alongside the string it returns one
-// "wizardcore" hit per cell, 0-based relative to the grid's own top-left
-// corner (x0 = the cell's column * 3, mirroring renderCPUMap).
-func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int) (string, []hit) {
+// hit of the given kind per cell, 0-based relative to the grid's own
+// top-left corner (x0 = the cell's column * 3), indexed by its position in
+// nodeCores(s, node) -- the CPU Map tab, whose cursor is a *global*
+// s.Topo.Cores index, translates that back via globalCoreIndices.
+func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int, kind string) (string, []hit) {
 	var b strings.Builder
 	var hits []hit
 	col := 0
@@ -386,7 +397,7 @@ func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor i
 			b.WriteString(" ")
 		}
 		x0 := col * 3
-		hits = append(hits, hit{y0: row, y1: row + 1, x0: x0, x1: x0 + 2, kind: "wizardcore", index: i})
+		hits = append(hits, hit{y0: row, y1: row + 1, x0: x0, x1: x0 + 2, kind: kind, index: i})
 		b.WriteString(nodeMapCell(s, core, highlight, i == cursor))
 		col++
 	}
@@ -394,15 +405,19 @@ func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor i
 	return b.String(), hits
 }
 
-// nodeMapCell renders one core's two-glyph cell for the wizard's node map: a
-// cursor+highlighted thread combines both (highlight style, reverse-video)
-// so the selected core under the cursor still shows its selected state; a
-// cursor-only or highlight-only thread gets just that style; otherwise the
-// thread's plain pinned/free/shared glyph.
+// nodeMapCell renders one core's two-glyph cell: a cursor+highlighted
+// thread combines both (highlight style, reverse-video) so the selected
+// core under the cursor still shows its selected state; a cursor-only or
+// highlight-only thread gets just that style; a pending-only claim (no VM,
+// just a staged op) gets the plain pinned glyph in a distinct color;
+// otherwise the thread's plain pinned/free/shared glyph. A single-thread
+// core (no SMT sibling) renders its one glyph followed by a space.
 func nodeMapCell(s *model.Snapshot, core hostinfo.Core, highlight map[int]bool, isCursor bool) string {
 	var glyphs strings.Builder
 	for _, t := range core.Threads {
 		glyph := glyphChar(s, t)
+		use := s.Use[t]
+		pendingOnly := len(use.VMs) == 0 && len(use.Pending) == 1
 		switch {
 		case isCursor && highlight[t]:
 			glyph = wizardHighlightStyle.Reverse(true).Render(glyph)
@@ -410,6 +425,8 @@ func nodeMapCell(s *model.Snapshot, core hostinfo.Core, highlight map[int]bool, 
 			glyph = cursorStyle.Render(glyph)
 		case highlight[t]:
 			glyph = wizardHighlightStyle.Render(glyph)
+		case pendingOnly:
+			glyph = pendingGlyphStyle.Render(glyph)
 		}
 		glyphs.WriteString(glyph)
 	}
