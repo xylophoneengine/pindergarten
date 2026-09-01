@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(go|md|mod)$|^Makefile$' || true)
+[ -z "$files" ] && exit 0
+for f in $files; do
+	[ -f "$f" ] || continue
+	perl -CSD -i -pe 's/[\x{200B}-\x{200D}\x{FEFF}\x{2060}]//g' "$f"
+	iconv -f UTF-8 -t ASCII//TRANSLIT "$f" >"$f.tmp"
+	mv "$f.tmp" "$f"
+done
+if LC_ALL=C grep -nP '[^\x00-\x7F]' -- $files; then
+	echo "pre-commit: non-ASCII remains after transliteration, fix manually" >&2
+	exit 1
+fi
+gofiles=$(echo "$files" | grep '\.go$' || true)
+if [ -n "$gofiles" ]; then
+	gofmt -w $gofiles
+	go vet ./... || exit 1
+	golangci-lint run ./... || exit 1
+fi
+git add -- $files
