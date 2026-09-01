@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -39,6 +40,30 @@ func TestSaveListLoad(t *testing.T) {
 		t.Errorf("xml = %q, want <domain>a</domain>", xml)
 	}
 	_ = e2
+}
+
+func TestListSkipsCorruptSidecar(t *testing.T) {
+	dir := t.TempDir() + "/bk"
+	if _, err := Save(dir, "vm-a", "pin 2 vcpus to node 1", "test", "<domain>a</domain>"); err != nil {
+		t.Fatalf("Save vm-a: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, err := Save(dir, "vm-b", "strip pinning", "test", "<domain>b</domain>"); err != nil {
+		t.Fatalf("Save vm-b: %v", err)
+	}
+
+	garbage := dir + "/20260101T000000.000000000Z_vm-broken.xml.json"
+	if err := os.WriteFile(garbage, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write garbage sidecar: %v", err)
+	}
+
+	list, err := List(dir)
+	if err != nil {
+		t.Fatalf("List err = %v, want nil", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len(list) = %d, want 2 (garbage sidecar should be skipped)", len(list))
+	}
 }
 
 func TestListMissingDir(t *testing.T) {

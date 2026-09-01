@@ -48,7 +48,7 @@ func Save(dir, vm, opDesc, toolVersion, xml string) (Entry, error) {
 	xmlPath := filepath.Join(dir, name)
 	meta := Meta{Time: now, VM: vm, Op: opDesc, ToolVersion: toolVersion}
 
-	if err := os.WriteFile(xmlPath, []byte(xml), 0o644); err != nil {
+	if err := os.WriteFile(xmlPath, []byte(xml), 0o600); err != nil {
 		return Entry{}, fmt.Errorf("backup: write xml %q: %w", xmlPath, err)
 	}
 
@@ -56,7 +56,7 @@ func Save(dir, vm, opDesc, toolVersion, xml string) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("backup: marshal meta: %w", err)
 	}
-	if err := os.WriteFile(xmlPath+".json", metaBytes, 0o644); err != nil {
+	if err := os.WriteFile(xmlPath+".json", metaBytes, 0o600); err != nil {
 		return Entry{}, fmt.Errorf("backup: write meta %q: %w", xmlPath+".json", err)
 	}
 
@@ -83,17 +83,18 @@ func List(dir string) ([]Entry, error) {
 		jsonPath := filepath.Join(dir, name)
 		data, err := os.ReadFile(jsonPath)
 		if err != nil {
-			return nil, fmt.Errorf("backup: read meta %q: %w", jsonPath, err)
+			// A single unreadable sidecar must not hide every other backup.
+			continue
 		}
 		var meta Meta
 		if err := json.Unmarshal(data, &meta); err != nil {
-			return nil, fmt.Errorf("backup: parse meta %q: %w", jsonPath, err)
+			continue
 		}
 		xmlPath := strings.TrimSuffix(jsonPath, ".json")
 		entries = append(entries, Entry{XMLPath: xmlPath, Meta: meta})
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
+	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].Meta.Time.After(entries[j].Meta.Time)
 	})
 	return entries, nil
