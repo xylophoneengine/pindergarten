@@ -369,6 +369,75 @@ func TestStatusBarApplyDiscardVisibility(t *testing.T) {
 	}
 }
 
+// TestViewWrapsLongStatusToWidth covers the fix for text running off the
+// right side of the terminal: a long single-line status message (e.g. a
+// libvirt error) must be wrapped to a.width rather than left to overflow,
+// and the tail of the message must still be reachable (not truncated away).
+func TestViewWrapsLongStatusToWidth(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+
+	tail := "ZZZFINALTAILMARKERZZZ"
+	a.status = "scan error: " + strings.Repeat("connection refused retrying now ", 6) + tail
+
+	view := a.View()
+	for i, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > 40 {
+			t.Fatalf("line %d width = %d, want <= 40: %q", i, w, line)
+		}
+	}
+	if !strings.Contains(view, tail) {
+		t.Fatalf("View() = %q, want the tail of the long status message present (not truncated)", view)
+	}
+}
+
+// wideCoreTopo builds a single-node topology with n two-thread cores, wide
+// enough that renderCPUMap's row of core cells overflows a narrow width.
+func wideCoreTopo(n int) *hostinfo.Topology {
+	threads := map[int]hostinfo.Thread{}
+	cores := make([]hostinfo.Core, n)
+	nodeThreads := make([]int, 0, n*2)
+	for i := 0; i < n; i++ {
+		a, b := i*2, i*2+1
+		threads[a] = hostinfo.Thread{ID: a, Core: i, Socket: 0, Node: 0, Sibling: b}
+		threads[b] = hostinfo.Thread{ID: b, Core: i, Socket: 0, Node: 0, Sibling: a}
+		cores[i] = hostinfo.Core{Socket: 0, ID: i, Node: 0, Threads: []int{a, b}}
+		nodeThreads = append(nodeThreads, a, b)
+	}
+	nodes := []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 1000}}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
+}
+
+// TestViewWrapsWideCPUMapToWidth covers the same fix on the CPU Map tab: a
+// row of many two-glyph core cells is far wider than a narrow terminal, and
+// must not be left to overflow it.
+func TestViewWrapsWideCPUMapToWidth(t *testing.T) {
+	s := &model.Snapshot{Topo: wideCoreTopo(20), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+
+	for i, line := range strings.Split(a.View(), "\n") {
+		if w := lipgloss.Width(line); w > 40 {
+			t.Fatalf("line %d width = %d, want <= 40: %q", i, w, line)
+		}
+	}
+}
+
+// TestViewNoWrapBeforeWindowSize covers width 0 (before the first
+// WindowSizeMsg): wrapping must be a no-op rather than collapsing content to
+// zero width.
+func TestViewNoWrapBeforeWindowSize(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.status = "some status"
+
+	view := a.View()
+	if !strings.Contains(view, "some status") {
+		t.Fatalf("View() with width 0 = %q, want status text present, unwrapped", view)
+	}
+}
+
 func TestRescanSetsStatus(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)

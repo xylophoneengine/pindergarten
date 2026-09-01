@@ -453,7 +453,19 @@ func (a *App) View() string {
 		b.WriteString("\n")
 	}
 	b.WriteString(a.renderStatusBar())
-	return b.String()
+	return a.wrapToWidth(b.String())
+}
+
+// wrapToWidth wraps s to a.width via lipgloss (word-wrapping, hard-wrapping
+// any single token wider than a.width), so no rendered line -- tab bar,
+// header, body, status, or status bar -- can run off the right side of the
+// terminal. a.width of 0 (before the first WindowSizeMsg) is a no-op: there
+// is nothing sane to wrap to yet.
+func (a *App) wrapToWidth(s string) string {
+	if a.width <= 0 {
+		return s
+	}
+	return lipgloss.NewStyle().Width(a.width).Render(s)
 }
 
 // renderTabs renders the tab row and records each label's X range (in
