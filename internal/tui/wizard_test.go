@@ -310,6 +310,116 @@ func TestWizardManualCount(t *testing.T) {
 	}
 }
 
+// TestWizardManualCycleNodeWarnsAndStages covers the 'n' node-override key
+// on the manual screen: vm2's hostdev forces the proposal onto node 1, so
+// cycling away to node 0 must reset the selection, show the crosses-GPU
+// warning, and (once threads are picked and accepted) land the staged op
+// on node 0 with the warning folded into Summary -- proving the override
+// is soft (never blocked), matching the design spec's locality rule.
+func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	if a.wizard.proposal.Node != 1 {
+		t.Fatalf("proposal.Node = %d, want 1 (forced by vm2's hostdev)", a.wizard.proposal.Node)
+	}
+
+	sendKey(a, 'm')
+	if a.wizard.screen != manualScreen {
+		t.Fatal("'m' did not switch to the manual screen")
+	}
+	if a.wizard.node != 1 {
+		t.Fatalf("wizard.node = %d, want 1 before cycling", a.wizard.node)
+	}
+
+	sendKey(a, 'n')
+	if a.wizard.node != 0 {
+		t.Fatalf("wizard.node = %d, want 0 after cycling away from node 1", a.wizard.node)
+	}
+	if len(a.wizard.selected) != 0 {
+		t.Fatalf("wizard.selected = %v, want reset to empty after cycling node", a.wizard.selected)
+	}
+
+	view := a.wizard.view()
+	if !strings.Contains(view, "GPU at 0000:81:00.0 is on node 1") {
+		t.Fatalf("view() = %q, want the crosses-GPU-node warning", view)
+	}
+
+	sendKeyType(a, tea.KeySpace) // core 0 on node 0: threads 0,4 (exactly vcpus()==2)
+	sendKeyType(a, tea.KeyEnter)
+
+	if a.wizard != nil {
+		t.Fatal("wizard still open after a correctly-sized manual selection")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
+	}
+	op := a.queue.Ops[0]
+	if op.MemNode != 0 {
+		t.Fatalf("op.MemNode = %d, want 0 (override must not be blocked by GPU locality)", op.MemNode)
+	}
+	if !strings.Contains(op.Summary, "crosses GPU node") {
+		t.Fatalf("op.Summary = %q, want the crosses-GPU-node suffix", op.Summary)
+	}
+}
+
+// TestWizardManualEscResetsNode covers the esc-from-manual invariant: the
+// proposal screen's Pins are specific thread IDs on the proposal's own
+// node, so cycling in manual and then escaping without staging must not
+// leave the wizard's node pointing anywhere but back at the proposal's.
+func TestWizardManualEscResetsNode(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	sendKey(a, 'm')
+	sendKey(a, 'n')
+	if a.wizard.node == a.wizard.proposal.Node {
+		t.Fatal("test setup: cycling did not change the node")
+	}
+
+	sendKeyType(a, tea.KeyEsc)
+	if a.wizard.screen != proposalScreen {
+		t.Fatal("esc did not return to the proposal screen")
+	}
+	if a.wizard.node != a.wizard.proposal.Node {
+		t.Fatalf("wizard.node = %d, want reset to proposal.Node %d", a.wizard.node, a.wizard.proposal.Node)
+	}
+}
+
+// TestWizardManualUpDownClamps covers the manual screen's up/down movement
+// (added alongside h/l): on a node with fewer cores than one row, up/down
+// must clamp rather than panic or move.
+func TestWizardManualUpDownClamps(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	sendKey(a, 'm')
+	if a.wizard == nil || a.wizard.screen != manualScreen {
+		t.Fatal("manual screen did not open")
+	}
+
+	sendKeyType(a, tea.KeyDown)
+	if a.wizard.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 (down clamps: node 0 has only 2 cores, one row)", a.wizard.cursor)
+	}
+	sendKeyType(a, tea.KeyUp)
+	if a.wizard.cursor != 0 {
+		t.Fatalf("cursor = %d, want 0 (up clamps at the top)", a.wizard.cursor)
+	}
+}
+
 // TestSecondWizardSeesPending stages a pin for vm1 taking threads 2 and 6
 // directly (bypassing the wizard, as the brief allows), then opens the
 // wizard for vm2 -- forced onto node 1 by its hostdev -- and checks the
@@ -465,7 +575,7 @@ func TestWizardManualViewShowsSelectedCount(t *testing.T) {
 	if !strings.Contains(view, "selected 2/2") {
 		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
 	}
-	if !strings.Contains(a.View(), "[h/l] move") {
+	if !strings.Contains(a.View(), "[h/l/up/down] move") {
 		t.Fatalf("View() = %q, want the manual-screen key hint in the status bar", a.View())
 	}
 }

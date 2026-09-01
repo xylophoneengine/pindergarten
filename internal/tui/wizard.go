@@ -98,6 +98,19 @@ func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp) {
 			w.cursor++
 		}
 		return false, nil
+	case msg.Type == tea.KeyUp, isRune(msg, 'k'):
+		if w.cursor-coresPerRow >= 0 {
+			w.cursor -= coresPerRow
+		}
+		return false, nil
+	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
+		if w.cursor+coresPerRow < len(cores) {
+			w.cursor += coresPerRow
+		}
+		return false, nil
+	case isRune(msg, 'n'):
+		w.cycleNode()
+		return false, nil
 	case msg.Type == tea.KeySpace:
 		w.toggleCore(cores)
 		return false, nil
@@ -110,11 +123,67 @@ func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp) {
 		op := w.buildOp(assignSelected(w.selected))
 		return true, &op
 	case msg.Type == tea.KeyEsc:
+		// Reset to the proposal's own node: its Pins are specific thread
+		// IDs on that node, so accepting the proposal screen after cycling
+		// away in manual (without staging from there) must not leave a
+		// mismatched node/threads pair.
 		w.screen = proposalScreen
+		w.node = w.proposal.Node
 		w.status = ""
 		return false, nil
 	}
 	return false, nil
+}
+
+// cycleNode advances w.node to the next node in topology order (wrapping),
+// resetting the manual screen's cursor and thread selection since both are
+// scoped to the previous node's cores. GPU locality is a soft preference,
+// never enforced here: crossesGPUWarning (surfaced in view and the staged
+// Summary) is the only consequence of picking a node other than the VM's
+// GPU node.
+func (w *wizard) cycleNode() {
+	nodes := w.base.Topo.Nodes
+	if len(nodes) == 0 {
+		return
+	}
+	idx := 0
+	for i, n := range nodes {
+		if n.ID == w.node {
+			idx = i
+			break
+		}
+	}
+	w.node = nodes[(idx+1)%len(nodes)].ID
+	w.cursor = 0
+	w.selected = map[int]bool{}
+}
+
+// vmGPUDevice returns vm's first passthrough device with a known NUMA
+// node, or nil if it has none. Mirrors VM.GPUNode's own selection rule,
+// but keeps the PCI address around for crossesGPUWarning's message.
+func vmGPUDevice(vm *model.VM) *model.Device {
+	for i := range vm.Devices {
+		if vm.Devices[i].Node != -1 {
+			return &vm.Devices[i]
+		}
+	}
+	return nil
+}
+
+// crossesGPUWarning returns the manual screen's non-blocking warning when
+// w.node differs from the VM's GPU node, or "" when the VM has no GPU (or
+// an unresolved one) or w.node already matches it.
+func (w *wizard) crossesGPUWarning() string {
+	vm := w.base.VM(w.vm)
+	if vm == nil {
+		return ""
+	}
+	gpu := vmGPUDevice(vm)
+	if gpu == nil || gpu.Node == w.node {
+		return ""
+	}
+	return fmt.Sprintf("GPU at %s is on node %d; placing vCPUs/memory on node %d crosses the interconnect",
+		gpu.Addr, gpu.Node, w.node)
 }
 
 // toggleCore toggles every thread of the cursor's core in w.selected: if
@@ -148,6 +217,9 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 	threads := hostinfo.FormatCPUList(assignedThreads(pins))
 	summary := fmt.Sprintf("%s: pin %d vcpus -> node %d threads %s; memory -> node %d",
 		w.vm, len(pins), w.node, threads, w.node)
+	if w.crossesGPUWarning() != "" {
+		summary += " (crosses GPU node)"
+	}
 	return model.PendingOp{
 		Kind:       model.OpPin,
 		VM:         w.vm,
@@ -181,6 +253,10 @@ func (w *wizard) view() string {
 	case manualScreen:
 		b.WriteString(renderNodeMap(w.base, w.node, w.selected, w.cursor))
 		fmt.Fprintf(&b, "\nselected %d/%d\n", len(w.selected), w.vcpus())
+		if warn := w.crossesGPUWarning(); warn != "" {
+			b.WriteString(warningStyle.Render(warn))
+			b.WriteString("\n")
+		}
 		if w.status != "" {
 			b.WriteString(w.status)
 			b.WriteString("\n")
@@ -194,7 +270,7 @@ func (w *wizard) view() string {
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
 	if w.screen == manualScreen {
-		return "[h/l] move  [space] toggle  [enter] accept  [esc] back"
+		return "[h/l/up/down] move  [n] node  [space] toggle  [enter] accept  [esc] back"
 	}
 	return "[enter] accept  [m] manual  [esc] cancel"
 }
