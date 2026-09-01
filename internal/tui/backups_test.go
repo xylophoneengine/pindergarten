@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,22 +11,32 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
-func TestDiffLines(t *testing.T) {
-	a := "one\ntwo\nthree"
-	b := "one\nthree\nfour"
-	want := "  one\n- two\n  three\n+ four"
-	if got := diffLines(a, b); got != want {
-		t.Fatalf("diffLines(a, b) = %q, want %q", got, want)
-	}
-}
+// distinctBackupXML differs from plainVMXML by exactly one line (memory
+// size), so tests can tell the two apart instead of asserting a tautology
+// against identical inputs.
+var distinctBackupXML = strings.Replace(plainVMXML,
+	"<memory unit='KiB'>1000</memory>", "<memory unit='KiB'>2000</memory>", 1)
 
-func TestDiffLinesIdentical(t *testing.T) {
-	same := "a\nb\nc"
-	got := diffLines(same, same)
-	for _, line := range strings.Split(got, "\n") {
-		if !strings.HasPrefix(line, "  ") {
-			t.Fatalf("diffLines(same, same) = %q, want every line marked common", got)
-		}
+func TestDiffLines(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want string
+	}{
+		{"identical", "a\nb\nc", "a\nb\nc", "  a\n  b\n  c"},
+		{"mixed removal and addition", "one\ntwo\nthree", "one\nthree\nfour", "  one\n- two\n  three\n+ four"},
+		{"empty/empty", "", "", ""},
+		{"empty/nonempty", "", "x\ny", "+ x\n+ y"},
+		{"nonempty/empty", "x\ny", "", "- x\n- y"},
+		{"fully disjoint", "a\nb", "c\nd", "- a\n- b\n+ c\n+ d"},
+		{"trailing newline on both", "a\nb\n", "a\nb\n", "  a\n  b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := diffLines(tc.a, tc.b); got != tc.want {
+				t.Fatalf("diffLines(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -54,13 +65,9 @@ func TestRestoreStagesOp(t *testing.T) {
 	a := testApp(t, false)
 	a.editMode = true
 
-	entry, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", plainVMXML)
+	entry, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", distinctBackupXML)
 	if err != nil {
 		t.Fatalf("backup.Save: %v", err)
-	}
-	savedXML, err := backup.LoadXML(entry)
-	if err != nil {
-		t.Fatalf("backup.LoadXML: %v", err)
 	}
 
 	status := a.stageRestore(0)
@@ -75,18 +82,64 @@ func TestRestoreStagesOp(t *testing.T) {
 	if op.Kind != model.OpRestore {
 		t.Fatalf("op.Kind = %v, want OpRestore", op.Kind)
 	}
-	if op.BackupXML != savedXML {
-		t.Fatalf("op.BackupXML = %q, want the saved backup xml", op.BackupXML)
+	if op.BackupXML != distinctBackupXML {
+		t.Fatalf("op.BackupXML = %q, want the saved (distinct) backup xml, not the fake's current xml", op.BackupXML)
 	}
 	if op.StagedHash != model.HashXML(plainVMXML) {
-		t.Fatalf("op.StagedHash = %q, want hash of the fake's current xml", op.StagedHash)
+		t.Fatalf("op.StagedHash = %q, want hash of the fake's current xml (plainVMXML), not the backup's", op.StagedHash)
+	}
+	if op.MemNode != -1 {
+		t.Fatalf("op.MemNode = %d, want -1", op.MemNode)
+	}
+	wantSummary := fmt.Sprintf("plain-vm: restore config from backup %s (pin 2 vcpus -> node 0)",
+		entry.Meta.Time.Format(backupTimeFormat))
+	if op.Summary != wantSummary {
+		t.Fatalf("op.Summary = %q, want %q", op.Summary, wantSummary)
+	}
+}
+
+func TestRestoreRefusedReadOnly(t *testing.T) {
+	a := testApp(t, false) // editMode stays false
+
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", plainVMXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+
+	status := a.stageRestore(0)
+	if !strings.Contains(status, "press e to enter edit mode first") {
+		t.Fatalf("stageRestore = %q, want the edit-mode hint", status)
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d, want 0", a.queue.Len())
+	}
+}
+
+// TestRestoreRefusedUnsupportedVM covers the same view-only gate every
+// other staging path in app.go applies (see wizard_test.go's
+// TestUnsupportedVMRefusesPinAndStrip): a domain that fails to parse is
+// Unsupported and must never be written to, even via restore.
+func TestRestoreRefusedUnsupportedVM(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"broken-vm": brokenXML}, noNode)
+	runScan(t, a)
+	a.editMode = true
+
+	if _, err := backup.Save(a.backupDir, "broken-vm", "pin", "test", brokenXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+
+	status := a.stageRestore(0)
+	if !strings.Contains(status, "unsupported config, view only") {
+		t.Fatalf("stageRestore = %q, want the unsupported-config refusal", status)
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after restore on unsupported VM, want 0", a.queue.Len())
 	}
 }
 
 func TestBackupsDiff(t *testing.T) {
 	a := testApp(t, false)
 
-	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", "<domain><name>plain-vm</name><old/></domain>"); err != nil {
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", distinctBackupXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
 
@@ -97,8 +150,16 @@ func TestBackupsDiff(t *testing.T) {
 	if !strings.Contains(diff, "plain-vm") {
 		t.Fatalf("backupsDiff = %q, want a header naming the VM", diff)
 	}
-	if !strings.Contains(diff, "- ") || !strings.Contains(diff, "+ ") {
-		t.Fatalf("backupsDiff = %q, want both removed and added lines", diff)
+	// Only the memory line differs between the fake's current xml (a-side,
+	// plainVMXML) and the backup (b-side, distinctBackupXML): current's
+	// 1000 line must be removed and the backup's 2000 line added -- on the
+	// correct sides. If a and b were swapped, "+ " would prefix the 1000
+	// line instead, failing this.
+	if !strings.Contains(diff, "- "+"  <memory unit='KiB'>1000</memory>") {
+		t.Fatalf("backupsDiff = %q, want the current (1000) memory line marked removed", diff)
+	}
+	if !strings.Contains(diff, "+ "+"  <memory unit='KiB'>2000</memory>") {
+		t.Fatalf("backupsDiff = %q, want the backup (2000) memory line marked added", diff)
 	}
 }
 
@@ -153,21 +214,5 @@ func TestHandleBackupsKey(t *testing.T) {
 	}
 	if sel != 0 {
 		t.Fatalf("sel with n=0 = %d, want 0", sel)
-	}
-}
-
-func TestRestoreRefusedReadOnly(t *testing.T) {
-	a := testApp(t, false) // editMode stays false
-
-	if _, err := backup.Save(a.backupDir, "plain-vm", "pin 2 vcpus -> node 0", "test", plainVMXML); err != nil {
-		t.Fatalf("backup.Save: %v", err)
-	}
-
-	status := a.stageRestore(0)
-	if !strings.Contains(status, "press e to enter edit mode first") {
-		t.Fatalf("stageRestore = %q, want the edit-mode hint", status)
-	}
-	if a.queue.Len() != 0 {
-		t.Fatalf("queue.Len() = %d, want 0", a.queue.Len())
 	}
 }

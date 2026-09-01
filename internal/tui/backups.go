@@ -3,12 +3,17 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
+
+// backupTimeFormat renders a backup.Meta.Time (always UTC) with an explicit
+// "Z" suffix so it is never mistaken for local time.
+const backupTimeFormat = "2006-01-02 15:04:05Z"
 
 // diffLines returns a line-oriented diff of a against b: lines common to
 // both (found via LCS) are prefixed "  ", lines only in a are prefixed
@@ -65,20 +70,23 @@ func diffLines(a, b string) string {
 }
 
 // splitLines splits s on newlines, returning nil for an empty string (so
-// diffLines("", "") produces no lines at all rather than one empty one).
+// diffLines("", "") produces no lines at all rather than one empty one). A
+// single trailing newline is stripped first, so a "...\n" input does not
+// produce a spurious trailing "" element (which would otherwise render as a
+// bare "  " common line).
 func splitLines(s string) []string {
 	if s == "" {
 		return nil
 	}
-	return strings.Split(s, "\n")
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
-// renderBackups renders the Backups tab: one row per entry from
-// backup.List(a.backupDir) (newest first), showing its timestamp, VM name,
-// and op description. The row at sel renders reverse-video via
-// cursorStyle. An empty dir renders "no backups in <dir>"; a List error
-// renders as an error line. w is unused for now (no wrapping beyond the
-// fixed layout).
+// renderBackups renders the Backups tab as a tabwriter table (time, VM,
+// operation), one row per entry from backup.List(a.backupDir) (newest
+// first). The row at sel renders reverse-video via cursorStyle, matching
+// renderVMs. An empty dir renders "no backups in <dir>"; a List error
+// renders as an error line. w is unused for now (no wrapping beyond
+// tabwriter's own column alignment).
 func (a *App) renderBackups(sel int, w int) string {
 	entries, err := backup.List(a.backupDir)
 	if err != nil {
@@ -88,13 +96,18 @@ func (a *App) renderBackups(sel int, w int) string {
 		return fmt.Sprintf("no backups in %s", a.backupDir)
 	}
 
-	lines := make([]string, len(entries))
-	for i, e := range entries {
-		lines[i] = fmt.Sprintf("%s  %s  %s",
-			e.Meta.Time.Format("2006-01-02 15:04:05"), e.Meta.VM, e.Meta.Op)
+	var buf strings.Builder
+	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "TIME\tVM\tOPERATION")
+	for _, e := range entries {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Meta.Time.Format(backupTimeFormat), e.Meta.VM, e.Meta.Op)
 	}
-	if sel >= 0 && sel < len(lines) {
-		lines[sel] = cursorStyle.Render(lines[sel])
+	_ = tw.Flush()
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	rowIdx := sel + 1 // row 0 is the header
+	if rowIdx >= 1 && rowIdx < len(lines) {
+		lines[rowIdx] = cursorStyle.Render(lines[rowIdx])
 	}
 	return strings.Join(lines, "\n")
 }
@@ -110,6 +123,20 @@ func (a *App) backupsEntry(sel int) (backup.Entry, error) {
 		return backup.Entry{}, fmt.Errorf("no backup at index %d", sel)
 	}
 	return entries[sel], nil
+}
+
+// vmByName returns the VM named name in the last-scanned snapshot, or nil
+// before the first scan or when no VM with that name exists.
+func (a *App) vmByName(name string) *model.VM {
+	if a.snap == nil {
+		return nil
+	}
+	for i := range a.snap.VMs {
+		if a.snap.VMs[i].Name == name {
+			return &a.snap.VMs[i]
+		}
+	}
+	return nil
 }
 
 // backupsDiff returns a diff of the VM's current domain XML against the
@@ -132,15 +159,18 @@ func (a *App) backupsDiff(sel int) (string, error) {
 	}
 
 	header := fmt.Sprintf("current %s vs backup %s (%s)\n",
-		e.Meta.VM, e.Meta.Time.Format("2006-01-02 15:04:05"), e.Meta.Op)
+		e.Meta.VM, e.Meta.Time.Format(backupTimeFormat), e.Meta.Op)
 	return header + diffLines(current, backupXML), nil
 }
 
-// stageRestore implements the Backups tab's restore action: after the same
-// edit-mode gate app.go's other staging actions use, it loads the selected
-// backup's XML and the VM's current XML, then stages an OpRestore. Returns
-// the resulting status line (or a refusal/error line) for the caller to
-// display.
+// stageRestore implements the Backups tab's restore action. It applies the
+// same gates every other staging path in app.go applies (gateVMAction):
+// edit mode must be on, and an unsupported domain is view-only and never
+// written -- staging a restore for one would either silently no-op at
+// apply time or fail verify after Define already landed, so it is refused
+// here instead. It then loads the selected backup's XML and the VM's
+// current XML and stages an OpRestore. Returns the resulting status line
+// (or a refusal/error line) for the caller to display.
 func (a *App) stageRestore(sel int) string {
 	if !a.editMode {
 		return "press e to enter edit mode first"
@@ -150,6 +180,10 @@ func (a *App) stageRestore(sel int) string {
 	if err != nil {
 		return err.Error()
 	}
+	if vm := a.vmByName(e.Meta.VM); vm != nil && vm.Unsupported {
+		return fmt.Sprintf("%s: unsupported config, view only", vm.Name)
+	}
+
 	backupXML, err := backup.LoadXML(e)
 	if err != nil {
 		return err.Error()
@@ -166,7 +200,7 @@ func (a *App) stageRestore(sel int) string {
 		StagedHash: model.HashXML(current),
 		MemNode:    -1,
 		Summary: fmt.Sprintf("%s: restore config from backup %s (%s)",
-			e.Meta.VM, e.Meta.Time.Format("2006-01-02 15:04:05"), e.Meta.Op),
+			e.Meta.VM, e.Meta.Time.Format(backupTimeFormat), e.Meta.Op),
 	}
 	a.queue.Add(op)
 	return "staged: " + op.Summary
