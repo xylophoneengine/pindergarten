@@ -20,6 +20,10 @@ func main() {
 	backupDir := flag.String("backup-dir", defaultBackupDir(), "backup directory")
 	flag.Parse()
 
+	if err := os.MkdirAll(*backupDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot create backup dir %s: %v (edit mode will be unavailable)\n", *backupDir, err)
+	}
+
 	hv, err := libvirtio.Connect(*uri)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\nhint: run as root or add your user to the libvirt group\n", *uri, err)
@@ -28,8 +32,9 @@ func main() {
 	defer hv.Close()
 
 	sysfs := "/sys"
-	if _, err := os.Stat(sysfs + "/devices/system/node"); err != nil {
-		fmt.Fprintf(os.Stderr, "cannot read %s: %v\n", sysfs, err)
+	nodePath := sysfs + "/devices/system/node"
+	if _, err := os.Stat(nodePath); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read %s: %v\n", nodePath, err)
 		os.Exit(1)
 	}
 

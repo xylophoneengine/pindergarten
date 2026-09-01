@@ -17,6 +17,6 @@ init:
 
 release:
 	podman build -f Containerfile.builder -t pindergarten-builder .
-	podman run --rm -v $$PWD:/src:Z pindergarten-builder
+	podman run --rm -v $$PWD:/src:Z -e VERSION=$(VERSION) pindergarten-builder
 
 .PHONY: build test lint init release
