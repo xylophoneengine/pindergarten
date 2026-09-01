@@ -26,7 +26,7 @@ In scope:
   config-only (takes effect on next VM boot). Never live changes.
 - Stage changes in a pending-operations queue; batch apply after review.
 - Backup domain XML before every write; browse and revert backups.
-- Read-only mode (explicit flag or automatic when writes impossible).
+- Read-only by default; edit mode explicitly unlocked in-app.
 
 Out of scope (hard non-goals):
 - Creating, deleting, starting, stopping, or otherwise editing VMs.
@@ -164,16 +164,19 @@ Pick VM -> tool proposes placement:
 - User accepts or adjusts the selection manually, then the op is staged.
 - Staged op = one vcpupin entry per vCPU + numatune binding.
 
-## Read-only mode
+## Read-only by default, explicit edit mode
 
-Two entries:
-- Explicit: `--read-only` flag ("view without thinking" mode).
-- Automatic: connection works but writes are impossible (permissions,
-  polkit, SELinux) -> viewer mode, actions disabled with the reason in the
-  status line. This is NOT an error and does not fail loudly.
-
-A persistent, prominent READ ONLY badge (red/highlighted, top-right
-corner) is visible on every screen while active.
+- The tool ALWAYS starts read-only. No flag needed; browsing is the
+  default, zero-risk state ("view without thinking").
+- Edit mode is unlocked in-app: a keybinding (e.g. `e`, advertised in the
+  status bar as "[e] enable edit mode") plus a confirm. Only in edit mode
+  do actions, the pin wizard, and apply exist.
+- If writes are impossible (permissions, polkit, SELinux), the edit
+  toggle is disabled and pressing it shows the reason in the status line.
+  This is NOT an error and does not fail loudly.
+- A persistent, prominent badge in the top-right corner shows the state
+  on every screen: red READ ONLY by default, a visually distinct EDIT
+  badge (different color, still prominent) while edit mode is active.
 
 ## Backups & Rollback
 
@@ -190,18 +193,18 @@ corner) is visible on every screen while active.
 
 - Startup: libvirt socket unreachable -> fail loud with a fix hint ("run
   as root or add user to the libvirt group"). Sysfs unreadable -> fail
-  loud likewise. Backup dir not writable -> fail loud only when writes
-  are possible and --read-only is not set; in read-only mode the backup
-  dir is irrelevant.
-- Write-incapable but readable -> read-only mode (see above), not an
-  error.
+  loud likewise. Backup dir writability is checked when edit mode is
+  enabled, not at startup; failure blocks edit mode with the reason
+  shown, read-only browsing stays available.
+- Write-incapable but readable -> edit toggle disabled with reason (see
+  above), not an error.
 - Post-write verify (see libvirt layer).
 - Unsupported domains: view-only, never written.
 
 ## CLI
 
 ```
-kvm-pin-manager [-c URI] [--read-only] [--backup-dir PATH]
+kvm-pin-manager [-c URI] [--backup-dir PATH]
 ```
 
 Defaults: `-c qemu:///system`, backup dir as above.
