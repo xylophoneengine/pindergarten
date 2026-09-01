@@ -42,12 +42,7 @@ func (f *Fake) ListDomains() ([]Domain, error) {
 
 		cfg, err := ParseDomainXML(xml)
 		if err != nil {
-			// Invariant: a *DomainConfig from this package always has a
-			// non-nil VCPUPins and populated Raw. When ParseErr != nil,
-			// only Name and Raw are meaningful (best-effort name so the
-			// domain is still listed and identifiable, and Raw so a
-			// view-only domain's XML pane can still show it).
-			cfg = &DomainConfig{Name: regexpName(xml, name), Raw: xml, VCPUPins: map[int][]int{}}
+			cfg = fallbackConfig(regexpName(xml, name), xml)
 		}
 
 		doms = append(doms, Domain{Config: cfg, State: state, ParseErr: err})

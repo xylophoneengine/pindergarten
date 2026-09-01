@@ -26,3 +26,12 @@ type Hypervisor interface {
 	Define(xml string) error
 	Close()
 }
+
+// fallbackConfig builds the DomainConfig used when a domain's XML can't be
+// parsed. Invariant: a *DomainConfig from this package always has non-nil
+// VCPUPins and populated Raw; when ParseErr != nil only Name and Raw are
+// meaningful. Shared by Fake and the real libvirt Hypervisor so a
+// view-only domain always has the same shape regardless of backend.
+func fallbackConfig(name, xml string) *DomainConfig {
+	return &DomainConfig{Name: name, Raw: xml, VCPUPins: map[int][]int{}}
+}

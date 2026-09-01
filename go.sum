@@ -1,2 +1,4 @@
 github.com/beevik/etree v1.5.1 h1:TC3zyxYp+81wAmbsi8SWUpZCurbxa6S8RITYRSkNRwo=
 github.com/beevik/etree v1.5.1/go.mod h1:gPNJNaBGVZ9AwsidazFZyygnd+0pAU38N4D+WemwKNs=
+libvirt.org/go/libvirt v1.12006.0 h1:GdABzh62cBh/mlFp6HYfcyfHbCGohmGHXPj9kYBIp04=
+libvirt.org/go/libvirt v1.12006.0/go.mod h1:1WiFE8EjZfq+FCVog+rvr1yatKbKZ9FaFMZgEqxEJqQ=
