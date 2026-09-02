@@ -11,6 +11,28 @@ reality.
 
 Built with help from Claude (Anthropic).
 
+## Screenshots
+
+![Overview](docs/screenshots/overview.png)
+Overview: per-node memory and thread usage, plus a socket/NUMA/L3 hardware summary.
+
+![Topology](docs/screenshots/topology.png)
+Topology: the full machine drawn as a ruler grid, one box per socket, node, and L3 domain.
+
+![CPU Map](docs/screenshots/cpumap.png)
+CPU Map: every thread's pin state, with a detail panel for the selected core.
+
+![VMs](docs/screenshots/vms.png)
+VMs: each domain's state, pins, memory node, and flagged conflicts.
+
+![Pin wizard](docs/screenshots/wizard.png)
+Pin wizard: a proposed placement for an unpinned VM, opened with `p` in edit mode.
+
+![Pending](docs/screenshots/pending.png)
+Pending: staged operations queued for the next apply.
+
+Regenerate these with `make screenshots` (writes into `docs/screenshots/`).
+
 ## Install / build
 
 Build dependencies (the libvirt cgo bindings need the development headers):

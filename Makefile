@@ -15,8 +15,14 @@ lint:
 init:
 	git config core.hooksPath .githooks
 
+screenshots:
+	rm -rf .screenshots-ans
+	PINDERGARTEN_SCREENSHOT_DIR=$$PWD/.screenshots-ans go test ./internal/tui/ -run TestWriteScreenshots -count=1
+	python3 tools/screenshots/render.py .screenshots-ans docs/screenshots
+	rm -rf .screenshots-ans
+
 release:
 	podman build -f Containerfile.builder -t pindergarten-builder .
 	podman run --rm -v $$PWD:/src:Z -e VERSION=$(VERSION) pindergarten-builder
 
-.PHONY: build test lint init release
+.PHONY: build test lint init screenshots release
