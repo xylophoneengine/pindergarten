@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 )
 
@@ -340,5 +341,170 @@ func TestProposeWithinUnknownVM(t *testing.T) {
 
 	if _, err := ProposeWithin(snap, "nope", -1, nil); err == nil {
 		t.Fatal("ProposeWithin: want error, got nil")
+	}
+}
+
+// l3Topo builds a single-node, SMT2 topology with 4 L3 domains of 3 cores
+// each (6 threads per domain, 24 threads total): core c (0-11) has
+// sibling c+12, and belongs to L3 domain c/3. selectThreads' own
+// fewest-domains packing tests need more than one L3 domain, unlike
+// testTopo (2 nodes, no L3 data at all).
+func l3Topo() *hostinfo.Topology {
+	const domains, coresPerDomain = 4, 3
+	const cores = domains * coresPerDomain
+
+	threads := make(map[int]hostinfo.Thread, cores*2)
+	coreList := make([]hostinfo.Core, cores)
+	var nodeThreads []int
+	for c := 0; c < cores; c++ {
+		l3 := c / coresPerDomain
+		sibling := c + cores
+		threads[c] = hostinfo.Thread{ID: c, Core: c, Socket: 0, Node: 0, Sibling: sibling, L3: l3}
+		threads[sibling] = hostinfo.Thread{ID: sibling, Core: c, Socket: 0, Node: 0, Sibling: c, L3: l3}
+		coreList[c] = hostinfo.Core{Socket: 0, ID: c, Node: 0, L3: l3, Threads: []int{c, sibling}}
+		nodeThreads = append(nodeThreads, c, sibling)
+	}
+	return &hostinfo.Topology{
+		Nodes:   []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 1000}},
+		Cores:   coreList,
+		Threads: threads,
+	}
+}
+
+// snapWithUsedThreads builds a bare Snapshot against l3Topo with the given
+// threads marked claimed by vmName -- enough for selectThreads' own
+// tests, which only exercise coreFullyFree/threadUseCount, not the rest
+// of Build's flag machinery.
+func snapWithUsedThreads(vmName string, usedThreads ...int) *Snapshot {
+	use := make(map[int]ThreadUse, len(usedThreads))
+	for _, t := range usedThreads {
+		use[t] = ThreadUse{VMs: []string{vmName}}
+	}
+	return &Snapshot{Topo: l3Topo(), Use: use, BoundMemKiB: map[int]uint64{}}
+}
+
+// TestSelectThreadsPrefersWholeFreeL3 covers the packing rule's main case:
+// L3 #0 has one core used (2 of its 3 cores free), L3 #1-#3 are fully
+// free (3 cores each). A 6-vcpu VM needs 3 cores, which doesn't fit L3 #0
+// (only 2 free) but fits any of #1-#3 outright; the lowest-id tie among
+// those wins, and L3 #0 must not be touched at all.
+func TestSelectThreadsPrefersWholeFreeL3(t *testing.T) {
+	snap := snapWithUsedThreads("hog", 0, 12) // core 0 (threads 0,12) used
+	pins, note, warning := selectThreads(snap, 0, 6, nil)
+
+	if warning != "" {
+		t.Errorf("warning = %q, want none (the whole VM fits one domain)", warning)
+	}
+	if !strings.Contains(note, "L3 domain #1") {
+		t.Errorf("note = %q, want mention of L3 domain #1", note)
+	}
+	for vcpu, thr := range pins {
+		id := thr[0]
+		if got := snap.Topo.Threads[id].L3; got != 1 {
+			t.Errorf("pins[%d] = thread %d (L3 #%d), want every thread from L3 #1", vcpu, id, got)
+		}
+	}
+}
+
+// TestSelectThreadsBestFitLeavesEmptyDomains covers best fit's other
+// half: L3 #0 has one core used (2 free), a 4-vcpu VM needs exactly 2
+// cores -- L3 #0's 2 free cores fit exactly, and are the smallest fitting
+// group (L3 #1-#3 have 3 free each), so the VM lands there instead of
+// starting a fresh, previously-empty domain.
+func TestSelectThreadsBestFitLeavesEmptyDomains(t *testing.T) {
+	snap := snapWithUsedThreads("hog", 0, 12) // core 0 (threads 0,12) used
+	pins, note, warning := selectThreads(snap, 0, 4, nil)
+
+	want := map[int][]int{0: {1}, 1: {13}, 2: {2}, 3: {14}}
+	if !reflect.DeepEqual(pins, want) {
+		t.Errorf("pins = %v, want %v (L3 #0's own 2 free cores)", pins, want)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want none", warning)
+	}
+	if !strings.Contains(note, "L3 domain #0") {
+		t.Errorf("note = %q, want mention of L3 domain #0", note)
+	}
+}
+
+// TestSelectThreadsSpansFewestDomainsWhenNoneFits covers the field bug
+// itself: every L3 domain has exactly 2 free cores (one core per domain
+// used), and the VM needs 5 cores (10 vcpus) -- no single domain has
+// enough, so the fewest domains that together do are used, largest-free-
+// first (all tied at 2, so lowest id first): L3 #0 and #1 fully (2+2=4
+// cores), then only one of L3 #2's two free cores to reach 5, leaving its
+// other core free. The warning must name the 3-domain spread.
+func TestSelectThreadsSpansFewestDomainsWhenNoneFits(t *testing.T) {
+	snap := snapWithUsedThreads("hog", 0, 12, 3, 15, 6, 18, 9, 21) // core 0,3,6,9 used, one per domain
+	pins, note, warning := selectThreads(snap, 0, 10, nil)
+
+	if len(pins) != 10 {
+		t.Fatalf("len(pins) = %d, want 10 (fully filled from fully-free cores)", len(pins))
+	}
+	if !strings.Contains(note, "L3 domains #0, #1, #2") {
+		t.Errorf("note = %q, want it to name L3 domains #0, #1, #2", note)
+	}
+	if !strings.Contains(warning, "spans 3 L3 domains") {
+		t.Errorf("warning = %q, want it to mention \"spans 3 L3 domains\"", warning)
+	}
+	l3ByThread := func(threads []int) int { return snap.Topo.Threads[threads[0]].L3 }
+	used := map[int]bool{}
+	for _, thr := range pins {
+		used[l3ByThread(thr)] = true
+	}
+	if len(used) != 3 {
+		t.Errorf("pins touch %d distinct L3 domains, want 3: %v", len(used), used)
+	}
+}
+
+// TestSelectThreadsWithinFilterUnchanged covers the "within: L3 #k"
+// filter: allowed restricted to one whole L3 domain's threads produces
+// exactly the same single-group result the pre-packing code already gave
+// (computed by hand): a 6-vcpu VM filling L3 #2's 3 free cores in core
+// order, both siblings each.
+func TestSelectThreadsWithinFilterUnchanged(t *testing.T) {
+	snap := snapWithUsedThreads("") // nothing used
+	allowed := []int{6, 18, 7, 19, 8, 20}
+	pins, note, warning := selectThreads(snap, 0, 6, allowed)
+
+	want := map[int][]int{0: {6}, 1: {18}, 2: {7}, 3: {19}, 4: {8}, 5: {20}}
+	if !reflect.DeepEqual(pins, want) {
+		t.Errorf("pins = %v, want %v", pins, want)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want none", warning)
+	}
+	if !strings.Contains(note, "L3 domain #2") {
+		t.Errorf("note = %q, want mention of L3 domain #2", note)
+	}
+}
+
+// TestSelectThreadsFallbackStillShares covers the existing fallback path,
+// now reached through the packing rule instead of the old flat scan:
+// every core is used except one (core 2, L3 #0), so a 4-vcpu VM's last 2
+// vcpus must reuse already-claimed threads. Only one domain ever had any
+// free cores, so no placement note is expected; the sharing warning must
+// still fire and pins must still be 1:1.
+func TestSelectThreadsFallbackStillShares(t *testing.T) {
+	used := []int{0, 12, 1, 13, 3, 15, 4, 16, 5, 17, 6, 18, 7, 19, 8, 20, 9, 21, 10, 22, 11, 23}
+	snap := snapWithUsedThreads("hog", used...)
+	pins, note, warning := selectThreads(snap, 0, 4, nil)
+
+	if note != "" {
+		t.Errorf("note = %q, want none (only one domain ever had a free core)", note)
+	}
+	if !strings.Contains(warning, "sharing threads with:") {
+		t.Errorf("warning = %q, want mention of \"sharing threads with:\"", warning)
+	}
+	if !strings.Contains(warning, "hog") {
+		t.Errorf("warning = %q, want mention of hog", warning)
+	}
+	for vcpu, thr := range pins {
+		if len(thr) != 1 {
+			t.Errorf("pins[%d] = %v, want exactly one thread (1:1)", vcpu, thr)
+		}
+	}
+	if len(pins) != 4 {
+		t.Fatalf("len(pins) = %d, want 4", len(pins))
 	}
 }
