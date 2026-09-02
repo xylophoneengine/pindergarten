@@ -193,6 +193,54 @@ func TestCPUMapMarksPinned(t *testing.T) {
 	}
 }
 
+// TestCPUMapL3Grouping covers point 3 of the topology brief: once the
+// topology has L3 domain data, the CPU Map tab groups a node's cores by
+// L3 domain -- a "L3 #k" label above each domain's cells, a "|" boundary
+// separator between adjacent domains, "L3 boundary" named in the legend,
+// and "L3 #n" in the detail panel for the cursor's core -- with hits
+// still mapping to the right (global) core index despite the extra label
+// line and boundary glyph.
+func TestCPUMapL3Grouping(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, hits := renderCPUMapTab(s, 0, 100, 24)
+
+	for _, want := range []string{"L3 #0", "L3 #1", "|", "L3 boundary"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderCPUMapTab() = %q, want %q present", out, want)
+		}
+	}
+
+	// Core 6 is the first core belonging to L3 #1 (cores 0-5 are L3 #0,
+	// 6-11 are L3 #1, per realHostTopo).
+	var got *hit
+	for i := range hits {
+		if hits[i].kind == "core" && hits[i].index == 6 {
+			got = &hits[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("no core hit for index 6 recorded (hits = %+v)", hits)
+	}
+
+	detail := cpuMapDetail(s, 6)
+	if !strings.Contains(detail, "L3 #1") {
+		t.Fatalf("cpuMapDetail(6) = %q, want \"L3 #1\"", detail)
+	}
+}
+
+// TestCPUMapNoL3DataRendersUnchanged covers the gate: a topology with no
+// L3 domains at all (testTopo, every fixture elsewhere in this package)
+// renders the CPU Map tab with no L3-grouping text at all -- cpuMapNode-
+// Grid falls back to plain renderNodeMap output, and the legend omits
+// "L3 boundary".
+func TestCPUMapNoL3DataRendersUnchanged(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, _ := renderCPUMapTab(s, -1, 80, 24)
+	if strings.Contains(out, "L3") {
+		t.Fatalf("renderCPUMapTab() = %q, want no L3 grouping text without L3Domains data", out)
+	}
+}
+
 func TestCPUMapDetail(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
 	// core 0 (node 0, socket 0, id 0) has threads 0 and 4; thread 0 is

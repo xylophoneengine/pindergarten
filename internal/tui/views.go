@@ -386,9 +386,16 @@ func vmsOnNode(s *model.Snapshot, node int) string {
 }
 
 // cpuMapLegend is the CPU Map block's bottom legend line, shown once below
-// every node's panel rather than repeated per panel.
-func cpuMapLegend() string {
-	return "\u25cf pinned  \u25cb free  \u25d0 shared  (" + pendingGlyphStyle.Render("yellow") + " = pending)"
+// every node's panel rather than repeated per panel. withL3 (the
+// topology actually has L3 domain data -- see cpuMapNodeGrid) adds the
+// "| L3 boundary" entry naming the separator cpuMapNodeGrid draws between
+// adjacent L3 domains' cells.
+func cpuMapLegend(withL3 bool) string {
+	legend := "\u25cf pinned  \u25cb free  \u25d0 shared  (" + pendingGlyphStyle.Render("yellow") + " = pending)"
+	if withL3 {
+		legend += "  | L3 boundary"
+	}
+	return legend
 }
 
 // cpuNodeMinWidth is the minimum per-panel width (CPU Map's per-node
@@ -451,6 +458,92 @@ func cpuMapHitXLimit(cores, innerWidth int) int {
 	return innerWidth
 }
 
+// cpuMapNodeGridRows returns how many physical lines cpuMapNodeGrid's
+// grid spans for a node with this many cores: the same row count
+// renderNodeMap's plain grid would need (coresPerRow per row), doubled
+// once L3 grouping is active (a label line above every row of cells) --
+// shared with renderCPUMapTab's own per-node height estimate so it never
+// disagrees with what cpuMapNodeGrid actually renders.
+func cpuMapNodeGridRows(cores int, withL3 bool) int {
+	rows := (cores + coresPerRow - 1) / coresPerRow
+	if rows < 1 {
+		rows = 1
+	}
+	if withL3 {
+		rows *= 2
+	}
+	return rows
+}
+
+// cpuMapNodeGrid renders node's cores as a grid, exactly like
+// renderNodeMap (shared with the wizard, left untouched), except that --
+// once the topology actually has L3 domain data (s.Topo.L3Domains
+// non-empty; a fixture that never sets it leaves every core's L3 at the
+// same default and would otherwise look like one giant, spurious "L3 #0"
+// domain) -- it also groups cores by L3 domain: a "L3 #k" label line
+// above each row wherever a domain starts, and the normal single-space
+// separator between cores replaced with "|" at a domain boundary. Column
+// positions (and so hit x-ranges) are exactly the same either way -- only
+// the separator glyph and an extra label line above a row of cells
+// differ -- so cursor/hit semantics are unchanged.
+func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string) (string, []hit) {
+	if len(s.Topo.L3Domains) == 0 {
+		return renderNodeMap(s, node, nil, cursor, kind)
+	}
+
+	cores := nodeCores(s, node)
+	var rows, labels []string
+	var hits []hit
+	var cellLine, labelLine strings.Builder
+	col, rowIdx, x := 0, 0, 0
+	prevL3 := -2 // sentinel: never a real domain ID, forces a label at col 0
+	flushRow := func() {
+		rows = append(rows, cellLine.String())
+		labels = append(labels, strings.TrimRight(labelLine.String(), " "))
+		cellLine.Reset()
+		labelLine.Reset()
+	}
+	for i, core := range cores {
+		if col == coresPerRow {
+			flushRow()
+			rowIdx++
+			col, x = 0, 0
+			prevL3 = -2
+		}
+		if col > 0 {
+			sep := " "
+			if core.L3 != prevL3 {
+				sep = "|"
+			}
+			cellLine.WriteString(sep)
+			x++
+		}
+		if core.L3 != prevL3 {
+			for labelLine.Len() < x {
+				labelLine.WriteString(" ")
+			}
+			fmt.Fprintf(&labelLine, "L3 #%d", core.L3)
+			prevL3 = core.L3
+		}
+		hits = append(hits, hit{y0: 2*rowIdx + 1, y1: 2*rowIdx + 2, x0: x, x1: x + 2, kind: kind, index: i})
+		cellLine.WriteString(nodeMapCell(s, core, nil, i == cursor))
+		x += 2
+		col++
+	}
+	flushRow()
+
+	var b strings.Builder
+	for i, row := range rows {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(labels[i])
+		b.WriteString("\n")
+		b.WriteString(row)
+	}
+	return b.String(), hits
+}
+
 // renderCPUMapTab renders the CPU Map tab: one bordered panel per NUMA
 // node (side by side when each would get at least cpuNodeMinWidth
 // columns, else stacked, windowed around the cursor's own node -- like
@@ -465,14 +558,11 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
 	nodePanelWidths, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
 
+	withL3 := len(s.Topo.L3Domains) > 0
 	nodeHeights := make([]int, len(s.Topo.Nodes))
 	naturalNodeLines := 0
 	for i, node := range s.Topo.Nodes {
-		rows := (len(nodeCores(s, node.ID)) + coresPerRow - 1) / coresPerRow
-		if rows < 1 {
-			rows = 1
-		}
-		nodeHeights[i] = rows + 2
+		nodeHeights[i] = cpuMapNodeGridRows(len(nodeCores(s, node.ID)), withL3) + 2
 		if nodeSideBySide {
 			if nodeHeights[i] > naturalNodeLines {
 				naturalNodeLines = nodeHeights[i]
@@ -519,7 +609,7 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		i := start + k
 		node := s.Topo.Nodes[i]
 		idx := globalCoreIndices(s, node.ID)
-		grid, gridHits := renderNodeMap(s, node.ID, nil, localCoreIndex(idx, cursor), "core")
+		grid, gridHits := cpuMapNodeGrid(s, node.ID, localCoreIndex(idx, cursor), "core")
 		for j := range gridHits {
 			gridHits[j].index = idx[gridHits[j].index]
 		}
@@ -540,7 +630,7 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 			cumY += lineCount(p)
 		}
 	}
-	mapBlock := joinPanels(panels, nodeSideBySide) + "\n" + cpuMapLegend()
+	mapBlock := joinPanels(panels, nodeSideBySide) + "\n" + cpuMapLegend(len(s.Topo.L3Domains) > 0)
 
 	var detailPanel string
 	if secondaryBudget > 0 {
@@ -577,9 +667,12 @@ func glyphChar(s *model.Snapshot, t int) string {
 }
 
 // cpuMapDetail renders the detail panel for the core at coreIdx: its id,
-// socket, node and thread list, then one line per thread naming its
-// pinning VM(s) and pending claimant(s). Returns "" for an out-of-range
-// index.
+// socket, node and thread list, then (once the topology actually has L3
+// data -- s.Topo.L3Domains non-empty; core.L3's own "-1 unknown" default
+// isn't enough on its own, since a hand-built fixture that never sets it
+// reads as the equally-valid-looking domain 0) its L3 domain, then one
+// line per thread naming its pinning VM(s) and pending claimant(s).
+// Returns "" for an out-of-range index.
 func cpuMapDetail(s *model.Snapshot, coreIdx int) string {
 	if coreIdx < 0 || coreIdx >= len(s.Topo.Cores) {
 		return ""
@@ -589,6 +682,9 @@ func cpuMapDetail(s *model.Snapshot, coreIdx int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "core %d (socket %d, node %d)  threads %s\n",
 		core.ID, core.Socket, core.Node, hostinfo.FormatCPUList(core.Threads))
+	if len(s.Topo.L3Domains) > 0 && core.L3 != -1 {
+		fmt.Fprintf(&b, "L3 #%d\n", core.L3)
+	}
 	for _, t := range core.Threads {
 		b.WriteString(threadDetailLine(s, t))
 		b.WriteString("\n")
