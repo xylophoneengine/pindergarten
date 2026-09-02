@@ -193,6 +193,23 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int) boxC
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
 
+// renderTopoUnknownBox renders a box for display-class PCI devices whose
+// Node is still -1 -- a real multi-node host only, since hostinfo.Read
+// resolves a single-node host's -1 to that sole node itself (there's
+// nothing to guess on a multi-node host, so it's left alone there).
+// Grouped directly under the machine box, as a sibling of the socket/node
+// boxes, since there's no NUMA node to nest an unresolvable device under.
+func renderTopoUnknownBox(s *model.Snapshot, devs []hostinfo.PCIDevice, maxWidth int) boxChild {
+	var children []boxChild
+	for _, dev := range devs {
+		children = append(children, renderTopoGPUBox(s, dev))
+	}
+	inner, hits := wrapBoxesInto(children, maxWidth-2)
+	w := maxLineWidth(inner) + 2
+	block := panelInner("unknown locality", inner, w, 0)
+	return boxChild{block, offsetHits(hits, 1, 1)}
+}
+
 // renderTopoSocketBox renders one socket box: title "socket N  <CPU
 // model>", containing one box per NUMA node the socket's threads belong
 // to.
@@ -251,6 +268,15 @@ func topologyChildren(s *model.Snapshot, w int) []boxChild {
 		for _, node := range s.Topo.Nodes {
 			children = append(children, renderTopoNodeBox(s, node, w-2))
 		}
+	}
+	var unknown []hostinfo.PCIDevice
+	for _, dev := range s.Topo.PCIDevices {
+		if dev.Node == -1 && isDisplayDevice(dev.Class) {
+			unknown = append(unknown, dev)
+		}
+	}
+	if len(unknown) > 0 {
+		children = append(children, renderTopoUnknownBox(s, unknown, w-2))
 	}
 	return children
 }

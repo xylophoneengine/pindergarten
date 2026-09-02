@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
@@ -104,6 +105,36 @@ func TestTopologyNestingTwoNodeTopo(t *testing.T) {
 	}
 	if strings.Contains(out, "socket") || strings.Contains(out, "L3 #") {
 		t.Fatalf("buildTopologyTab() = %q, want no socket/L3 level without that data", out)
+	}
+}
+
+// TestTopologyUnknownLocalityBox covers point 1 of the topology-compact
+// brief: a real multi-node host's PCI device that hostinfo.Read left at
+// Node -1 (unresolvable -- see hostinfo's own TestPCINumaNodeInMultiNode)
+// must still be drawn somewhere, in its own "unknown locality" box
+// directly under the machine box, rather than silently vanishing (the
+// original bug report) or being guessed onto the wrong node. A device
+// with a known Node must still land inside that node's own box, not the
+// unknown one.
+func TestTopologyUnknownLocalityBox(t *testing.T) {
+	topo := testTopo()
+	topo.PCIDevices = []hostinfo.PCIDevice{
+		{Addr: "0000:05:00.0", Class: "030000", VendorID: "1002", DeviceID: "aaaa", VendorName: "AMD", DeviceName: "Known", Node: 0},
+		{Addr: "0000:99:00.0", Class: "030000", VendorID: "10de", DeviceID: "bbbb", VendorName: "NVIDIA", DeviceName: "Unknown", Node: -1},
+	}
+	s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, _ := buildTopologyTab(s, 120)
+
+	iUnknownBox := mustIndex(t, out, "unknown locality")
+	iKnownGPU := mustIndex(t, out, "AMD Known")
+	iUnknownGPU := mustIndex(t, out, "NVIDIA Unknown")
+	iNode0 := mustIndex(t, out, "node 0")
+
+	if iNode0 >= iKnownGPU || iKnownGPU >= iUnknownBox {
+		t.Fatalf("nesting order wrong: want node 0 (%d) < known gpu (%d) < unknown locality box (%d)", iNode0, iKnownGPU, iUnknownBox)
+	}
+	if iUnknownGPU <= iUnknownBox {
+		t.Fatalf("unknown-locality gpu at %d, want it after the \"unknown locality\" box heading at %d", iUnknownGPU, iUnknownBox)
 	}
 }
 

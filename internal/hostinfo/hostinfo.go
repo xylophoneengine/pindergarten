@@ -288,6 +288,22 @@ func Read(sysfsRoot string) (*Topology, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A single-node host's kernel commonly reports every PCI device's
+	// numa_node as -1 (there's no NUMA to report), which used to leave
+	// Topology unable to place a GPU under the host's own sole node at all
+	// -- the same resolution PCINumaNodeIn already applied for a single
+	// caller (a VM's passthrough device), now done once here at the
+	// source so every PCIDevice benefits. A real multi-node host's -1
+	// stays unresolved: there's no single "the node" to guess, so
+	// Topology instead draws those under an "unknown locality" box
+	// (internal/tui's topologyChildren) rather than a wrong one.
+	if len(nodes) == 1 {
+		for i := range pciDevices {
+			if pciDevices[i].Node == -1 {
+				pciDevices[i].Node = nodes[0].ID
+			}
+		}
+	}
 
 	return &Topology{
 		Nodes:      nodes,

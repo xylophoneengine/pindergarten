@@ -440,11 +440,18 @@ func TestReadRealHostMirror(t *testing.T) {
 	if len(topo.PCIDevices) != 3 {
 		t.Fatalf("expected 3 PCIDevices, got %d: %+v", len(topo.PCIDevices), topo.PCIDevices)
 	}
+	// This fixture has exactly one NUMA node, so every device's raw "-1"
+	// numa_node resolves to that sole node (Node: 0) -- the fix for GPU
+	// boxes going missing entirely on a real single-node host, whose
+	// kernel reports -1 for every PCI device since there's no NUMA to
+	// report. See TestPCINumaNodeInMultiNode for the multi-node case,
+	// where -1 must NOT be resolved (there's no single "the node" to
+	// guess).
 	wantAMD := PCIDevice{
 		Addr: "0000:06:00.0", Class: "030000",
 		VendorID: "1002", DeviceID: "743f",
 		VendorName: "Advanced Micro Devices, Inc. [AMD/ATI]", DeviceName: "Navi 10 [Radeon RX 5700 XT]",
-		Driver: "amdgpu", Node: -1,
+		Driver: "amdgpu", Node: 0,
 	}
 	if topo.PCIDevices[0] != wantAMD {
 		t.Errorf("PCIDevices[0] = %+v, want %+v", topo.PCIDevices[0], wantAMD)
@@ -453,7 +460,7 @@ func TestReadRealHostMirror(t *testing.T) {
 		Addr: "0000:09:00.0", Class: "030000",
 		VendorID: "10de", DeviceID: "2216",
 		VendorName: "NVIDIA Corporation", DeviceName: "GA102 [GeForce RTX 3080 Ti]",
-		Driver: "nvidia", Node: -1,
+		Driver: "nvidia", Node: 0,
 	}
 	if topo.PCIDevices[1] != wantNV {
 		t.Errorf("PCIDevices[1] = %+v, want %+v", topo.PCIDevices[1], wantNV)
@@ -461,7 +468,7 @@ func TestReadRealHostMirror(t *testing.T) {
 	wantVFIO := PCIDevice{
 		Addr: "0000:0a:00.0", Class: "020000",
 		VendorID: "8086", DeviceID: "1521",
-		Driver: "vfio-pci", Node: -1,
+		Driver: "vfio-pci", Node: 0,
 	}
 	if topo.PCIDevices[2] != wantVFIO {
 		t.Errorf("PCIDevices[2] = %+v, want %+v", topo.PCIDevices[2], wantVFIO)
@@ -489,6 +496,10 @@ func TestPCINumaNodeInMultiNode(t *testing.T) {
 			3: {"1", "1", "3,7"}, 7: {"1", "1", "3,7"},
 		},
 		map[string]string{"0000:81:00.0": "-1"})
+	// writePCIDevice (not just writeSysfs's bare numa_node file) so this
+	// device is one Read() actually parses into topo.PCIDevices, not just
+	// one PCINumaNode can read directly off disk.
+	writePCIDevice(t, root, "0000:81:00.0", "0x030000", "0x1002", "0x1234", "-1", "amdgpu")
 
 	topo, err := Read(root)
 	if err != nil {
@@ -496,6 +507,11 @@ func TestPCINumaNodeInMultiNode(t *testing.T) {
 	}
 	if got := PCINumaNodeIn(topo, root, "0000:81:00.0"); got != -1 {
 		t.Errorf("PCINumaNodeIn(multi-node, -1) = %d, want -1", got)
+	}
+	// Read itself must leave a multi-node host's unresolvable PCIDevice.Node
+	// at -1 too -- only a single-node host gets the sole-node guess.
+	if len(topo.PCIDevices) != 1 || topo.PCIDevices[0].Node != -1 {
+		t.Errorf("PCIDevices = %+v, want exactly 1 device with Node -1 (multi-node: not resolved)", topo.PCIDevices)
 	}
 	if got := PCINumaNodeIn(nil, root, "0000:81:00.0"); got != -1 {
 		t.Errorf("PCINumaNodeIn(nil topo, -1) = %d, want -1", got)
