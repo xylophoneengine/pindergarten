@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // helpEntry is one row of the single key-binding table this file owns:
@@ -90,13 +92,12 @@ func helpKeySet() map[string]bool {
 	return set
 }
 
-// helpPanel renders the help overlay: every helpKeys entry, grouped under
-// a section heading, key and action separated by at least two spaces.
-// Like every dialog (see renderDialog), it clamps to dw x budget rather
-// than stretching to fill -- a long key list simply truncates on a short
-// terminal rather than scrolling; there is no key input while it's open
-// beyond the "any key closes it" contract, so nothing to scroll it with.
-func helpPanel(dw, budget int) string {
+// helpLines renders every helpKeys entry (grouped under a section
+// heading, key and action separated by at least two spaces) word-wrapped
+// to inner columns, one entry per visual line -- shared by helpPanel
+// (which windows it to a scroll offset) and App.clampHelpScroll (which
+// only needs the total line count).
+func helpLines(inner int) []string {
 	keyW := 0
 	for _, e := range helpKeys {
 		if w := len(e.key); w > keyW {
@@ -117,7 +118,32 @@ func helpPanel(dw, budget int) string {
 		}
 		fmt.Fprintf(&b, "%s  %s\n", padRight(e.key, keyW), e.action)
 	}
-	body := strings.TrimRight(b.String(), "\n")
-	panel, _ := panelWrapH("Help", body, dw, budget, false)
-	return panel
+	text := strings.TrimRight(b.String(), "\n")
+
+	if inner < 1 {
+		inner = 1
+	}
+	return strings.Split(lipgloss.NewStyle().Width(inner).Render(text), "\n")
+}
+
+// helpPanel renders the help overlay: helpLines, scrolled to scroll (the
+// caller clamps via App.clampHelpScroll) with a "lines N-M of T" footer
+// once it doesn't all fit -- up/down/wheel scroll it while it's open (any
+// other key closes it instead, see App.handleKey), the same pattern the
+// Backups tab's diff view uses. Unlike every other dialog, it fills the
+// full body height (budget, via panelInner's height parameter) rather
+// than clamping to its own natural size -- the key list is long enough
+// (39 rows and growing) to want all the room it can get.
+func helpPanel(dw, budget, scroll int) string {
+	lines := helpLines(dw - 2)
+	contentBudget := budget - 2
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	visible, offset, total := windowWithFooter(lines, contentBudget, scroll)
+	body := strings.Join(visible, "\n")
+	if footer := scrollFooter(offset, len(visible), total); footer != "" {
+		body += "\n" + keyBarLabelStyle.Render(footer)
+	}
+	return panelInner("Help", body, dw, contentBudget)
 }

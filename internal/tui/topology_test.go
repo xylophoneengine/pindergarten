@@ -152,6 +152,28 @@ func TestTopologyFillsAndScrolls(t *testing.T) {
 	}
 }
 
+// TestTopologyFillsWithBorderNotBlankRows covers the fix for
+// renderTopologyTab padding short content with bare blank rows (no
+// border at all) below the machine box's own closing border, instead of
+// giving the box itself the fill: at 120x60 with the (short) 2-node
+// testTopo fixture, every line of the body must start with a border
+// glyph -- the box's own border, extended down to the full budget, never
+// a blank line floating below it.
+func TestTopologyFillsWithBorderNotBlankRows(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, _ := renderTopologyTab(s, 120, 60, 0)
+	lines := strings.Split(body, "\n")
+	if len(lines) != 60 {
+		t.Fatalf("renderTopologyTab() has %d lines, want exactly 60 (budget)", len(lines))
+	}
+	for i, l := range lines {
+		r := []rune(l)
+		if len(r) == 0 || (r[0] != '\u2502' && r[0] != '\u256d' && r[0] != '\u2570') {
+			t.Fatalf("line %d = %q, want it to start with a border glyph (box border/corner)", i, l)
+		}
+	}
+}
+
 // TestTopologyClickJumpsToCPUMapCursor covers the click contract: a click
 // on a core box switches to the CPU Map tab and moves its cursor to that
 // core.

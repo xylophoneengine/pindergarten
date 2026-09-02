@@ -630,7 +630,21 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 			cumY += lineCount(p)
 		}
 	}
-	mapBlock := joinPanels(panels, nodeSideBySide) + "\n" + cpuMapLegend(len(s.Topo.L3Domains) > 0)
+	// The legend is a free-standing line below the bordered node panels,
+	// not itself inside a border -- word-wrapped to primaryW (two lines
+	// if it doesn't fit one) so it can never be the widest line in
+	// mapBlock and stretch the whole primary block wider than primaryW
+	// (lipgloss.JoinHorizontal, used both here for a side-by-side node
+	// layout and by the caller to join the primary/secondary panels,
+	// pads every line of a block to its own widest line -- a too-wide
+	// legend silently widened the whole CPU Map tab by one column at
+	// width 120-121, clipping the detail panel's own right border into
+	// ".." once the final assembled view got truncated back down to the
+	// terminal's actual width). truncateLines is a last-resort safety net
+	// in case wrapping still left something wider (a single unbreakable
+	// token longer than primaryW, say).
+	legend := lipgloss.NewStyle().Width(primaryW).Render(cpuMapLegend(withL3))
+	mapBlock := truncateLines(joinPanels(panels, nodeSideBySide)+"\n"+legend, primaryW)
 
 	var detailPanel string
 	if secondaryBudget > 0 {

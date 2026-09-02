@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -238,6 +239,31 @@ func TestCPUMapNoL3DataRendersUnchanged(t *testing.T) {
 	out, _ := renderCPUMapTab(s, -1, 80, 24)
 	if strings.Contains(out, "L3") {
 		t.Fatalf("renderCPUMapTab() = %q, want no L3 grouping text without L3Domains data", out)
+	}
+}
+
+// TestCPUMapLegendFitsPrimaryWidth covers the fix for the CPU Map
+// legend's own natural width (61 cols, once L3 grouping adds "| L3
+// boundary") exceeding splitBodyWidth(120)'s 60-column primary share:
+// unwrapped, that stretched the whole primary block a column wider than
+// its allotted width, and the assembled tab (primary+gap+secondary) came
+// out one column too wide overall -- which, once truncated back down to
+// the terminal's actual width by App.clampWidth, chopped the detail
+// panel's own right border into "..". At widths 120 and 121 with
+// realHostTopo (whose L3 domains trigger the longer legend), every line
+// must fit within w and never show that truncation artifact.
+func TestCPUMapLegendFitsPrimaryWidth(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	for _, w := range []int{120, 121} {
+		out, _ := renderCPUMapTab(s, 0, w, 24)
+		for i, l := range strings.Split(out, "\n") {
+			if lw := lipgloss.Width(l); lw > w {
+				t.Fatalf("width %d: line %d width = %d, want <= %d: %q", w, i, lw, w, l)
+			}
+		}
+		if strings.Contains(out, "..") {
+			t.Fatalf("width %d: renderCPUMapTab() = %q, want no \"..\" truncation artifact", w, out)
+		}
 	}
 }
 

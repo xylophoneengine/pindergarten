@@ -308,6 +308,53 @@ func ryzenCPUs() map[int][3]string {
 	return cpus
 }
 
+// TestReadL3DedupesEquivalentSharedCPULists covers the fix for
+// readL3Domains deduping by the raw shared_cpu_list string rather than
+// the parsed, canonically-formatted set: two CPUs actually in the same
+// L3 domain whose own shared_cpu_list files spell it differently (a
+// compact range vs the fully expanded list -- the same two forms a real
+// kernel could plausibly disagree on across CPUs) must still collapse to
+// exactly one domain, not two.
+func TestReadL3DedupesEquivalentSharedCPULists(t *testing.T) {
+	isolateHostFiles(t)
+	root := t.TempDir()
+	writeSysfs(t, root, map[int]string{0: "0-1"},
+		map[int][2]uint64{0: {1000, 500}},
+		map[int][3]string{
+			0: {"0", "0", "0"},
+			1: {"0", "1", "1"},
+		}, nil)
+	writeCache(t, root, 0, 3, "3", "Unified", "0-1")
+	writeCache(t, root, 1, 3, "3", "Unified", "0,1")
+
+	topo, err := Read(root)
+	if err != nil {
+		t.Fatalf("Read: unexpected error: %v", err)
+	}
+	if len(topo.L3Domains) != 1 {
+		t.Fatalf("L3Domains = %+v, want exactly 1 domain (both CPUs' shared_cpu_list names the same set, just spelled differently)", topo.L3Domains)
+	}
+}
+
+// TestParsePCIIDsSkipsDeviceClassSection covers the curVendor-reset guard on
+// a "C 03  Display controller" device-class section: without it, the
+// section's own indented subentries would be misfiled as devices of
+// whatever real vendor's block came last before the section started. Here
+// vendor 1234's real device 0001 ("Real Device One") is deliberately given
+// the same 4-hex-digit ID as a bogus subentry under the class section
+// ("VGA compatible controller") that follows it -- without the guard, the
+// class section's entry is parsed second and silently overwrites the real
+// device's name in the map.
+func TestParsePCIIDsSkipsDeviceClassSection(t *testing.T) {
+	names := parsePCIIDs("1234  Test Vendor\n" +
+		"\t0001  Real Device One\n" +
+		"C 03  Display controller\n" +
+		"\t0001  VGA compatible controller\n")
+	if got := names.devices["12340001"]; got != "Real Device One" {
+		t.Errorf(`devices["12340001"] = %q, want "Real Device One" (class section must not overwrite it)`, got)
+	}
+}
+
 // TestReadRealHostMirror mirrors this dev box's real topology: an AMD Ryzen
 // 9 5900X, 1 socket, 1 NUMA node (cpus 0-23), two L3 domains (0-5,12-17 and
 // 6-11,18-23), and two display-class PCI devices with numa_node -1.

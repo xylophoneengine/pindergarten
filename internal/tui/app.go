@@ -56,7 +56,8 @@ type App struct {
 	overviewScroll int    // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
 	topologyScroll int    // scroll offset into the Topology tab's drawing; up/down/wheel-driven
 	diffView       string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
-	help           bool   // toggled by '?'/F1; any key closes it again
+	help           bool   // toggled by '?'/F1; any other key closes it again
+	helpScroll     int    // scroll offset into the help overlay; up/down/wheel-driven, reset on close
 	editMode       bool
 	queue          model.Queue
 	snap           *model.Snapshot
@@ -201,14 +202,11 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.tooSmall() {
 		return a, nil
 	}
-	if a.help {
-		return a, nil
-	}
 	if delta, ok := wheelDelta(msg); ok {
 		a.scrollWheel(delta)
 		return a, nil
 	}
-	if a.confirm != nil || a.flow != nil {
+	if a.help || a.confirm != nil || a.flow != nil {
 		return a, nil
 	}
 	if a.wizard != nil {
@@ -245,6 +243,11 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // modal has nothing scrollable; otherwise it falls through to whichever
 // tab/screen is active.
 func (a *App) scrollWheel(delta int) {
+	if a.help {
+		a.helpScroll += delta
+		a.clampHelpScroll()
+		return
+	}
 	if a.confirm != nil {
 		return
 	}
@@ -331,9 +334,20 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 	if a.help {
-		// Any key closes the help overlay, not just esc/'?' -- it's a pure
-		// reference popup with nothing to confirm or select.
-		a.help = false
+		// up/down/j/k scroll the (possibly long) key list; any other key
+		// closes the overlay, not just esc/'?' -- it's a pure reference
+		// popup with nothing else to confirm or select.
+		switch {
+		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
+			a.helpScroll--
+			a.clampHelpScroll()
+		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
+			a.helpScroll++
+			a.clampHelpScroll()
+		default:
+			a.help = false
+			a.helpScroll = 0
+		}
 		return a, nil
 	}
 	if a.confirm != nil {
@@ -375,6 +389,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case isRune(msg, '?'), msg.Type == tea.KeyF1:
 		a.help = true
+		a.helpScroll = 0
 		return a, nil
 	case isRune(msg, 'q'):
 		return a.requestQuit()
@@ -868,7 +883,7 @@ func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
 	switch {
 	case a.help:
 		dw := dialogWidth(w, dialogMaxWidth)
-		return helpPanel(dw, budget), nil, true
+		return helpPanel(dw, budget, a.helpScroll), nil, true
 	case a.confirm != nil:
 		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
 		dw := dialogWidth(w, maxLineWidth(body))
@@ -908,6 +923,27 @@ func (a *App) clampDiffScroll() {
 	_, _, _, _, chrome := a.renderChrome()
 	budget := a.bodyBudget(chrome) - 2
 	a.diffScroll = clampScroll(a.diffScroll, footerBudget(total, budget), total)
+}
+
+// clampHelpScroll re-clamps a.helpScroll to the help overlay's actual
+// valid range at the current width/body-budget, writing the clamped
+// value back -- same pattern as clampDiffScroll, so an over-scrolled
+// offset doesn't leave the next up/wheel-up producing no visible change
+// until several presses "catch up" to render-time-only clamping.
+func (a *App) clampHelpScroll() {
+	if !a.help {
+		return
+	}
+	w := effectiveWidth(a.width)
+	dw := dialogWidth(w, dialogMaxWidth)
+	inner := dw - 2
+	if inner < 1 {
+		inner = 1
+	}
+	total := len(helpLines(inner))
+	_, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome) - 2
+	a.helpScroll = clampScroll(a.helpScroll, footerBudget(total, budget), total)
 }
 
 // diffLinesCached returns a.diffView colored (colorDiff) and truncated to
@@ -1155,7 +1191,7 @@ func (a *App) renderStatusBar() string {
 
 	switch {
 	case a.help:
-		return statusBarStyle.Render(pending + "  any key: close")
+		return statusBarStyle.Render(pending + "  [up/down] scroll  any other key: close")
 	case a.wizard != nil:
 		return statusBarStyle.Render(pending + "  " + a.wizard.statusBarHint())
 	case a.memPicker != nil:

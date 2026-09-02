@@ -364,6 +364,40 @@ func TestHelpOverlayOpensAndAnyKeyCloses(t *testing.T) {
 	}
 }
 
+// TestHelpOverlayScrollsToApplyDriftSection covers the fix for helpPanel
+// silently truncating the key list (22 of 39 rows shown at height 40,
+// with no indication anything was cut off): at height 24 (well under the
+// full list), a "lines N-M of T" scroll footer must show, and scrolling
+// down must bring the last-listed section (Apply/drift) into view,
+// rather than it simply never being reachable.
+func TestHelpOverlayScrollsToApplyDriftSection(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	sendKey(a, '?')
+	if !a.help {
+		t.Fatal("'?' did not open the help overlay")
+	}
+
+	view := a.View()
+	if !strings.Contains(view, "lines ") || !strings.Contains(view, " of ") {
+		t.Fatalf("View() with help open at height 24 = %q, want a \"lines N-M of T\" scroll footer", view)
+	}
+	if strings.Contains(view, "Apply / drift") {
+		t.Fatalf("View() with help open at height 24 = %q, want the Apply/drift section not visible before scrolling", view)
+	}
+
+	for i := 0; i < 40; i++ {
+		sendKeyType(a, tea.KeyDown)
+	}
+	if !a.help {
+		t.Fatal("help overlay closed while scrolling down")
+	}
+	view = a.View()
+	if !strings.Contains(view, "Apply / drift") {
+		t.Fatalf("View() after scrolling down = %q, want the Apply/drift section visible", view)
+	}
+}
+
 func TestQuitConfirmWithPending(t *testing.T) {
 	a := testApp(t, false)
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})

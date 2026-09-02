@@ -230,6 +230,18 @@ func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int) 
 // renderTopologyTab (which windows it to a budget/scroll) and
 // App.clampTopologyScroll (which only needs the total line count).
 func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
+	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
+	mw := machineBoxWidth(inner, w)
+	block := panelInner(topologyMachineTitle(s), inner, mw, 0)
+	return truncateLines(block, w), offsetHits(hits, 1, 1)
+}
+
+// topologyChildren builds the machine box's top-level children: one box
+// per socket, or -- when the topology has no socket data at all, the
+// same "skip a level with no data" gating every level here uses -- one
+// box per node directly. Shared by buildTopologyTab and
+// renderTopologyTab.
+func topologyChildren(s *model.Snapshot, w int) []boxChild {
 	var children []boxChild
 	if len(s.Topo.Sockets) > 0 {
 		for _, sock := range s.Topo.Sockets {
@@ -240,31 +252,56 @@ func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
 			children = append(children, renderTopoNodeBox(s, node, w-2))
 		}
 	}
+	return children
+}
 
+// topologyMachineTitle renders the machine box's title: "machine  <total
+// mem>", the sum of every node's own MemTotalKiB.
+func topologyMachineTitle(s *model.Snapshot) string {
 	var totalMem uint64
 	for _, n := range s.Topo.Nodes {
 		totalMem += n.MemTotalKiB
 	}
-	inner, hits := wrapBoxesInto(children, w-2)
-	block := panelInner("machine  "+fmtKiB(totalMem), inner, w, 0)
-	hits = offsetHits(hits, 1, 1)
-
-	return truncateLines(block, w), hits
+	return "machine  " + fmtKiB(totalMem)
 }
 
-// renderTopologyTab renders the Topology tab: buildTopologyTab's full
-// drawing, windowed vertically to budget lines starting at scroll (the
-// caller clamps scroll via App.clampTopologyScroll), padded to fill
-// budget when the drawing is shorter (matching every other tab's body --
-// see panelH's fill option) via padLinesTo. Alongside the string it
-// returns one "topocore" hit per visible core box, 0-based relative to
-// the visible window -- a click switches to the CPU Map tab and moves
-// its cursor there (see App.handleBodyClick).
+// machineBoxWidth returns the machine box's own width: shrink-wrapped to
+// its widest child (plus borders), the same as every level below it
+// already does, rather than always claiming the full body width w --
+// but never wider than w itself.
+func machineBoxWidth(inner string, w int) int {
+	mw := maxLineWidth(inner) + 2
+	if mw > w {
+		mw = w
+	}
+	return mw
+}
+
+// renderTopologyTab renders the Topology tab: the same nested-box
+// drawing as buildTopologyTab, windowed vertically to budget lines
+// starting at scroll (the caller clamps scroll via App.clampTopology-
+// Scroll) *before* the machine box's own border is added -- so a short
+// drawing fills the border down to budget (panelInner's height
+// parameter, exactly like every other tab's body panel) instead of
+// leaving bare blank rows below it, and a long one keeps its own full
+// top/bottom border around whatever page is visible, the same pattern
+// renderDiffView (and every other scrollable panel in this package)
+// already uses. Alongside the string it returns one "topocore" hit per
+// visible core box, 0-based relative to the visible window -- a click
+// switches to the CPU Map tab and moves its cursor there (see
+// App.handleBodyClick).
 func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit) {
-	block, hits := buildTopologyTab(s, w)
-	lines := strings.Split(block, "\n")
-	visible, offset, _ := windowAt(lines, budget, scroll)
-	body := padLinesTo(strings.Join(visible, "\n"), budget)
+	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
+	lines := strings.Split(inner, "\n")
+	contentBudget := budget - 2
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	visible, offset, _ := windowAt(lines, contentBudget, scroll)
+	body := strings.Join(visible, "\n")
+
+	mw := machineBoxWidth(body, w)
+	block := truncateLines(panelInner(topologyMachineTitle(s), body, mw, contentBudget), w)
 
 	visibleHits := make([]hit, 0, len(hits))
 	for _, h := range hits {
@@ -273,5 +310,5 @@ func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit)
 		}
 		visibleHits = append(visibleHits, hit{y0: h.y0 - offset, y1: h.y1 - offset, x0: h.x0, x1: h.x1, kind: h.kind, index: h.index})
 	}
-	return body, visibleHits
+	return block, offsetHits(visibleHits, 1, 1)
 }
