@@ -830,14 +830,23 @@ func (a *App) renderFull() string {
 	// panel on top of it. Its hits are dropped (not even computed) rather
 	// than composited -- the confirm swallows every click/key itself (see
 	// handleMouse/handleKey), so they'd never be reachable anyway.
+	underEnd := -1 // row just below the stacked-under panel, or -1 when none
 	if a.confirm != nil {
 		if under, ok := a.renderConfirmUnder(w, budget); ok {
 			x, y := centerXY(lipgloss.Width(under), lineCount(under), w, budget)
 			body = overlay(body, under, x, y)
+			underEnd = y + lineCount(under)
 		}
 	}
 	if dialog, dHits, ok := a.renderDialog(w, budget); ok {
 		x, y := centerXY(lipgloss.Width(dialog), lineCount(dialog), w, budget)
+		// A confirm stacked over a short panel (the mem-node picker) sits
+		// just below it when there is room, so the two borders don't splice
+		// into one malformed box; over a tall panel (the wizard form) it
+		// stays centered, inset in the form.
+		if below := underEnd + 1; underEnd >= 0 && below+lineCount(dialog) <= budget {
+			y = below
+		}
 		body = overlay(body, dialog, x, y)
 		a.hits = offsetHits(dHits, bodyY0+y, x)
 	} else {

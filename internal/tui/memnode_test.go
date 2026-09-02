@@ -298,6 +298,25 @@ func TestConfirmStacksOverMemPickerAt80x24(t *testing.T) {
 	if !strings.Contains(view, "Bind memory across the GPU's node anyway? [y/n]") {
 		t.Fatalf("View() = %q, want the confirm's own prompt visible", view)
 	}
+	// The picker is short, so the confirm sits below it rather than
+	// splicing its border into the picker's: no row carries both boxes.
+	for i, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "set memory node") && strings.Contains(l, "Confirm") {
+			t.Fatalf("line %d has both the picker title and the confirm border: %q", i, l)
+		}
+	}
+	pickerBottom, confirmTop := -1, -1
+	for i, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "set memory node") {
+			pickerBottom = i + 5 // 6-line panel: title row + 5
+		}
+		if strings.Contains(l, "Confirm") {
+			confirmTop = i
+		}
+	}
+	if confirmTop <= pickerBottom {
+		t.Fatalf("confirm top row %d not below picker bottom row %d:\n%s", confirmTop, pickerBottom, view)
+	}
 }
 
 // TestMemNodeGPUCrossYStages covers the confirm's "y": it stages exactly
