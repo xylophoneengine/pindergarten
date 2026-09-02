@@ -21,7 +21,7 @@ func TestFakeDefineUpdates(t *testing.T) {
 		t.Errorf("State = %v, want StateShutoff", doms[0].State)
 	}
 
-	modified, err := SetPinning(plainVMXML, map[int][]int{0: {2}}, 0)
+	modified, err := SetPinning(plainVMXML, map[int][]int{0: {2}}, 0, nil)
 	if err != nil {
 		t.Fatalf("SetPinning: %v", err)
 	}

@@ -226,6 +226,114 @@ func TestWizardApplyStagesPin(t *testing.T) {
 	}
 }
 
+// TestWizardEmulatorDefaultsToOwnThreads covers buildOp's unchecked
+// default: EmulatorPin equals the op's own assigned vCPU threads, and the
+// summary says so.
+func TestWizardEmulatorDefaultsToOwnThreads(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	if a.wizard.emulator {
+		t.Fatal("emulator = true by default, want false")
+	}
+	if !strings.Contains(a.wizard.summaryLine(nil), "emulator -> own threads") {
+		t.Fatalf("summaryLine() = %q, want \"emulator -> own threads\"", a.wizard.summaryLine(nil))
+	}
+
+	sendKey(a, 'A')
+	op := a.queue.Ops[0]
+	wantThreads := op.Pins[0][0]
+	if len(op.EmulatorPin) != len(op.Pins) {
+		t.Fatalf("EmulatorPin = %v, want same length as Pins (%d)", op.EmulatorPin, len(op.Pins))
+	}
+	found := false
+	for _, t2 := range op.EmulatorPin {
+		if t2 == wantThreads {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("EmulatorPin = %v, want it to include vcpu 0's own thread %d", op.EmulatorPin, wantThreads)
+	}
+	if !strings.Contains(op.Summary, "emulator -> own threads") {
+		t.Fatalf("Summary = %q, want \"emulator -> own threads\"", op.Summary)
+	}
+}
+
+// TestWizardEmulatorCheckboxNoOpWithoutReserve covers the greyed-out case:
+// with no -reserve at all (Reserved unset), toggling the emulator field is
+// a no-op and its value names "none reserved".
+func TestWizardEmulatorCheckboxNoOpWithoutReserve(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	if !strings.Contains(a.wizard.emulatorFieldValue(), "none reserved on node") {
+		t.Fatalf("emulatorFieldValue() = %q, want mention of \"none reserved on node\"", a.wizard.emulatorFieldValue())
+	}
+
+	a.wizard.field = fieldEmulator
+	sendKeyType(a, tea.KeySpace)
+	if a.wizard.emulator {
+		t.Fatal("emulator = true after toggling with no reserve on the node, want it to stay false (no-op)")
+	}
+}
+
+// TestWizardEmulatorCheckboxReservedCores covers the checked case: with
+// node 0's core {0,4} reserved, toggling the emulator field on pins
+// EmulatorPin to those reserved threads instead of the VM's own vcpus, and
+// the summary says so.
+func TestWizardEmulatorCheckboxReservedCores(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	// Reserve one core on each node so the automatic node-choice tie
+	// (both nodes otherwise equally free) still lands on node 0, the
+	// lower ID.
+	a.snap.Reserved = map[int]bool{0: true, 4: true, 2: true, 6: true}
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	if a.wizard.node != 0 {
+		t.Fatalf("wizard.node = %d, want 0", a.wizard.node)
+	}
+
+	a.wizard.field = fieldEmulator
+	sendKeyType(a, tea.KeySpace)
+	if !a.wizard.emulator {
+		t.Fatal("emulator = false after toggling with reserve on the node, want true")
+	}
+	if !strings.Contains(a.wizard.emulatorFieldValue(), "threads 0,4") {
+		t.Fatalf("emulatorFieldValue() = %q, want mention of \"threads 0,4\"", a.wizard.emulatorFieldValue())
+	}
+
+	sendKey(a, 'A')
+	if a.wizard != nil {
+		t.Fatal("wizard still open after staging")
+	}
+	op := a.queue.Ops[0]
+	if len(op.EmulatorPin) != 2 || op.EmulatorPin[0] != 0 || op.EmulatorPin[1] != 4 {
+		t.Fatalf("op.EmulatorPin = %v, want [0 4]", op.EmulatorPin)
+	}
+	if !strings.Contains(op.Summary, "emulator -> reserved 0,4") {
+		t.Fatalf("Summary = %q, want mention of \"emulator -> reserved 0,4\"", op.Summary)
+	}
+}
+
 func TestWizardEscCancels(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
@@ -1042,10 +1150,11 @@ func TestWizardGridUpDownMovesByPerRow(t *testing.T) {
 }
 
 // TestWizardGridUpDownWrapsToNeighborField covers the grid's own edge
-// behavior: up on the top row focuses fieldMemNode, down on the bottom
-// row focuses fieldNode -- testTopo's node 0 has only 2 cores, which fit
-// in a single row at any realistic dialog width, so both edges are one
-// key away from the cursor's starting position.
+// behavior: up on the top row focuses fieldEmulator (the field
+// immediately above the grid), down on the bottom row focuses fieldNode
+// -- testTopo's node 0 has only 2 cores, which fit in a single row at any
+// realistic dialog width, so both edges are one key away from the
+// cursor's starting position.
 func TestWizardGridUpDownWrapsToNeighborField(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
@@ -1063,8 +1172,8 @@ func TestWizardGridUpDownWrapsToNeighborField(t *testing.T) {
 	a.wizard.field = fieldGrid
 	a.wizard.cursor = 0
 	sendKeyType(a, tea.KeyUp)
-	if a.wizard.field != fieldMemNode {
-		t.Fatalf("field = %d after up on row 0, want fieldMemNode", a.wizard.field)
+	if a.wizard.field != fieldEmulator {
+		t.Fatalf("field = %d after up on row 0, want fieldEmulator", a.wizard.field)
 	}
 
 	a.wizard.field = fieldGrid
@@ -1411,6 +1520,33 @@ func TestWizardProposalHighlightsProposedThreads(t *testing.T) {
 	view, _ := a.wizard.view(200, 40)
 	if !strings.Contains(view, "\x1b[") {
 		t.Fatalf("wizard.view() = %q, want ANSI escapes from the highlight style on proposed threads", view)
+	}
+}
+
+// TestNodeMapCellStylesReservedThread covers nodeMapCell's reserved
+// branch: a free thread reserved for the host renders with a distinct
+// (dim) style -- an otherwise-unstyled free glyph carries no ANSI escapes
+// at all, so their presence here is the fix.
+func TestNodeMapCellStylesReservedThread(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	snap := &model.Snapshot{
+		Topo:     testTopo(),
+		Use:      map[int]model.ThreadUse{},
+		Reserved: map[int]bool{0: true, 4: true},
+	}
+	core := hostinfo.Core{Socket: 0, ID: 0, Node: 0, Threads: []int{0, 4}}
+	cell := nodeMapCell(snap, core, nil, false)
+	if !strings.Contains(cell, "\x1b[") {
+		t.Fatalf("nodeMapCell() = %q, want ANSI escapes from the reserved style on a free-but-reserved thread", cell)
+	}
+
+	unreserved := hostinfo.Core{Socket: 0, ID: 1, Node: 0, Threads: []int{1, 5}}
+	plain := nodeMapCell(snap, unreserved, nil, false)
+	if strings.Contains(plain, "\x1b[") {
+		t.Fatalf("nodeMapCell() = %q, want plain (unstyled) glyphs for a free, non-reserved thread", plain)
 	}
 }
 

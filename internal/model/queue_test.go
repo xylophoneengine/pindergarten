@@ -237,6 +237,28 @@ func TestProjectUnknownVMIgnored(t *testing.T) {
 	}
 }
 
+// TestProjectEmulatorPin covers applyOp's OpPin/OpStrip handling of
+// EmulatorPin: OpPin sets it when non-nil, OpStrip clears it.
+func TestProjectEmulatorPin(t *testing.T) {
+	snap := buildPlainSnapshot(t)
+
+	ops := []PendingOp{
+		{Kind: OpPin, VM: "plain-vm", Pins: map[int][]int{0: {2}}, MemNode: -1, EmulatorPin: []int{2}},
+	}
+	projected := Project(snap, nil, ops)
+	pvm := projected.VM("plain-vm")
+	if want := []int{2}; !reflect.DeepEqual(pvm.EmulatorPin, want) {
+		t.Fatalf("EmulatorPin after OpPin = %v, want %v", pvm.EmulatorPin, want)
+	}
+
+	ops2 := []PendingOp{{Kind: OpStrip, VM: "plain-vm"}}
+	projected2 := Project(projected, nil, ops2)
+	pvm2 := projected2.VM("plain-vm")
+	if pvm2.EmulatorPin != nil {
+		t.Errorf("EmulatorPin after OpStrip = %v, want nil", pvm2.EmulatorPin)
+	}
+}
+
 func TestHashXMLStable(t *testing.T) {
 	h1 := HashXML(plainXML)
 	h2 := HashXML(plainXML)

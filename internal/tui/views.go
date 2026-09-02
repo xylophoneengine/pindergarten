@@ -318,6 +318,9 @@ func isDisplayDevice(class string) bool {
 // renders an empty panel rather than erroring.
 func renderOverviewHardware(s *model.Snapshot, w, budget int) string {
 	var b strings.Builder
+	if n := reservedCoreCount(s); n > 0 {
+		fmt.Fprintf(&b, "reserved: %d cores per node (-reserve %d)\n", n, n)
+	}
 	for _, sock := range s.Topo.Sockets {
 		title := fmt.Sprintf("socket %d", sock.ID)
 		if sock.Model != "" {
@@ -483,15 +486,31 @@ func vmsOnNode(s *model.Snapshot, node int) string {
 	return strings.Join(names, ", ")
 }
 
+// reservedCoreCount returns the number of cores reserved per NUMA node
+// (-reserve N, uniform across every node -- see model.Snapshot.Reserved),
+// or 0 when reserve is off. Picks any node with a topology, since the
+// same N applies to all of them.
+func reservedCoreCount(s *model.Snapshot) int {
+	if len(s.Reserved) == 0 || len(s.Topo.Nodes) == 0 {
+		return 0
+	}
+	return model.ReservedCoreCount(s, s.Topo.Nodes[0].ID)
+}
+
 // cpuMapLegend is the CPU Map block's bottom legend line, shown once below
 // every node's panel rather than repeated per panel. withL3 (the
 // topology actually has L3 domain data -- see cpuMapNodeGrid) adds the
 // "| L3 boundary" entry naming the separator cpuMapNodeGrid draws between
-// adjacent L3 domains' cells.
-func cpuMapLegend(withL3 bool) string {
+// adjacent L3 domains' cells. A "| reserved (-reserve N)" entry is added
+// only when reserve is actually on (reservedCoreCount(s) > 0), so the
+// default (off) legend is unchanged.
+func cpuMapLegend(s *model.Snapshot, withL3 bool) string {
 	legend := "\u25cf pinned  \u25cb free  \u25d0 shared  (" + pendingGlyphStyle.Render("yellow") + " = pending)"
 	if withL3 {
 		legend += "  | L3 boundary"
+	}
+	if n := reservedCoreCount(s); n > 0 {
+		legend += fmt.Sprintf("  | reserved (-reserve %d)", n)
 	}
 	return legend
 }
@@ -748,7 +767,7 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		nodeHeights[i] = cpuMapNodeGridRows(len(nodeCores(s, node.ID)), perRow, withL3) + 2
 	}
 
-	legend := lipgloss.NewStyle().Width(w).Render(cpuMapLegend(withL3))
+	legend := lipgloss.NewStyle().Width(w).Render(cpuMapLegend(s, withL3))
 	legendLines := lineCount(legend)
 
 	// The detail panel's budget is reserved before the node area's, and
@@ -945,6 +964,16 @@ func pinsSummary(topo *hostinfo.Topology, v *model.VM) string {
 		node = n
 	}
 	return fmt.Sprintf("%d pinned -> node %d", len(v.Pins), node)
+}
+
+// emulatorSummary renders a VM's emulator-pin column: the cpulist its
+// emulator threads are pinned to, or "floating" when EmulatorPin is nil
+// (no <cputune><emulatorpin> in the domain's live XML).
+func emulatorSummary(v *model.VM) string {
+	if len(v.EmulatorPin) == 0 {
+		return "floating"
+	}
+	return hostinfo.FormatCPUList(v.EmulatorPin)
 }
 
 // intListOrDash comma-joins ids, or returns "-" when ids is empty.
@@ -1203,6 +1232,7 @@ func vmDetail(s *model.Snapshot, sel, width int) string {
 		{"vcpus", strconv.Itoa(v.VCPUs)},
 		{"mem", fmtKiB(v.MemoryKiB)},
 		{"pins", pinsSummary(s.Topo, v)},
+		{"emulator", emulatorSummary(v)},
 		{"mem node", intListOrDash(v.MemNodes)},
 		{"gpu node", gpuNodeCol(v)},
 	}

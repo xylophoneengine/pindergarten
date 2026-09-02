@@ -264,6 +264,70 @@ func TestProposeUnknownVM(t *testing.T) {
 	}
 }
 
+// twoVCPUXML is a plain 2-vcpu VM with no pins, no membind, no devices --
+// used by the reserved-threads tests below, which need a vcpu count that
+// matches exactly one (non-reserved) core in testTopo.
+const twoVCPUXML = `<domain type='kvm'>
+  <name>two-vcpu</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b24</uuid>
+  <memory unit='KiB'>200</memory>
+  <vcpu>2</vcpu>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+// TestProposeWithinExcludesReservedCore covers selectThreads' fully-free
+// pass: reserving node0's core {0,4} must leave only core {1,5}
+// eligible, even though {0,4} would otherwise be the first fully-free
+// core in topology order.
+func TestProposeWithinExcludesReservedCore(t *testing.T) {
+	snap := buildSnap(t, nil, twoVCPUXML).WithReserved(map[int]bool{0: true, 4: true})
+
+	got, err := ProposeWithin(snap, "two-vcpu", 0, nil)
+	if err != nil {
+		t.Fatalf("ProposeWithin: %v", err)
+	}
+	want := map[int][]int{0: {1}, 1: {5}}
+	if !reflect.DeepEqual(got.Pins, want) {
+		t.Errorf("Pins = %v, want %v (reserved core {0,4} must be skipped)", got.Pins, want)
+	}
+}
+
+// TestFullyFreeCoreCountIgnoresReserved covers FullyFreeCoreCount: node0
+// has two cores total, but one is reserved, so only one counts as fully
+// free even though nothing has actually claimed either yet.
+func TestFullyFreeCoreCountIgnoresReserved(t *testing.T) {
+	snap := buildSnap(t, nil).WithReserved(map[int]bool{0: true, 4: true})
+	if got := FullyFreeCoreCount(snap, 0); got != 1 {
+		t.Errorf("FullyFreeCoreCount(node 0) = %d, want 1 (core {0,4} reserved)", got)
+	}
+}
+
+// TestProposeWithinReservedNodeInsufficientCapacity covers both the
+// capacity check and the fallback pool: reserving every thread on node0
+// must make ProposeWithin refuse it as too small, never silently reuse a
+// reserved thread to make up the shortfall.
+func TestProposeWithinReservedNodeInsufficientCapacity(t *testing.T) {
+	snap := buildSnap(t, nil, twoVCPUXML).WithReserved(map[int]bool{0: true, 4: true, 1: true, 5: true})
+	if _, err := ProposeWithin(snap, "two-vcpu", 0, nil); err == nil {
+		t.Error("ProposeWithin succeeded on a fully-reserved node, want a capacity error")
+	}
+}
+
+// TestProposalEmulatorMatchesAssignedThreads covers Proposal.Emulator's
+// default: the same threads Pins itself assigns.
+func TestProposalEmulatorMatchesAssignedThreads(t *testing.T) {
+	snap := buildSnap(t, nil, fourVCPUXML)
+	got, err := Propose(snap, "four-vcpu")
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	want := assignedThreads(got.Pins)
+	if !reflect.DeepEqual(got.Emulator, want) {
+		t.Errorf("Emulator = %v, want %v (assigned vCPU threads)", got.Emulator, want)
+	}
+}
+
 // TestProposeWithinAutoMatchesPropose covers the wizard form's default
 // state: ProposeWithin(s, vm, -1, nil) (choose automatically, any
 // thread) must produce exactly what Propose itself does.

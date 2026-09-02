@@ -96,12 +96,13 @@ func TestRunPinHappyPath(t *testing.T) {
 	dir := t.TempDir()
 
 	op := model.PendingOp{
-		Kind:       model.OpPin,
-		VM:         "plain-vm",
-		Pins:       map[int][]int{0: {2}, 1: {6}},
-		MemNode:    1,
-		StagedHash: model.HashXML(plainVMXML),
-		Summary:    "plain-vm: pin 2 vcpus",
+		Kind:        model.OpPin,
+		VM:          "plain-vm",
+		Pins:        map[int][]int{0: {2}, 1: {6}},
+		MemNode:     1,
+		EmulatorPin: []int{2, 6},
+		StagedHash:  model.HashXML(plainVMXML),
+		Summary:     "plain-vm: pin 2 vcpus",
 	}
 
 	results := Run(fake, dir, "test-version", []model.PendingOp{op})
@@ -140,6 +141,9 @@ func TestRunPinHappyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.MemNodes, []int{1}) {
 		t.Errorf("stored MemNodes = %v, want [1]", cfg.MemNodes)
+	}
+	if !reflect.DeepEqual(cfg.EmulatorPin, []int{2, 6}) {
+		t.Errorf("stored EmulatorPin = %v, want [2 6]", cfg.EmulatorPin)
 	}
 }
 
@@ -400,6 +404,41 @@ func TestRunVerifyMismatch(t *testing.T) {
 	r := results[0]
 	if r.Err == nil {
 		t.Fatal("Err = nil, want verify mismatch error")
+	}
+	if r.Applied {
+		t.Error("Applied = true, want false on verify mismatch")
+	}
+}
+
+// TestRunVerifyEmulatorMismatch mirrors TestRunVerifyMismatch for
+// emulatorpin: verifyMismatchHV's fixed post-Define XML (gpuVMXML) has no
+// emulatorpin, so an op that expects one must fail verify even though its
+// vcpupin/numatune both still match.
+func TestRunVerifyEmulatorMismatch(t *testing.T) {
+	fake := &libvirtio.Fake{XML: map[string]string{"gpu-vm-01": gpuVMXML}}
+	hv := &verifyMismatchHV{Fake: fake}
+	dir := t.TempDir()
+
+	op := model.PendingOp{
+		Kind:        model.OpPin,
+		VM:          "gpu-vm-01",
+		Pins:        map[int][]int{0: {4}, 1: {68}},
+		MemNode:     -1,
+		EmulatorPin: []int{4, 68},
+		StagedHash:  model.HashXML(gpuVMXML),
+		Summary:     "gpu-vm-01: pin emulator",
+	}
+
+	results := Run(hv, dir, "test-version", []model.PendingOp{op})
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Err == nil {
+		t.Fatal("Err = nil, want emulatorpin mismatch error")
+	}
+	if !strings.Contains(r.Err.Error(), "emulatorpin") {
+		t.Errorf("Err = %v, want mention of emulatorpin", r.Err)
 	}
 	if r.Applied {
 		t.Error("Applied = true, want false on verify mismatch")

@@ -14,6 +14,7 @@ type Proposal struct {
 	Node      int
 	Pins      map[int][]int // 1:1 vcpu -> single thread
 	MemNode   int
+	Emulator  []int    // default: the same threads Pins assigns (assignedThreads(Pins))
 	Rationale []string // plain-language sentences, why this node/threads
 	Warnings  []string // e.g. not enough free full cores, sharing threads
 }
@@ -94,11 +95,11 @@ func proposeOnNode(s *Snapshot, vm *VM, node int, allowed []int, rationale []str
 	// (not just len(allowed)) guards against a caller passing thread ids
 	// that aren't actually on node -- selectThreads' pool would otherwise
 	// come up short of what this check promised.
-	total := nodeThreadCount(s.Topo, node)
+	total := nodeThreadCount(s, node)
 	if allowed != nil {
 		total = 0
 		for _, t := range allowed {
-			if th, ok := s.Topo.Threads[t]; ok && th.Node == node {
+			if th, ok := s.Topo.Threads[t]; ok && th.Node == node && !s.Reserved[t] {
 				total++
 			}
 		}
@@ -136,6 +137,7 @@ func proposeOnNode(s *Snapshot, vm *VM, node int, allowed []int, rationale []str
 		Node:      node,
 		Pins:      pins,
 		MemNode:   node,
+		Emulator:  assignedThreads(pins),
 		Rationale: rationale,
 		Warnings:  warnings,
 	}, nil
@@ -216,10 +218,13 @@ func FullyFreeCoreCount(s *Snapshot, node int) int {
 	return count
 }
 
-// coreFullyFree reports whether every thread of c is unused in s.Use.
+// coreFullyFree reports whether every thread of c is unused in s.Use and
+// none of them is reserved for the host (-reserve N, s.Reserved): a core
+// with a reserved thread is never eligible for proposal purposes, even
+// when nothing else has claimed it.
 func coreFullyFree(s *Snapshot, c hostinfo.Core) bool {
 	for _, t := range c.Threads {
-		if threadUseCount(s, t) > 0 {
+		if threadUseCount(s, t) > 0 || s.Reserved[t] {
 			return false
 		}
 	}
@@ -232,15 +237,54 @@ func threadUseCount(s *Snapshot, t int) int {
 	return len(u.VMs) + len(u.Pending)
 }
 
-// nodeThreadCount returns how many threads node has in total, or 0 if the
-// node ID is not part of topo.
-func nodeThreadCount(topo *hostinfo.Topology, node int) int {
-	for _, n := range topo.Nodes {
-		if n.ID == node {
-			return len(n.Threads)
+// nodeThreadCount returns how many of node's threads are available for
+// vCPU capacity -- its total thread count minus any reserved for the host
+// (-reserve N, s.Reserved), or 0 if the node ID is not part of s.Topo.
+func nodeThreadCount(s *Snapshot, node int) int {
+	for _, n := range s.Topo.Nodes {
+		if n.ID != node {
+			continue
 		}
+		count := 0
+		for _, t := range n.Threads {
+			if !s.Reserved[t] {
+				count++
+			}
+		}
+		return count
 	}
 	return 0
+}
+
+// ReservedCoreCount returns how many cores on node are reserved for the
+// host (-reserve N): a reservation always covers a whole core (every SMT
+// sibling together), so checking one thread per core is enough.
+func ReservedCoreCount(s *Snapshot, node int) int {
+	count := 0
+	for _, c := range s.Topo.Cores {
+		if c.Node == node && len(c.Threads) > 0 && s.Reserved[c.Threads[0]] {
+			count++
+		}
+	}
+	return count
+}
+
+// ReservedThreadsOnNode returns node's reserved thread ids (ascending --
+// hostinfo.Node.Threads is already sorted), or nil if none are reserved.
+func ReservedThreadsOnNode(s *Snapshot, node int) []int {
+	for _, n := range s.Topo.Nodes {
+		if n.ID != node {
+			continue
+		}
+		var ids []int
+		for _, t := range n.Threads {
+			if s.Reserved[t] {
+				ids = append(ids, t)
+			}
+		}
+		return ids
+	}
+	return nil
 }
 
 // selectThreads assigns each of vcpus vcpus (0..vcpus-1) one thread on
@@ -354,7 +398,7 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 		if bestFit != nil {
 			chosen = []*l3Group{bestFit}
 			note = fmt.Sprintf(
-				"Threads come from L3 domain #%d, the smallest L3 domain with enough free cores.", bestFit.l3)
+				"Threads come from L3 domain #%d, the smallest L3 domain with enough free threads.", bestFit.l3)
 		} else {
 			rest := make([]*l3Group, len(groups))
 			copy(rest, groups)
@@ -423,7 +467,7 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 			continue
 		}
 		for _, t := range n.Threads {
-			if !assigned[t] && inAllowed(t) {
+			if !assigned[t] && inAllowed(t) && !s.Reserved[t] {
 				pool = append(pool, t)
 			}
 		}

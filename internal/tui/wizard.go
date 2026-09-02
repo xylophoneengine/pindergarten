@@ -21,6 +21,7 @@ const (
 	fieldWithin
 	fieldThreads
 	fieldMemNode
+	fieldEmulator
 	fieldGrid
 	numFormFields
 )
@@ -43,6 +44,7 @@ type wizard struct {
 	threadsText  string          // editable cpulist text
 	threadsCaret int             // caret position within threadsText, 0..len(threadsText)
 	memSel       int             // -2 = "same as node", -1 = "leave", else an explicit node id
+	emulator     bool            // checked: emulator threads pin to the node's reserved cores instead of the VM's own vcpus
 	field        wizardFormField // focused field
 	proposal     *model.Proposal // last successful ProposeWithin(node, within) result; nil if that combination has no valid proposal (e.g. an L3 filter too small for VCPUs) -- 'a' and the preview/summary's Warnings fall back to nothing when nil
 	cursor       int             // core index within nodeCores(base, node), used when field == fieldGrid
@@ -150,7 +152,7 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 			if w.cursor-perRow >= 0 {
 				w.cursor -= perRow
 			} else {
-				w.field = fieldMemNode
+				w.field = fieldEmulator
 			}
 			return false, nil, ""
 		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
@@ -173,6 +175,9 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 		w.field = (w.field + 1) % numFormFields
 		return false, nil, ""
+	case msg.Type == tea.KeySpace && w.field == fieldEmulator:
+		w.toggleEmulator()
+		return false, nil, ""
 	case isLeft(msg), isRight(msg):
 		delta := 1
 		if isLeft(msg) {
@@ -185,6 +190,8 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 			w.cycleWithin(delta)
 		case fieldMemNode:
 			w.cycleMemNode(delta)
+		case fieldEmulator:
+			w.toggleEmulator()
 		}
 		return false, nil, ""
 	case isRune(msg, 'a'):
@@ -245,6 +252,9 @@ func (w *wizard) cycleNode(delta int) {
 	w.node = nodes[idx].ID
 	w.within = -1
 	w.cursor = 0
+	if len(model.ReservedThreadsOnNode(w.base, w.node)) == 0 {
+		w.emulator = false
+	}
 	w.reproposeAndFill()
 }
 
@@ -313,6 +323,60 @@ func (w *wizard) resolvedMemNode() int {
 		return w.node
 	}
 	return w.memSel
+}
+
+// toggleEmulator flips the emulator checkbox: a no-op when w.node has no
+// reserved threads to place it on (the field is greyed and its label says
+// so -- see emulatorFieldValue).
+func (w *wizard) toggleEmulator() {
+	if len(model.ReservedThreadsOnNode(w.base, w.node)) == 0 {
+		return
+	}
+	w.emulator = !w.emulator
+}
+
+// emulatorText renders the emulator field's own resolved value, shared by
+// buildOp's Summary and summaryLine: "own threads" unchecked, "reserved
+// <cpulist>" checked.
+func (w *wizard) emulatorText() string {
+	if w.emulator {
+		return "reserved " + formatCPURanges(model.ReservedThreadsOnNode(w.base, w.node))
+	}
+	return "own threads"
+}
+
+// emulatorFieldValue renders the emulator field's checkbox row value:
+// "[ ] on reserved cores (own vcpus)" unchecked, "[x] on reserved cores
+// (threads <cpulist>)" checked, or "[ ] on reserved cores (none reserved
+// on node N)" when w.node has no reserve at all (toggling it is then a
+// no-op -- see toggleEmulator).
+func (w *wizard) emulatorFieldValue() string {
+	reserved := model.ReservedThreadsOnNode(w.base, w.node)
+	if len(reserved) == 0 {
+		return fmt.Sprintf("[ ] on reserved cores (none reserved on node %d)", w.node)
+	}
+	if w.emulator {
+		return fmt.Sprintf("[x] on reserved cores (threads %s)", hostinfo.FormatCPUList(reserved))
+	}
+	return "[ ] on reserved cores (own vcpus)"
+}
+
+// reservedWarning returns a non-blocking warning when ids (the currently
+// valid thread list) includes any thread reserved for the host -- picking
+// one by hand is allowed, but the operator should know it competes with
+// the host's own reserved work.
+func (w *wizard) reservedWarning(ids []int) string {
+	var hit []int
+	for _, t := range ids {
+		if w.base.Reserved[t] {
+			hit = append(hit, t)
+		}
+	}
+	if len(hit) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("threads %s are reserved for the host (-reserve %d)",
+		hostinfo.FormatCPUList(hit), model.ReservedCoreCount(w.base, w.node))
 }
 
 // l3ThreadsOnNode returns the thread ids of every core on node whose L3
@@ -461,7 +525,11 @@ func (w *wizard) nodeHint(node int) string {
 			return fmt.Sprintf("GPU %s on node %d (recommended)", gpu.Addr, node)
 		}
 	}
-	return fmt.Sprintf("free: %d cores, %s", model.FullyFreeCoreCount(w.base, node), fmtKiB(model.FreeMemKiB(w.base, node)))
+	reserved := ""
+	if r := model.ReservedCoreCount(w.base, node); r > 0 {
+		reserved = fmt.Sprintf(", %d reserved", r)
+	}
+	return fmt.Sprintf("free: %d cores%s, %s", model.FullyFreeCoreCount(w.base, node), reserved, fmtKiB(model.FreeMemKiB(w.base, node)))
 }
 
 // withinLabel renders the "within" field's current value: "any" for -1,
@@ -503,19 +571,24 @@ func (w *wizard) buildOp(ids []int) model.PendingOp {
 	if memNode == -1 {
 		memText = "unchanged"
 	}
-	summary := fmt.Sprintf("%s: pin %d vcpus -> node %d threads %s; memory -> %s",
-		w.vm, len(pins), w.node, formatCPURanges(sorted), memText)
+	emulator := sorted
+	if w.emulator {
+		emulator = model.ReservedThreadsOnNode(w.base, w.node)
+	}
+	summary := fmt.Sprintf("%s: pin %d vcpus -> node %d threads %s; memory -> %s; emulator -> %s",
+		w.vm, len(pins), w.node, formatCPURanges(sorted), memText, w.emulatorText())
 	if w.crossesGPUWarning() != "" {
 		summary += " (crosses GPU node)"
 	}
 	return model.PendingOp{
-		Kind:       model.OpPin,
-		VM:         w.vm,
-		Pins:       pins,
-		MemNode:    memNode,
-		StagedHash: w.stagedHash,
-		StagedXML:  w.stagedXML,
-		Summary:    summary,
+		Kind:        model.OpPin,
+		VM:          w.vm,
+		Pins:        pins,
+		MemNode:     memNode,
+		EmulatorPin: emulator,
+		StagedHash:  w.stagedHash,
+		StagedXML:   w.stagedXML,
+		Summary:     summary,
 	}
 }
 
@@ -568,6 +641,8 @@ func fieldLabel(f wizardFormField) string {
 		return "threads"
 	case fieldMemNode:
 		return "memory node"
+	case fieldEmulator:
+		return "emulator"
 	}
 	return ""
 }
@@ -579,6 +654,20 @@ func (w *wizard) renderFieldRow(f wizardFormField, value string) string {
 		value = cursorStyle.Render(value)
 	}
 	return fmt.Sprintf("%-*s  %s", formLabelWidth, fieldLabel(f), value)
+}
+
+// renderEmulatorFieldRow renders the emulator field's row: the same
+// "<label>  <value>" shape as renderFieldRow, except the whole row renders
+// dim (keyBarLabelStyle) when w.node has no reserved threads at all --
+// toggling is a no-op there regardless of focus, so the reverse-video
+// "focused" treatment renderFieldRow would otherwise apply is misleading
+// for a control that can't actually be changed right now.
+func (w *wizard) renderEmulatorFieldRow() string {
+	value := w.emulatorFieldValue()
+	if len(model.ReservedThreadsOnNode(w.base, w.node)) == 0 {
+		return keyBarLabelStyle.Render(fmt.Sprintf("%-*s  %s", formLabelWidth, fieldLabel(fieldEmulator), value))
+	}
+	return w.renderFieldRow(fieldEmulator, value)
 }
 
 // threadsFieldValue renders the threads field's bracketed text box,
@@ -608,6 +697,9 @@ func (w *wizard) currentWarnings(ids []int) []string {
 	if len(ids) > 0 && w.proposal != nil {
 		warnings = append(warnings, w.proposal.Warnings...)
 	}
+	if warn := w.reservedWarning(ids); warn != "" {
+		warnings = append(warnings, warn)
+	}
 	return warnings
 }
 
@@ -623,7 +715,7 @@ func (w *wizard) summaryLine(ids []int) string {
 	if memNode == -1 {
 		memText = "unchanged"
 	}
-	return fmt.Sprintf("%d vcpus -> node %d threads %s; memory -> %s", w.vcpus, w.node, threads, memText)
+	return fmt.Sprintf("%d vcpus -> node %d threads %s; memory -> %s; emulator -> %s", w.vcpus, w.node, threads, memText, w.emulatorText())
 }
 
 // view renders the form against w.base as a single self-contained dialog
@@ -666,6 +758,8 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 	head = append(head, w.siblingHints(ids)...)
 
 	addField(fieldMemNode, w.renderFieldRow(fieldMemNode, fmt.Sprintf("< %s >", memSelLabel(w.memSel))))
+
+	addField(fieldEmulator, w.renderEmulatorFieldRow())
 
 	head = append(head, strings.Repeat("-", inner))
 
@@ -957,9 +1051,11 @@ func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor i
 // thread combines both (highlight style, reverse-video) so the selected
 // core under the cursor still shows its selected state; a cursor-only or
 // highlight-only thread gets just that style; a pending-only claim (no VM,
-// just a staged op) gets the plain pinned glyph in a distinct color;
-// otherwise the thread's plain pinned/free/shared glyph. A single-thread
-// core (no SMT sibling) renders its one glyph followed by a space.
+// just a staged op) gets the plain pinned glyph in a distinct color; a
+// thread reserved for the host (-reserve N) with none of the above gets
+// the plain glyph dimmed; otherwise the thread's plain pinned/free/shared
+// glyph. A single-thread core (no SMT sibling) renders its one glyph
+// followed by a space.
 func nodeMapCell(s *model.Snapshot, core hostinfo.Core, highlight map[int]bool, isCursor bool) string {
 	var glyphs strings.Builder
 	for _, t := range core.Threads {
@@ -975,6 +1071,8 @@ func nodeMapCell(s *model.Snapshot, core hostinfo.Core, highlight map[int]bool, 
 			glyph = wizardHighlightStyle.Render(glyph)
 		case pendingOnly:
 			glyph = pendingGlyphStyle.Render(glyph)
+		case s.Reserved[t]:
+			glyph = keyBarLabelStyle.Render(glyph)
 		}
 		glyphs.WriteString(glyph)
 	}

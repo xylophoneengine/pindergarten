@@ -116,16 +116,20 @@ func rulerStride(cores []hostinfo.Core, cellW int) int {
 
 // coreGlyphCell renders one core's thread glyphs, one column per thread
 // (pinned/free/shared, same glyphChar the CPU Map/wizard node maps use;
-// a pending-only claim gets pendingGlyphStyle, mirroring nodeMapCell --
-// this drawing has no cursor/highlight concept, so it only needs that
-// one case nodeMapCell itself doesn't already cover for a plain cell).
+// a pending-only claim gets pendingGlyphStyle, a reserved-for-the-host
+// thread (-reserve N) gets a dim style, mirroring nodeMapCell -- this
+// drawing has no cursor/highlight concept, so it only needs the two cases
+// nodeMapCell itself doesn't already cover for a plain cell).
 func coreGlyphCell(s *model.Snapshot, core hostinfo.Core) string {
 	var b strings.Builder
 	for _, t := range core.Threads {
 		glyph := glyphChar(s, t)
 		use := s.Use[t]
-		if len(use.VMs) == 0 && len(use.Pending) == 1 {
+		switch {
+		case len(use.VMs) == 0 && len(use.Pending) == 1:
 			glyph = pendingGlyphStyle.Render(glyph)
+		case s.Reserved[t]:
+			glyph = keyBarLabelStyle.Render(glyph)
 		}
 		b.WriteString(glyph)
 	}
@@ -434,10 +438,24 @@ func topologyInner(s *model.Snapshot, w int) (string, []hit) {
 // string it returns one "topocore" hit per visible glyph cell, 0-based
 // relative to the visible window -- a click switches to the CPU Map tab
 // and moves its cursor there (see App.handleBodyClick).
+//
+// A "reserved (-reserve N)" legend line is appended below the machine box
+// when reserve is actually on (reservedCoreCount(s) > 0), its own line
+// reserved out of budget first -- so the default (off) rendering, and
+// every budget/scroll computation for it, is unchanged.
 func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit) {
+	var legendLine string
+	if n := reservedCoreCount(s); n > 0 {
+		legendLine = lipgloss.NewStyle().Width(w).Render(keyBarLabelStyle.Render(fmt.Sprintf("reserved (-reserve %d)", n)))
+	}
+	legendLines := 0
+	if legendLine != "" {
+		legendLines = lineCount(legendLine)
+	}
+
 	inner, hits := topologyInner(s, w)
 	lines := strings.Split(inner, "\n")
-	contentBudget := budget - 2
+	contentBudget := budget - 2 - legendLines
 	if contentBudget < 1 {
 		contentBudget = 1
 	}
@@ -446,6 +464,9 @@ func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit)
 
 	mw := machineBoxWidth(body, w)
 	block := truncateLines(panelInner(topologyMachineTitle(s), body, mw, contentBudget), w)
+	if legendLine != "" {
+		block += "\n" + legendLine
+	}
 
 	visibleHits := make([]hit, 0, len(hits))
 	for _, h := range hits {

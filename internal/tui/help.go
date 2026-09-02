@@ -60,11 +60,11 @@ var helpKeys = []helpEntry{
 	{"Set memory node", "esc", "cancel"},
 
 	{"Pin wizard", "up/down / j k", "previous/next field; in the core grid, move the cursor by row (leaving at its top/bottom edge)"},
-	{"Pin wizard", "left/right / h l", "cycle the field's value, move the threads caret, or move the grid cursor"},
+	{"Pin wizard", "left/right / h l", "cycle the field's value, move the threads caret, toggle the emulator checkbox, or move the grid cursor"},
 	{"Pin wizard", "mouse wheel", "move the core-grid cursor by row"},
 	{"Pin wizard", "mouse click", "focus a field, toggle a grid core, or press [A]pply / [C]ancel"},
 	{"Pin wizard", "backspace", "(threads field) delete the character before the caret"},
-	{"Pin wizard", "space", "(core grid) toggle the cursor's core into/out of the threads field"},
+	{"Pin wizard", "space", "(core grid) toggle the cursor's core into/out of the threads field; (emulator field) toggle the checkbox"},
 	{"Pin wizard", "a", "re-fill the threads field from the current proposal"},
 	{"Pin wizard", "A", "stage the current form (or click [A]pply); a placement crossing the VM's GPU node opens a yes/no confirm first"},
 	{"Pin wizard", "C / esc", "cancel back out (or click [C]ancel)"},

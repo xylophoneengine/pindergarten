@@ -400,6 +400,23 @@ func TestCPUMapLegendFitsPrimaryWidth(t *testing.T) {
 	}
 }
 
+// TestCPUMapLegendShowsReserved covers cpuMapLegend gaining a "reserved
+// (-reserve N)" entry once Snapshot.Reserved is set, and staying
+// unchanged (no mention of "reserved") when it's empty -- the default
+// (-reserve off) case.
+func TestCPUMapLegendShowsReserved(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}}
+	if legend := cpuMapLegend(s, false); strings.Contains(legend, "reserved") {
+		t.Errorf("legend = %q, want no \"reserved\" entry when Reserved is empty", legend)
+	}
+
+	s.Reserved = map[int]bool{0: true, 4: true} // node 0's core {0,4}
+	legend := cpuMapLegend(s, false)
+	if !strings.Contains(legend, "reserved (-reserve 1)") {
+		t.Errorf("legend = %q, want \"reserved (-reserve 1)\" (one reserved core on node 0)", legend)
+	}
+}
+
 func TestCPUMapDetail(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
 	// core 0 (node 0, socket 0, id 0) has threads 0 and 4; thread 0 is
@@ -815,6 +832,47 @@ func TestPinsSummary(t *testing.T) {
 				t.Fatalf("pinsSummary() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestEmulatorSummary covers emulatorSummary's two branches directly:
+// "floating" when EmulatorPin is nil (or empty), the cpulist otherwise.
+func TestEmulatorSummary(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  []int
+		want string
+	}{
+		{"nil", nil, "floating"},
+		{"empty", []int{}, "floating"},
+		{"pinned", []int{0, 4}, "0,4"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := &model.VM{EmulatorPin: c.pin}
+			if got := emulatorSummary(v); got != c.want {
+				t.Fatalf("emulatorSummary() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestVMDetailShowsEmulatorLine covers vmDetail's new "emulator" row,
+// placed right under "pins".
+func TestVMDetailShowsEmulatorLine(t *testing.T) {
+	snap := &model.Snapshot{
+		Topo: testTopo(),
+		VMs:  []model.VM{{Name: "vm-a", Pins: map[int][]int{0: {0}}, EmulatorPin: []int{0, 4}}},
+	}
+	got := vmDetail(snap, 0, 60)
+	if !strings.Contains(got, "emulator") || !strings.Contains(got, "0,4") {
+		t.Fatalf("vmDetail() = %q, want an \"emulator  0,4\" line", got)
+	}
+
+	snap.VMs[0].EmulatorPin = nil
+	got = vmDetail(snap, 0, 60)
+	if !strings.Contains(got, "floating") {
+		t.Fatalf("vmDetail() = %q, want \"floating\" when EmulatorPin is nil", got)
 	}
 }
 

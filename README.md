@@ -73,12 +73,20 @@ The screenshots in this README are rendered from a staged fixture by
 
 ## Usage
 
-    pindergarten [-c URI] [-backup-dir PATH]
+    pindergarten [-c URI] [-backup-dir PATH] [-reserve N]
 
 - `-c URI`: libvirt connection URI. Defaults to `qemu:///system` (the local
   system libvirtd).
 - `-backup-dir PATH`: where domain XML backups are written before each
   change. Defaults to a per-user location; see Backups below.
+- `-reserve N`: reserve the first `N` physical cores of every NUMA node (all
+  SMT siblings included), computed from the scanned topology. Reserved
+  threads are never proposed for a VM's vCPUs, and the pin wizard lets you
+  put a VM's emulator threads on a node's reserved cores instead of its own
+  vCPUs. Defaults to 0 (off). This only shapes pindergarten's own proposals
+  and pins; it does not keep other host processes off those cores -- for
+  that you still need a kernel-side `isolcpus=` boot parameter or a
+  systemd `AllowedCPUs=` cpuset, which is out of scope here.
 
 <img src="docs/screenshots/overview.png" alt="Overview tab: per-node memory and thread bars on the left, socket/node/L3/GPU hardware summary on the right" width="700">
 
@@ -115,6 +123,14 @@ is config-only: it edits the domain's `<cputune>` and/or `<numatune>` XML
 via `virDomainDefineXML` and nothing else. It takes effect the next time the
 VM boots; it never touches a running VM's live scheduling or memory
 placement.
+
+Pinning a VM's vCPUs also writes a `<cputune><emulatorpin>` alongside
+`<vcpupin>`, by default onto the same threads the vCPUs themselves land on
+(so QEMU's emulator threads -- main loop, display, migration -- never float
+onto another VM's pinned cores), or onto the node's reserved cores instead
+when `-reserve` is on and you check that box in the pin wizard. Stripping a
+VM's pins removes `<emulatorpin>` right along with `<vcpupin>` and
+`<numatune>`.
 
 <img src="docs/screenshots/vms.png" alt="VMs tab: table of domains with state, vCPUs, memory, pins and flags, detail panel on the right" width="700">
 
@@ -188,19 +204,22 @@ Set memory node (after `n`):
 | digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node opens a yes/no confirm ("Bind memory across the GPU's node anyway?") before staging |
 | `esc` | cancel |
 
-Pin wizard (after `p`): a form (node, within, threads, memory node) whose
-live preview grid is editable in place -- toggle cores directly instead of
-typing into the threads field -- staged with `[A]pply` or dropped with
-`[C]ancel`.
+Pin wizard (after `p`): a form (node, within, threads, memory node,
+emulator) whose live preview grid is editable in place -- toggle cores
+directly instead of typing into the threads field -- staged with
+`[A]pply` or dropped with `[C]ancel`. The emulator field is a checkbox:
+unchecked (the default) pins the VM's emulator threads to its own vCPUs;
+checked, to the chosen node's reserved cores instead (`-reserve`) --
+greyed out and a no-op when that node has none reserved.
 
 | Key | Action |
 |-----|--------|
-| up/down / `j k` | previous/next field (node, within, threads, memory node, core grid); inside the grid, move the cursor by row, leaving the grid at its top/bottom edge |
-| left/right / `h l` | cycle the focused field's value, move the caret within the threads field, or move the core-grid cursor |
+| up/down / `j k` | previous/next field (node, within, threads, memory node, emulator, core grid); inside the grid, move the cursor by row, leaving the grid at its top/bottom edge |
+| left/right / `h l` | cycle the focused field's value, move the caret within the threads field, toggle the emulator checkbox, or move the core-grid cursor |
 | mouse wheel | move the core-grid cursor by row |
 | mouse click | focus a field, toggle a grid core, or press `[A]pply` / `[C]ancel` |
 | backspace | (threads field) delete the character before the caret |
-| `space` | (core grid) toggle the cursor's core into/out of the threads field |
+| `space` | (core grid) toggle the cursor's core into/out of the threads field; (emulator field) toggle the checkbox |
 | `a` | re-fill the threads field from the current proposal |
 | `A` | stage the current form (or click `[A]pply`); a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
 | `C` / `esc` | cancel back out (or click `[C]ancel`) |

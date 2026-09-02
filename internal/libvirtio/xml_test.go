@@ -68,6 +68,9 @@ func TestParseDomainXML_GPU(t *testing.T) {
 	if cfg.Raw != gpuVMXML {
 		t.Errorf("Raw does not match input verbatim")
 	}
+	if cfg.EmulatorPin != nil {
+		t.Errorf("EmulatorPin = %v, want nil (gpuVMXML has no emulatorpin)", cfg.EmulatorPin)
+	}
 }
 
 func TestParseDomainXML_Plain(t *testing.T) {
@@ -170,7 +173,7 @@ func TestParseDomainXML_EmptyCpusetSkipped(t *testing.T) {
 }
 
 func TestSetPinningRoundTrip(t *testing.T) {
-	out, err := SetPinning(plainVMXML, map[int][]int{0: {2}, 1: {6}}, 1)
+	out, err := SetPinning(plainVMXML, map[int][]int{0: {2}, 1: {6}}, 1, []int{2, 6})
 	if err != nil {
 		t.Fatalf("SetPinning: %v", err)
 	}
@@ -184,6 +187,9 @@ func TestSetPinningRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.MemNodes, []int{1}) {
 		t.Errorf("MemNodes = %v, want [1]", cfg.MemNodes)
+	}
+	if !reflect.DeepEqual(cfg.EmulatorPin, []int{2, 6}) {
+		t.Errorf("EmulatorPin = %v, want [2 6]", cfg.EmulatorPin)
 	}
 	if cfg.MemMode != "strict" {
 		t.Errorf("MemMode = %q, want strict", cfg.MemMode)
@@ -206,7 +212,7 @@ func TestSetPinningRoundTrip(t *testing.T) {
 }
 
 func TestSetPinningReplacesExisting(t *testing.T) {
-	out, err := SetPinning(gpuVMXML, map[int][]int{0: {10}}, -1)
+	out, err := SetPinning(gpuVMXML, map[int][]int{0: {10}}, -1, nil)
 	if err != nil {
 		t.Fatalf("SetPinning: %v", err)
 	}
@@ -223,6 +229,109 @@ func TestSetPinningReplacesExisting(t *testing.T) {
 	}
 	if !strings.Contains(out, "<hostdev") {
 		t.Errorf("output missing hostdev: %s", out)
+	}
+}
+
+// TestSetPinningEmulator covers the nil/empty/non-empty emulatorpin rule
+// directly: nil leaves an existing emulatorpin untouched, a non-nil empty
+// slice clears it, and a non-empty slice writes/replaces it.
+func TestSetPinningEmulator(t *testing.T) {
+	const withEmulatorXML = `<domain type='kvm'>
+  <name>emu-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b06</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='4'/>
+    <vcpupin vcpu='1' cpuset='5'/>
+    <emulatorpin cpuset='4-5'/>
+  </cputune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+	t.Run("nil leaves untouched", func(t *testing.T) {
+		out, err := SetPinning(withEmulatorXML, map[int][]int{0: {4}, 1: {5}}, -1, nil)
+		if err != nil {
+			t.Fatalf("SetPinning: %v", err)
+		}
+		cfg, err := ParseDomainXML(out)
+		if err != nil {
+			t.Fatalf("ParseDomainXML(out): %v", err)
+		}
+		if !reflect.DeepEqual(cfg.EmulatorPin, []int{4, 5}) {
+			t.Errorf("EmulatorPin = %v, want unchanged [4 5]", cfg.EmulatorPin)
+		}
+	})
+
+	t.Run("empty clears", func(t *testing.T) {
+		out, err := SetPinning(withEmulatorXML, map[int][]int{0: {4}, 1: {5}}, -1, []int{})
+		if err != nil {
+			t.Fatalf("SetPinning: %v", err)
+		}
+		cfg, err := ParseDomainXML(out)
+		if err != nil {
+			t.Fatalf("ParseDomainXML(out): %v", err)
+		}
+		if cfg.EmulatorPin != nil {
+			t.Errorf("EmulatorPin = %v, want nil (cleared)", cfg.EmulatorPin)
+		}
+	})
+
+	t.Run("non-empty replaces", func(t *testing.T) {
+		out, err := SetPinning(withEmulatorXML, map[int][]int{0: {4}, 1: {5}}, -1, []int{6})
+		if err != nil {
+			t.Fatalf("SetPinning: %v", err)
+		}
+		cfg, err := ParseDomainXML(out)
+		if err != nil {
+			t.Fatalf("ParseDomainXML(out): %v", err)
+		}
+		if !reflect.DeepEqual(cfg.EmulatorPin, []int{6}) {
+			t.Errorf("EmulatorPin = %v, want [6]", cfg.EmulatorPin)
+		}
+	})
+
+	t.Run("non-nil creates cputune when none existed", func(t *testing.T) {
+		out, err := SetPinning(plainVMXML, map[int][]int{}, -1, []int{0, 1})
+		if err != nil {
+			t.Fatalf("SetPinning: %v", err)
+		}
+		cfg, err := ParseDomainXML(out)
+		if err != nil {
+			t.Fatalf("ParseDomainXML(out): %v", err)
+		}
+		if !reflect.DeepEqual(cfg.EmulatorPin, []int{0, 1}) {
+			t.Errorf("EmulatorPin = %v, want [0 1]", cfg.EmulatorPin)
+		}
+		if len(cfg.VCPUPins) != 0 {
+			t.Errorf("VCPUPins = %v, want empty (pins was empty)", cfg.VCPUPins)
+		}
+	})
+}
+
+// TestParseDomainXML_EmulatorPin covers parsing <cputune><emulatorpin>
+// alongside vcpupin.
+func TestParseDomainXML_EmulatorPin(t *testing.T) {
+	const xml = `<domain type='kvm'>
+  <name>emu-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b11</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='4'/>
+    <vcpupin vcpu='1' cpuset='5'/>
+    <emulatorpin cpuset='4-5'/>
+  </cputune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+	cfg, err := ParseDomainXML(xml)
+	if err != nil {
+		t.Fatalf("ParseDomainXML: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.EmulatorPin, []int{4, 5}) {
+		t.Errorf("EmulatorPin = %v, want [4 5]", cfg.EmulatorPin)
 	}
 }
 
@@ -245,7 +354,7 @@ func TestSetPinningEmptyPinsPreservesCputune(t *testing.T) {
 				t.Fatalf("ParseDomainXML(before): %v", err)
 			}
 
-			out, err := SetPinning(tc.xml, map[int][]int{}, 0)
+			out, err := SetPinning(tc.xml, map[int][]int{}, 0, nil)
 			if err != nil {
 				t.Fatalf("SetPinning: %v", err)
 			}
@@ -294,5 +403,40 @@ func TestStripPinning(t *testing.T) {
 	}
 	if !strings.Contains(out, "<disk") {
 		t.Errorf("output missing disk: %s", out)
+	}
+}
+
+// TestStripPinningRemovesEmulator covers Strip clearing emulatorpin
+// alongside vcpupin/numatune.
+func TestStripPinningRemovesEmulator(t *testing.T) {
+	const xml = `<domain type='kvm'>
+  <name>emu-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b12</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='4'/>
+    <vcpupin vcpu='1' cpuset='5'/>
+    <emulatorpin cpuset='4-5'/>
+  </cputune>
+  <numatune>
+    <memory mode='strict' nodeset='0'/>
+  </numatune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+	out, err := StripPinning(xml)
+	if err != nil {
+		t.Fatalf("StripPinning: %v", err)
+	}
+	if strings.Contains(out, "<cputune") {
+		t.Errorf("output still contains <cputune (emulatorpin should be gone too): %s", out)
+	}
+	cfg, err := ParseDomainXML(out)
+	if err != nil {
+		t.Fatalf("ParseDomainXML(out): %v", err)
+	}
+	if cfg.EmulatorPin != nil {
+		t.Errorf("EmulatorPin = %v, want nil", cfg.EmulatorPin)
 	}
 }

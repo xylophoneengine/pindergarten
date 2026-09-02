@@ -19,14 +19,15 @@ const (
 // PendingOp is one staged, not-yet-applied change to a VM's pinning or
 // membind state.
 type PendingOp struct {
-	Kind       OpKind
-	VM         string
-	Pins       map[int][]int
-	MemNode    int    // -1 = leave numatune untouched (OpPin only)
-	BackupXML  string // OpRestore only
-	StagedHash string // sha256 hex of domain config XML at staging time
-	StagedXML  string // domain config XML at staging time (same XML StagedHash hashes), for the drift screen's diff
-	Summary    string // human line, e.g. "vm-x: pin 4 vcpus -> node 1 threads 2,3,6,7; memory -> node 1"
+	Kind        OpKind
+	VM          string
+	Pins        map[int][]int
+	MemNode     int    // -1 = leave numatune untouched (OpPin only)
+	EmulatorPin []int  // nil = leave emulatorpin untouched (OpPin only)
+	BackupXML   string // OpRestore only
+	StagedHash  string // sha256 hex of domain config XML at staging time
+	StagedXML   string // domain config XML at staging time (same XML StagedHash hashes), for the drift screen's diff
+	Summary     string // human line, e.g. "vm-x: pin 4 vcpus -> node 1 threads 2,3,6,7; memory -> node 1"
 }
 
 // HashXML returns the sha256 hex digest of xml, used to detect drift
@@ -107,7 +108,7 @@ func Project(s *Snapshot, doms map[string]*libvirtio.DomainConfig, ops []Pending
 		use[t] = ThreadUse{VMs: kept, Pending: pending}
 	}
 
-	return &Snapshot{Topo: s.Topo, VMs: vms, Use: use, BoundMemKiB: bound}
+	return &Snapshot{Topo: s.Topo, VMs: vms, Use: use, BoundMemKiB: bound, Reserved: s.Reserved}
 }
 
 // applyOp mutates v (a VM already private to the projection) per op's
@@ -119,9 +120,13 @@ func applyOp(v *VM, op PendingOp) {
 		if op.MemNode != -1 {
 			v.MemNodes = []int{op.MemNode}
 		}
+		if op.EmulatorPin != nil {
+			v.EmulatorPin = append([]int(nil), op.EmulatorPin...)
+		}
 	case OpStrip:
 		v.Pins = map[int][]int{}
 		v.MemNodes = nil
+		v.EmulatorPin = nil
 	case OpRestore:
 		cfg, err := libvirtio.ParseDomainXML(op.BackupXML)
 		if err != nil {
@@ -129,6 +134,7 @@ func applyOp(v *VM, op PendingOp) {
 		}
 		v.Pins = cfg.VCPUPins
 		v.MemNodes = cfg.MemNodes
+		v.EmulatorPin = cfg.EmulatorPin
 	}
 }
 
@@ -140,6 +146,9 @@ func deepCopyVM(v VM) VM {
 	nv.Pins = copyPins(v.Pins)
 	if v.MemNodes != nil {
 		nv.MemNodes = append([]int(nil), v.MemNodes...)
+	}
+	if v.EmulatorPin != nil {
+		nv.EmulatorPin = append([]int(nil), v.EmulatorPin...)
 	}
 	if v.Devices != nil {
 		nv.Devices = append([]Device(nil), v.Devices...)

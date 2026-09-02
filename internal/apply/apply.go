@@ -7,6 +7,7 @@ package apply
 import (
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -110,7 +111,7 @@ func Run(h libvirtio.Hypervisor, backupDir, version string, ops []model.PendingO
 func buildXML(op model.PendingOp, xml string) (string, error) {
 	switch op.Kind {
 	case model.OpPin:
-		return libvirtio.SetPinning(xml, op.Pins, op.MemNode)
+		return libvirtio.SetPinning(xml, op.Pins, op.MemNode, op.EmulatorPin)
 	case model.OpStrip:
 		return libvirtio.StripPinning(xml)
 	case model.OpRestore:
@@ -147,6 +148,9 @@ func verify(h libvirtio.Hypervisor, op model.PendingOp) error {
 		if len(cfg.MemNodes) != 0 {
 			return fmt.Errorf("memnodes not empty: %v", cfg.MemNodes)
 		}
+		if len(cfg.EmulatorPin) != 0 {
+			return fmt.Errorf("emulatorpin not empty: %v", cfg.EmulatorPin)
+		}
 	case model.OpPin:
 		// An empty Pins means "no cputune opinion" (a memory-node-only
 		// change): SetPinning leaves the live cputune untouched, which can
@@ -159,6 +163,19 @@ func verify(h libvirtio.Hypervisor, op model.PendingOp) error {
 			want := []int{op.MemNode}
 			if !reflect.DeepEqual(cfg.MemNodes, want) {
 				return fmt.Errorf("memnodes mismatch: got %v want %v", cfg.MemNodes, want)
+			}
+		}
+		// op.EmulatorPin == nil means "no emulatorpin opinion" (a
+		// memory-node-only change), same rule as Pins above: SetPinning
+		// leaves the live emulatorpin untouched, so only compare when the
+		// op actually says something.
+		if op.EmulatorPin != nil {
+			got := append([]int(nil), cfg.EmulatorPin...)
+			want := append([]int(nil), op.EmulatorPin...)
+			sort.Ints(got)
+			sort.Ints(want)
+			if !reflect.DeepEqual(got, want) {
+				return fmt.Errorf("emulatorpin mismatch: got %v want %v", cfg.EmulatorPin, op.EmulatorPin)
 			}
 		}
 	case model.OpRestore:

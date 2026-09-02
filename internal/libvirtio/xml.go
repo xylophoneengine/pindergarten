@@ -13,15 +13,16 @@ import (
 // DomainConfig is the parsed subset of a libvirt domain XML document
 // relevant to vCPU pinning.
 type DomainConfig struct {
-	Name      string
-	UUID      string
-	VCPUs     int
-	MemoryKiB uint64
-	VCPUPins  map[int][]int // vcpu -> host thread IDs; empty map if no cputune
-	MemNodes  []int         // numatune nodeset; nil if no numatune
-	MemMode   string        // numatune mode attr, "" if none
-	Hostdevs  []string      // PCI addrs "0000:81:00.0" from passthrough hostdevs
-	Raw       string        // original XML verbatim
+	Name        string
+	UUID        string
+	VCPUs       int
+	MemoryKiB   uint64
+	VCPUPins    map[int][]int // vcpu -> host thread IDs; empty map if no cputune
+	MemNodes    []int         // numatune nodeset; nil if no numatune
+	MemMode     string        // numatune mode attr, "" if none
+	EmulatorPin []int         // cputune/emulatorpin cpuset; nil if absent
+	Hostdevs    []string      // PCI addrs "0000:81:00.0" from passthrough hostdevs
+	Raw         string        // original XML verbatim
 }
 
 // ParseDomainXML parses a libvirt domain XML document into a DomainConfig.
@@ -74,6 +75,15 @@ func ParseDomainXML(raw string) (*DomainConfig, error) {
 				return nil, fmt.Errorf("libvirtio: parsing vcpupin cpuset: %w", err)
 			}
 			cfg.VCPUPins[vcpu] = threads
+		}
+		if pin := cputune.SelectElement("emulatorpin"); pin != nil {
+			if cpuset := pin.SelectAttrValue("cpuset", ""); cpuset != "" {
+				threads, err := hostinfo.ParseCPUList(cpuset)
+				if err != nil {
+					return nil, fmt.Errorf("libvirtio: parsing emulatorpin cpuset: %w", err)
+				}
+				cfg.EmulatorPin = threads
+			}
 		}
 	}
 
@@ -187,32 +197,58 @@ func loadDomain(raw string) (*etree.Document, *etree.Element, error) {
 // entirely untouched instead of clearing it -- callers that only want to
 // change numatune (a memory-node-only action) pass the VM's own current
 // pins back in when there are any, but an empty map means "no cputune
-// opinion here", not "erase vcpu pinning". Only <cputune> and <numatune>
-// are modified; everything else in raw is preserved.
-func SetPinning(raw string, pins map[int][]int, memNode int) (string, error) {
+// opinion here", not "erase vcpu pinning".
+//
+// emulator controls <cputune><emulatorpin>: nil leaves it exactly as it
+// was (the memory-node-only callers above pass nil here too, for the same
+// reason); non-nil always removes any existing emulatorpin first, then --
+// only when emulator is also non-empty -- recreates it with cpuset =
+// FormatCPUList(emulator). <cputune> is created lazily (only when pins or
+// emulator actually needs it) and removed again at the end if it ends up
+// empty, so neither knob ever fabricates a stray empty element.
+//
+// Only <cputune> and <numatune> are modified; everything else in raw is
+// preserved.
+func SetPinning(raw string, pins map[int][]int, memNode int, emulator []int) (string, error) {
 	doc, domain, err := loadDomain(raw)
 	if err != nil {
 		return "", err
 	}
 
-	if len(pins) > 0 {
+	if len(pins) > 0 || emulator != nil {
 		cputune := domain.SelectElement("cputune")
 		if cputune == nil {
 			cputune = domain.CreateElement("cputune")
-		} else {
+		}
+
+		if len(pins) > 0 {
 			for _, pin := range cputune.SelectElements("vcpupin") {
 				cputune.RemoveChild(pin)
 			}
+			vcpus := make([]int, 0, len(pins))
+			for vcpu := range pins {
+				vcpus = append(vcpus, vcpu)
+			}
+			sort.Ints(vcpus)
+			for _, vcpu := range vcpus {
+				pin := cputune.CreateElement("vcpupin")
+				pin.CreateAttr("vcpu", strconv.Itoa(vcpu))
+				pin.CreateAttr("cpuset", hostinfo.FormatCPUList(pins[vcpu]))
+			}
 		}
-		vcpus := make([]int, 0, len(pins))
-		for vcpu := range pins {
-			vcpus = append(vcpus, vcpu)
+
+		if emulator != nil {
+			if pin := cputune.SelectElement("emulatorpin"); pin != nil {
+				cputune.RemoveChild(pin)
+			}
+			if len(emulator) > 0 {
+				pin := cputune.CreateElement("emulatorpin")
+				pin.CreateAttr("cpuset", hostinfo.FormatCPUList(emulator))
+			}
 		}
-		sort.Ints(vcpus)
-		for _, vcpu := range vcpus {
-			pin := cputune.CreateElement("vcpupin")
-			pin.CreateAttr("vcpu", strconv.Itoa(vcpu))
-			pin.CreateAttr("cpuset", hostinfo.FormatCPUList(pins[vcpu]))
+
+		if len(cputune.ChildElements()) == 0 {
+			domain.RemoveChild(cputune)
 		}
 	}
 
@@ -232,8 +268,9 @@ func SetPinning(raw string, pins map[int][]int, memNode int) (string, error) {
 	return doc.WriteToString()
 }
 
-// StripPinning removes every vcpupin element and the numatune memory
-// binding. Empty <cputune>/<numatune> elements are removed entirely.
+// StripPinning removes every vcpupin element, the emulatorpin element, and
+// the numatune memory binding. Empty <cputune>/<numatune> elements are
+// removed entirely.
 func StripPinning(raw string) (string, error) {
 	doc, domain, err := loadDomain(raw)
 	if err != nil {
@@ -242,6 +279,9 @@ func StripPinning(raw string) (string, error) {
 
 	if cputune := domain.SelectElement("cputune"); cputune != nil {
 		for _, pin := range cputune.SelectElements("vcpupin") {
+			cputune.RemoveChild(pin)
+		}
+		if pin := cputune.SelectElement("emulatorpin"); pin != nil {
 			cputune.RemoveChild(pin)
 		}
 		if len(cputune.ChildElements()) == 0 {

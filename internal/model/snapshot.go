@@ -45,6 +45,7 @@ type VM struct {
 	MemoryKiB   uint64
 	Pins        map[int][]int
 	MemNodes    []int
+	EmulatorPin []int // cputune/emulatorpin cpuset; nil = emulator threads float free
 	Devices     []Device
 	Flags       []Flag
 	Unsupported bool
@@ -83,6 +84,17 @@ type Snapshot struct {
 	VMs         []VM // sorted by name
 	Use         map[int]ThreadUse
 	BoundMemKiB map[int]uint64 // node -> sum of memory of VMs bound to it
+	Reserved    map[int]bool   // thread ids reserved for the host (-reserve N), all SMT siblings included; nil/empty when off
+}
+
+// WithReserved sets s.Reserved to reserved and returns s, for chaining onto
+// Build's result (main.go's scan closure) without widening Build's own
+// signature -- Build has a couple dozen test call sites across this
+// package that have no opinion on Reserved at all, so a setter is the
+// smaller diff.
+func (s *Snapshot) WithReserved(reserved map[int]bool) *Snapshot {
+	s.Reserved = reserved
+	return s
 }
 
 // VM returns the VM named name, or nil if absent.
@@ -115,12 +127,13 @@ func Build(topo *hostinfo.Topology, doms []libvirtio.Domain, pciNode func(addr s
 func domainToVM(d libvirtio.Domain, pciNode func(addr string) int) VM {
 	cfg := d.Config
 	v := VM{
-		Name:      cfg.Name,
-		State:     d.State,
-		VCPUs:     cfg.VCPUs,
-		MemoryKiB: cfg.MemoryKiB,
-		Pins:      cfg.VCPUPins,
-		MemNodes:  cfg.MemNodes,
+		Name:        cfg.Name,
+		State:       d.State,
+		VCPUs:       cfg.VCPUs,
+		MemoryKiB:   cfg.MemoryKiB,
+		Pins:        cfg.VCPUPins,
+		MemNodes:    cfg.MemNodes,
+		EmulatorPin: cfg.EmulatorPin,
 	}
 	for _, addr := range cfg.Hostdevs {
 		v.Devices = append(v.Devices, Device{Addr: addr, Node: pciNode(addr)})
