@@ -100,12 +100,16 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 // renderOverviewTab renders the Overview tab: one bordered panel per NUMA
 // node (side by side when each would get at least sideCardMinWidth
 // columns -- each then independently height-clipped to budget, since
-// they're width-independent columns -- else stacked, showing as many full
-// cards as fit budget (fitStackedCount) rather than truncating every
-// card's content, so a short terminal with many nodes doesn't push the
-// key bar off-screen), followed by a one-line-per-VM list of any domains
-// flagged Unsupported.
-func renderOverviewTab(s *model.Snapshot, w, budget int) string {
+// they're width-independent columns -- else stacked, starting from
+// scroll (clamped by the caller via App.clampOverviewScroll; up/down/wheel
+// on the Overview tab move it), showing as many full cards as fit budget
+// rather than truncating every card's content -- clamping each one's
+// height to whatever budget is actually left as it goes, so even a first
+// card taller than the whole budget doesn't overflow it -- so a short
+// terminal with many nodes doesn't push the key bar off-screen. A
+// trailing "+N more nodes (scroll)" line appears once some are hidden.
+// Then a one-line-per-VM list of any domains flagged Unsupported.
+func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 	cardWidths, sideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
 	bodies := make([]string, len(s.Topo.Nodes))
 	heights := make([]int, len(s.Topo.Nodes))
@@ -114,19 +118,38 @@ func renderOverviewTab(s *model.Snapshot, w, budget int) string {
 		heights[i] = lineCount(bodies[i]) + 2 // borders
 	}
 
-	n := len(s.Topo.Nodes)
+	start, n := 0, len(s.Topo.Nodes)
 	if !sideBySide {
-		n = fitStackedCount(heights, budget)
+		start = scroll
+		if start < 0 {
+			start = 0
+		}
+		if start > len(heights)-1 {
+			start = len(heights) - 1
+		}
+		n = fitStackedCount(heights[start:], budget)
 	}
 	panels := make([]string, n)
-	for i := 0; i < n; i++ {
+	used := 0
+	for k := 0; k < n; k++ {
+		i := start + k
 		h := budget
 		if !sideBySide {
 			h = heights[i]
+			if remaining := budget - used; h > remaining {
+				h = remaining
+			}
 		}
-		panels[i], _ = panelH(fmt.Sprintf("node %d", s.Topo.Nodes[i].ID), bodies[i], cardWidths[i], h)
+		panels[k], _ = panelH(fmt.Sprintf("node %d", s.Topo.Nodes[i].ID), bodies[i], cardWidths[i], h)
+		used += lineCount(panels[k])
 	}
 	out := joinPanels(panels, sideBySide)
+
+	if !sideBySide {
+		if hidden := len(s.Topo.Nodes) - n; hidden > 0 {
+			out += "\n" + keyBarLabelStyle.Render(fmt.Sprintf("+%d more nodes (scroll)", hidden))
+		}
+	}
 
 	var unsupported strings.Builder
 	for _, v := range s.VMs {
@@ -206,14 +229,46 @@ func localCoreIndex(idx []int, target int) int {
 	return -1
 }
 
+// nodeIndexOf returns the position of the node with the given id within
+// nodes, or -1 if there is none.
+func nodeIndexOf(nodes []hostinfo.Node, id int) int {
+	for i, n := range nodes {
+		if n.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// cpuMapHitXLimit returns the x-limit to clip a node panel's core hits
+// against: innerWidth, minus 2 more (the ".." truncation marker's width)
+// when the grid's natural row width actually exceeds innerWidth (i.e. a
+// row really did get truncated) -- so a hit never lands on the marker
+// instead of a real cell. A grid that fits within innerWidth as-is needs
+// no such adjustment, or its own rightmost cells would lose their hits for
+// no reason.
+func cpuMapHitXLimit(cores, innerWidth int) int {
+	rowCores := cores
+	if rowCores > coresPerRow {
+		rowCores = coresPerRow
+	}
+	naturalWidth := rowCores*3 - 1
+	if naturalWidth > innerWidth {
+		return innerWidth - 2
+	}
+	return innerWidth
+}
+
 // renderCPUMapTab renders the CPU Map tab: one bordered panel per NUMA
 // node (side by side when each would get at least cpuNodeMinWidth
-// columns, else stacked) holding that node's cell grid, a legend line
+// columns, else stacked, windowed around the cursor's own node -- like
+// scrollWindow's "keep visible" rule, but over variously-sized panels --
+// so moving the cursor onto a node whose panel isn't currently shown
+// still brings it into view) holding that node's cell grid, a legend line
 // shown once below them all, and a detail panel for the cursor's core
-// (below the node panels, or beside them when wide). Node panels that
-// still don't fit the height budget are simply truncated (there's no
-// single "selected row" to keep visible across a whole node's grid the
-// way there is for a table).
+// (below the node panels, or beside them when wide). Each node panel's
+// height is clamped to whatever budget is actually left as they're laid
+// out, so even one taller than the whole budget can't overflow it.
 func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
 	nodePanelWidths, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
@@ -246,20 +301,30 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	}
 
 	// When the node panels stack among themselves too (nodeSideBySide
-	// false), show as many full ones as fit nodeAreaBudget rather than
-	// giving every one that whole budget independently -- panelH never
+	// false), show as many full ones as fit nodeAreaBudget -- windowed
+	// around the cursor's own node, so it's always among them -- rather
+	// than giving every one that whole budget independently (panelH never
 	// pads a panel shorter than its own natural height, so N panels each
-	// individually capped at (but not divided by) nodeAreaBudget can still
-	// sum to N times that.
-	numNodePanels := len(s.Topo.Nodes)
+	// individually capped at, but not divided by, nodeAreaBudget could
+	// still sum to N times that; fixed below by clamping each to whatever
+	// budget is left as they're laid out).
+	start, numNodePanels := 0, len(s.Topo.Nodes)
 	if !nodeSideBySide {
-		numNodePanels = fitStackedCount(nodeHeights, nodeAreaBudget)
+		cursorNode := -1
+		if cursor >= 0 && cursor < len(s.Topo.Cores) {
+			cursorNode = nodeIndexOf(s.Topo.Nodes, s.Topo.Cores[cursor].Node)
+		}
+		if cursorNode < 0 {
+			cursorNode = 0
+		}
+		start, numNodePanels = fitStackedWindow(nodeHeights, nodeAreaBudget, cursorNode)
 	}
 
 	panels := make([]string, numNodePanels)
 	var hits []hit
 	cumX, cumY := 0, 0
-	for i := 0; i < numNodePanels; i++ {
+	for k := 0; k < numNodePanels; k++ {
+		i := start + k
 		node := s.Topo.Nodes[i]
 		idx := globalCoreIndices(s, node.ID)
 		grid, gridHits := renderNodeMap(s, node.ID, nil, localCoreIndex(idx, cursor), "core")
@@ -269,11 +334,15 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		h := nodeAreaBudget
 		if !nodeSideBySide {
 			h = nodeHeights[i]
+			if remaining := nodeAreaBudget - cumY; h > remaining {
+				h = remaining
+			}
 		}
 		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], h)
-		panels[i] = p
+		panels[k] = p
 
-		gridHits = offsetHits(clipHitsToWindow(gridHits, kept, nodePanelWidths[i]-2), 1, 1) // border
+		wLimit := cpuMapHitXLimit(len(nodeCores(s, node.ID)), nodePanelWidths[i]-2)
+		gridHits = offsetHits(clipHitsToWindow(gridHits, kept, wLimit), 1, 1) // border
 		if nodeSideBySide {
 			hits = append(hits, offsetHits(gridHits, 0, cumX)...)
 			cumX += nodePanelWidths[i] + 1 // +1 for joinPanels' 1-column gap

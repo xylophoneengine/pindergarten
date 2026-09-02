@@ -271,6 +271,60 @@ func fitStackedCount(heights []int, budget int) int {
 	return n
 }
 
+// fitStackedWindow returns the [start, start+count) range of stacked
+// panels (heights[i] lines each, borders included) to show so panel
+// `keep` stays visible within budget lines total -- mirrors
+// scrollWindow's "keep visible, pinned to the trailing edge" rule, but
+// for variously-sized items instead of fixed-size rows. Always includes
+// keep, even if it alone exceeds budget (matching fitStackedCount's own
+// "always at least 1" guarantee).
+func fitStackedWindow(heights []int, budget, keep int) (start, count int) {
+	if len(heights) == 0 {
+		return 0, 0
+	}
+	if keep < 0 {
+		keep = 0
+	}
+	if keep > len(heights)-1 {
+		keep = len(heights) - 1
+	}
+	// Walk backward from keep, accumulating heights, to find how many
+	// trailing panels (ending at keep) fit budget.
+	used, fitting := 0, 0
+	for i := keep; i >= 0; i-- {
+		if fitting > 0 && used+heights[i] > budget {
+			break
+		}
+		used += heights[i]
+		fitting++
+	}
+	start = keep - fitting + 1
+	if start < 0 {
+		start = 0
+	}
+	// There may be room for more panels *after* keep too, once budget
+	// isn't the tight constraint that fixed fitting above -- fill forward
+	// from start the same way fitStackedCount would on its own.
+	count = fitStackedCount(heights[start:], budget)
+	return start, count
+}
+
+// clipLinesTo truncates s (top-down) to at most n lines, or "" if n <= 0.
+// Used to enforce a computed body budget exactly, regardless of whether
+// the render function that produced s respected it internally (e.g. a
+// bordered panel's own minimum height floor) -- so chrome rendered after
+// the body is never pushed past a.height by the body's own overflow.
+func clipLinesTo(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // minSecondaryBudget is the smallest height budget worth giving a stacked
 // tab's secondary (detail) panel; below that it's dropped entirely rather
 // than rendered as an unreadable sliver.

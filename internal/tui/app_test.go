@@ -155,6 +155,63 @@ func TestConfirmFitsHeightBudget(t *testing.T) {
 	}
 }
 
+// TestConfirmWithWrappedStatusKeepsKeyBarAndYes covers the fix for
+// bodyBudget's floor of 3: at width 40 height 16, a long status message
+// (word-wrapped to several lines) plus an open confirm panel could exceed
+// chrome's own footprint, and clampHeight's bottom-up truncation used to
+// eat the key bar (or worse). Chrome must now shrink itself (dropping the
+// status line first) rather than ever losing the key bar or the confirm's
+// "[y]es" hint.
+func TestConfirmWithWrappedStatusKeepsKeyBarAndYes(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 16})
+	a.status = strings.Repeat("a long status message that wraps across several lines ", 6)
+	sendKey(a, 'e')
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 16 {
+		t.Fatalf("View() has %d lines, want <= 16: %q", len(lines), view)
+	}
+	// Checked as two separate substrings, not one "[q] quit": at width 40
+	// the key bar's own hint list is wider than the terminal and word-
+	// wraps regardless of this fix, which can land "[q]" and "quit" on
+	// different lines.
+	if !strings.Contains(view, "[q]") || !strings.Contains(view, "quit") {
+		t.Fatalf("View() = %q, want the key bar's quit hint still visible", view)
+	}
+	if !strings.Contains(view, "[y]es") {
+		t.Fatalf("View() = %q, want the \"[y]es\" hint visible", view)
+	}
+}
+
+// TestConfirmAtHeight8KeepsYesHint covers the same fix at an even tighter
+// height (8): the confirm panel's own "[y]es" key line must never be
+// sacrificed, even when there isn't room for its prompt text too.
+func TestConfirmAtHeight8KeepsYesHint(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(5), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+
+	sendKey(a, 'e')
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 8 {
+		t.Fatalf("View() has %d lines, want <= 8: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "[y]es") {
+		t.Fatalf("View() = %q, want the \"[y]es\" hint visible", view)
+	}
+}
+
 func TestEditBlockedWhenRO(t *testing.T) {
 	a := testApp(t, true)
 
@@ -538,6 +595,87 @@ func TestCPUMapStackedNodesHeightBudgetKeepsKeyBarVisible(t *testing.T) {
 	}
 	if !strings.Contains(view, "[q] quit") {
 		t.Fatalf("View() = %q, want the key bar (\"[q] quit\") still visible", view)
+	}
+}
+
+// TestCPUMapNodePanelsWindowAroundCursor covers the fix for stacked CPU
+// Map node panels always showing nodes 0..N-1: with 8 single-core nodes
+// at width 80 height 24 (narrow enough that only ~5 node panels fit), the
+// cursor can still be moved onto a core belonging to node 7 -- which must
+// then render (windowing the panel list around the cursor's node, not
+// just the first few), with a hit recorded for it.
+func TestCPUMapNodePanelsWindowAroundCursor(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(8, 1), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1, cursor: 7}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	view := a.View()
+	if !strings.Contains(view, "node 7") {
+		t.Fatalf("View() = %q, want node 7's panel rendered (cursor is on one of its cores)", view)
+	}
+	findHit(t, a, "core", 7) // fails the test itself if no such hit was recorded
+}
+
+// TestCPUMapFirstNodePanelClampedToBudget covers the fix for the stacked
+// branch handing every panel its own natural height regardless of how
+// much budget is actually left: 4 nodes x 200 cores at width 80 height 10
+// -- so tight that even the *first* node panel's natural height alone
+// exceeds the whole budget -- must still leave the key bar visible.
+func TestCPUMapFirstNodePanelClampedToBudget(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(4, 200), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 10 {
+		t.Fatalf("View() has %d lines, want <= 10: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "[q] quit") {
+		t.Fatalf("View() = %q, want the key bar (\"[q] quit\") still visible", view)
+	}
+}
+
+// TestOverviewFirstCardClampedToBudget is TestCPUMapFirstNodePanelClamped-
+// ToBudget's Overview-tab counterpart.
+func TestOverviewFirstCardClampedToBudget(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodesTopo(4), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 6})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 6 {
+		t.Fatalf("View() has %d lines, want <= 6: %q", len(lines), view)
+	}
+	if !strings.Contains(view, "[q] quit") {
+		t.Fatalf("View() = %q, want the key bar (\"[q] quit\") still visible", view)
+	}
+}
+
+// TestOverviewScrollRevealsHiddenNodes covers the Overview scroll minor:
+// with more NUMA node cards than fit stacked, a "+N more nodes (scroll)"
+// line is shown, and up/down on the Overview tab moves a.overviewScroll so
+// every node becomes reachable.
+func TestOverviewScrollRevealsHiddenNodes(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodesTopo(8), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	view := a.View()
+	if strings.Contains(view, "node 7") {
+		t.Fatalf("View() = %q, want node 7 NOT yet visible (only the first few cards fit)", view)
+	}
+	if !strings.Contains(view, "more nodes (scroll)") {
+		t.Fatalf("View() = %q, want a \"+N more nodes (scroll)\" line", view)
+	}
+
+	for i := 0; i < 7; i++ {
+		sendKeyType(a, tea.KeyDown)
+	}
+	view = a.View()
+	if !strings.Contains(view, "node 7") {
+		t.Fatalf("View() after scrolling down = %q, want node 7 visible", view)
 	}
 }
 

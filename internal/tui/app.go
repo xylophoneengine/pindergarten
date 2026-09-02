@@ -48,22 +48,23 @@ type App struct {
 	backupDir string
 	version   string
 
-	tab        int
-	cursor     int    // selected core index (s.Topo.Cores) on the CPU Map tab
-	vmSel      int    // selected row (s.VMs) on the VMs tab
-	pendingSel int    // selected row (queue.Ops) on the Pending tab
-	backupsSel int    // selected row on the Backups tab
-	diffView   string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
-	editMode   bool
-	queue      model.Queue
-	snap       *model.Snapshot
-	doms       map[string]*libvirtio.DomainConfig
-	scanErr    error
-	status     string
-	confirm    *confirm
-	wizard     *wizard
-	memPicker  *memNodePicker
-	flow       *applyFlow
+	tab            int
+	cursor         int    // selected core index (s.Topo.Cores) on the CPU Map tab
+	vmSel          int    // selected row (s.VMs) on the VMs tab
+	pendingSel     int    // selected row (queue.Ops) on the Pending tab
+	backupsSel     int    // selected row on the Backups tab
+	overviewScroll int    // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
+	diffView       string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
+	editMode       bool
+	queue          model.Queue
+	snap           *model.Snapshot
+	doms           map[string]*libvirtio.DomainConfig
+	scanErr        error
+	status         string
+	confirm        *confirm
+	wizard         *wizard
+	memPicker      *memNodePicker
+	flow           *applyFlow
 	// flowGen guards against a stale driftCheckedMsg/applyDoneMsg landing
 	// on the wrong round: it only ever increases (never reset per-flow),
 	// so a leftover message from an earlier flow can never collide with a
@@ -76,6 +77,18 @@ type App struct {
 	tabRanges  [numTabs][2]int // X ranges recorded during the last render, row 0
 	hits       []hit           // clickable body regions recorded during the last render
 	diffScroll int             // scroll offset into a.diffView, the Backups tab's long-text diff
+
+	// diffCache/diffCacheWidth/diffCacheFor memoize colorDiff+truncateLines
+	// over a.diffView: both renderDiffView and clampDiffScroll need those
+	// lines every wheel tick, and colorDiff walks the whole diff, so
+	// recomputing it on every scroll would make scrolling a large diff
+	// janky. Recomputed only when the diff text or the width it was wrapped
+	// at has changed (diffCacheFor holds the text itself, not just a dirty
+	// flag, since the cache is still valid whenever a new diff happens to
+	// have identical text). Cleared on dismissal.
+	diffCache      []string
+	diffCacheWidth int
+	diffCacheFor   string
 }
 
 // bodyY0 is the number of lines rendered above the tab body in View: the
@@ -154,6 +167,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = ""
 		}
 		a.clampVMSel()
+		a.clampOverviewScroll()
 		if a.reopenVM != "" {
 			vm := a.reopenVM
 			a.reopenVM = ""
@@ -252,6 +266,9 @@ func (a *App) scrollWheel(delta int) {
 // scrollWheel).
 func (a *App) scrollActive(delta int) {
 	switch a.tab {
+	case 0:
+		a.overviewScroll += delta
+		a.clampOverviewScroll()
 	case 1:
 		a.moveCursor(delta * coresPerRow)
 	case 2:
@@ -326,6 +343,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			a.diffView = ""
 			a.diffScroll = 0
+			a.diffCache = nil
+			a.diffCacheFor = ""
 		}
 		return a, nil
 	}
@@ -354,6 +373,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.tab = next
 			a.status = ""
 		}
+		return a, nil
+	case a.tab == 0 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+		a.overviewScroll--
+		a.clampOverviewScroll()
+		return a, nil
+	case a.tab == 0 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+		a.overviewScroll++
+		a.clampOverviewScroll()
 		return a, nil
 	case a.tab == 1 && (msg.Type == tea.KeyLeft || isRune(msg, 'h')):
 		a.moveCursor(-1)
@@ -430,6 +457,24 @@ func (a *App) clampVMSel() {
 	}
 	if max := len(a.snap.VMs) - 1; a.vmSel > max {
 		a.vmSel = max
+	}
+}
+
+// clampOverviewScroll clamps a.overviewScroll into [0, len(Nodes)-1] (0
+// with no nodes or before the first scan), writing the clamped value back
+// immediately (same pattern as clampDiffScroll/clampResultsScroll) so an
+// over-scroll doesn't leave the next up/wheel-up producing no visible
+// change until several presses "catch up".
+func (a *App) clampOverviewScroll() {
+	if a.snap == nil || len(a.snap.Topo.Nodes) == 0 {
+		a.overviewScroll = 0
+		return
+	}
+	if a.overviewScroll < 0 {
+		a.overviewScroll = 0
+	}
+	if max := len(a.snap.Topo.Nodes) - 1; a.overviewScroll > max {
+		a.overviewScroll = max
 	}
 }
 
@@ -585,51 +630,37 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 // clicks), header, tab body, optional status message and confirm modal,
 // then the status bar. Table/grid content never wraps (each render
 // function truncates its own lines to fit); status/status-bar text is
-// prose and wraps via lipgloss. Nothing before this fix clamped to
-// a.height either: bubbletea drops overflow lines from the *top* of a
-// taller-than-terminal view, which silently shifted the tab row off row 0
-// and threw every recorded mouse-hit y off by the same amount. So the body
-// is now rendered within an explicit budget (a.height minus the other
-// chrome), and a final pass truncates (never wraps, and never lets the
-// body alone push the total over budget) any residual overflow, as a
-// last-resort safety net.
+// prose and wraps via lipgloss. Chrome -- the tab row, header, status
+// line, confirm panel, and key bar -- is assembled first, by renderChrome,
+// which shrinks it (dropping the status line, then truncating the confirm
+// panel's prompt) until it fits a.height on its own, never touching the
+// key bar or the confirm panel's "[y]es .../[n]..." line. The body then
+// gets whatever's left (bodyBudget), and is force-clipped to exactly that
+// via clipLinesTo regardless of what it rendered internally (e.g. a
+// bordered panel's own height floor) -- so the body can never again push
+// chrome past a.height the way an unclamped, body-first render used to
+// (bubbletea drops overflow from the *top*, which silently shifted the
+// tab row off row 0 and threw every recorded mouse-hit y off by the same
+// amount). clampHeight/clampWidth remain a final safety net for whatever
+// still slips through (e.g. a pathologically short a.height that can't
+// even fit chrome alone).
 func (a *App) View() string {
-	var b strings.Builder
-	b.WriteString(a.renderTabs())
-	b.WriteString("\n")
-	b.WriteString(a.renderHeader())
-	b.WriteString("\n")
+	tabs, header, statusLine, confirmPanel, keyBar, chrome := a.renderChrome()
 
-	statusLine := ""
-	if a.status != "" {
-		statusLine = a.wrapProse(styleStatus(a.status))
-	}
-	keyBar := a.wrapProse(a.renderStatusBar())
-
-	// The confirm panel is rendered before the body budget is computed
-	// (and its line count folded into chrome) so the body never claims
-	// lines the confirm panel needs -- otherwise clampHeight's last-resort
-	// truncation could cut into the confirm panel itself (even its prompt
-	// text) rather than just trimming the body.
-	confirmPanel := ""
-	if a.confirm != nil {
-		w := effectiveWidth(a.width)
-		panel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
-		confirmPanel, _ = centerDialog(panel, w)
-	}
-
-	chrome := 2 + lineCount(keyBar) // tab row + header + key bar
-	if statusLine != "" {
-		chrome += lineCount(statusLine)
-	}
-	if confirmPanel != "" {
-		chrome += lineCount(confirmPanel)
-	}
-	body, hits := a.renderBody(a.bodyBudget(chrome))
+	budget := a.bodyBudget(chrome)
+	body, hits := a.renderBody(budget)
+	body = clipLinesTo(body, budget)
 	a.hits = offsetHits(hits, bodyY0, 0)
 
-	b.WriteString(body)
+	var b strings.Builder
+	b.WriteString(tabs)
 	b.WriteString("\n")
+	b.WriteString(header)
+	b.WriteString("\n")
+	if body != "" {
+		b.WriteString(body)
+		b.WriteString("\n")
+	}
 	if statusLine != "" {
 		b.WriteString(statusLine)
 		b.WriteString("\n")
@@ -651,29 +682,81 @@ func lineCount(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-// chromeLines recomputes how many lines View()'s chrome (everything but
-// the tab body: the tab row, header, status line, key bar, and confirm
-// panel) will use, without needing the body itself. It duplicates a small
-// part of View()'s own inline calc (kept separate so View() doesn't have
-// to render the body twice) -- shared by the diff/results scroll clamps so
-// they can re-derive the exact body budget View() will use, keeping
-// a.diffScroll/a.flow.resultsScroll from overshooting their true range.
-func (a *App) chromeLines() int {
-	statusLine := ""
+// buildConfirmPanel renders the confirm modal's panel, truncating (never
+// wrapping) its prompt text to fit within maxLines total lines (borders
+// included) once space is tight: the blank separator line goes first,
+// then the prompt itself, but the borders and the "[y]es .../[n]..." key
+// line are never dropped -- a confirm modal with no visible answer key is
+// useless. When maxLines itself is too small for even that, the panel
+// still renders its unavoidable 3-line minimum (both borders plus the key
+// line) rather than disappearing.
+func buildConfirmPanel(prompt string, w, maxLines int) string {
+	const buttons = "[y]es  [n]/esc cancel"
+	contentBudget := maxLines - 2 // top/bottom borders
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	promptBudget := contentBudget - 2 // blank separator + buttons line
+	var body string
+	switch {
+	case promptBudget >= 1:
+		body = clipLinesTo(prompt, promptBudget) + "\n\n" + buttons
+	case contentBudget >= 2:
+		// No room for the blank separator; keep one prompt line + buttons.
+		body = clipLinesTo(prompt, contentBudget-1) + "\n" + buttons
+	default:
+		// Only room for the buttons line itself.
+		body = buttons
+	}
+	return panelWrap("Confirm", body, dialogWidth(w))
+}
+
+// renderChrome renders every part of View() apart from the tab body: the
+// tab row, header, status line, confirm panel, and key bar -- plus their
+// total line count, so View() and the diff/results scroll clamps (which
+// need to re-derive the exact body budget View() will use) share one
+// implementation instead of View() duplicating chromeLines' calc inline.
+// The tab row, header, and key bar are a fixed cost -- never shrunk. When
+// they plus the status line and confirm panel don't fit a.height, the
+// status line is dropped first; if that alone isn't enough, the confirm
+// panel is shrunk instead (via buildConfirmPanel, truncating its prompt).
+func (a *App) renderChrome() (tabs, header, statusLine, confirmPanel, keyBar string, lines int) {
+	tabs = a.renderTabs()
+	header = a.renderHeader()
+	keyBar = a.wrapProse(a.renderStatusBar())
+	fixed := 2 + lineCount(keyBar) // tab row + header + key bar
+
 	if a.status != "" {
 		statusLine = a.wrapProse(styleStatus(a.status))
 	}
-	chrome := 2 + lineCount(a.wrapProse(a.renderStatusBar()))
-	if statusLine != "" {
-		chrome += lineCount(statusLine)
-	}
+
+	w := effectiveWidth(a.width)
 	if a.confirm != nil {
-		w := effectiveWidth(a.width)
 		panel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
-		confirmPanel, _ := centerDialog(panel, w)
-		chrome += lineCount(confirmPanel)
+		confirmPanel, _ = centerDialog(panel, w)
 	}
-	return chrome
+
+	lines = fixed + lineCount(statusLine) + lineCount(confirmPanel)
+	if a.height <= 0 || lines <= a.height {
+		return
+	}
+
+	// Doesn't fit: drop the status line first.
+	statusLine = ""
+	lines = fixed + lineCount(confirmPanel)
+	if lines <= a.height || a.confirm == nil {
+		return
+	}
+
+	// Still doesn't fit: shrink the confirm panel itself.
+	maxLines := a.height - fixed
+	if maxLines < 3 {
+		maxLines = 3
+	}
+	panel := buildConfirmPanel(a.confirm.prompt, w, maxLines)
+	confirmPanel, _ = centerDialog(panel, w)
+	lines = fixed + lineCount(confirmPanel)
+	return
 }
 
 // clampDiffScroll re-clamps a.diffScroll to the Backups tab's diff view's
@@ -691,9 +774,24 @@ func (a *App) clampDiffScroll() {
 	if inner < 1 {
 		inner = 1
 	}
-	total := lineCount(truncateLines(colorDiff(a.diffView), inner))
-	budget := a.bodyBudget(a.chromeLines()) - 2
+	total := len(a.diffLinesCached(inner))
+	_, _, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome) - 2
 	a.diffScroll = clampScroll(a.diffScroll, budget, total)
+}
+
+// diffLinesCached returns a.diffView colored (colorDiff) and truncated to
+// inner columns, one entry per line, recomputing only when the diff text
+// or inner width has changed since the last call -- colorDiff walks the
+// whole diff, and both renderDiffView and clampDiffScroll need this on
+// every wheel tick, so a large diff would otherwise make scrolling janky.
+func (a *App) diffLinesCached(inner int) []string {
+	if a.diffCacheFor != a.diffView || a.diffCacheWidth != inner {
+		a.diffCache = strings.Split(truncateLines(colorDiff(a.diffView), inner), "\n")
+		a.diffCacheWidth = inner
+		a.diffCacheFor = a.diffView
+	}
+	return a.diffCache
 }
 
 // clampResultsScroll is clampDiffScroll's counterpart for the apply flow's
@@ -708,23 +806,25 @@ func (a *App) clampResultsScroll() {
 	if inner < 1 {
 		inner = 1
 	}
-	budget := a.bodyBudget(a.chromeLines())
+	_, _, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome)
 	total := lineCount(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)))
 	a.flow.resultsScroll = clampScroll(a.flow.resultsScroll, budget-2, total)
 }
 
 // bodyBudget returns how many lines the tab body may use: a.height minus
-// chrome (the tab row, header, status line, and key bar), floored at 3 so
-// there's always room for something. a.height of 0 (before the first
-// WindowSizeMsg) is treated as unbounded, matching effectiveWidth's own
-// convention -- there's nothing sane to budget against yet.
+// chrome (the tab row, header, status line, confirm panel, and key bar --
+// see renderChrome), floored at 0 (never negative) since chrome always
+// wins the remaining space. a.height of 0 (before the first WindowSizeMsg)
+// is treated as unbounded, matching effectiveWidth's own convention --
+// there's nothing sane to budget against yet.
 func (a *App) bodyBudget(chrome int) int {
 	if a.height <= 0 {
 		return fallbackHeight
 	}
 	budget := a.height - chrome
-	if budget < 3 {
-		budget = 3
+	if budget < 0 {
+		budget = 0
 	}
 	return budget
 }
@@ -842,7 +942,7 @@ func (a *App) renderBody(budget int) (string, []hit) {
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
-		return renderOverviewTab(projected, w, budget), nil
+		return renderOverviewTab(projected, w, budget, a.overviewScroll), nil
 	case 1:
 		return renderCPUMapTab(projected, a.cursor, w, budget)
 	case 2:
@@ -867,7 +967,7 @@ func (a *App) renderDiffView(w, budget int) string {
 	if inner < 1 {
 		inner = 1
 	}
-	lines := strings.Split(truncateLines(colorDiff(a.diffView), inner), "\n")
+	lines := a.diffLinesCached(inner)
 	contentBudget := budget - 2
 	visible, offset, total := windowAt(lines, contentBudget, a.diffScroll)
 	body := strings.Join(visible, "\n")
@@ -937,6 +1037,9 @@ func (a *App) renderStatusBar() string {
 	}
 
 	var hints []keyHint
+	if a.tab == 0 {
+		hints = append(hints, keyHint{"up/down", "scroll"})
+	}
 	if a.tab == 1 {
 		hints = append(hints, keyHint{"arrows/hjkl", "move"})
 	}
