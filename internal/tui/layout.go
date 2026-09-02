@@ -309,6 +309,30 @@ func fitStackedWindow(heights []int, budget, keep int) (start, count int) {
 	return start, count
 }
 
+// maxStackedScroll returns the largest start index worth scrolling
+// stacked panels (heights[i] lines each) to: once the panels from index s
+// to the end already all fit within budget, scrolling any further would
+// only hide earlier ones without revealing anything new, so the first
+// such s caps it -- mirrors scrollWindow's "pinned to the trailing edge"
+// rule for fixed-size items, but for variously-sized panels. 0 for no
+// panels or when everything already fits from the start.
+func maxStackedScroll(heights []int, budget int) int {
+	if len(heights) == 0 {
+		return 0
+	}
+	sum := 0
+	for _, h := range heights {
+		sum += h
+	}
+	for s := 0; s < len(heights); s++ {
+		if sum <= budget {
+			return s
+		}
+		sum -= heights[s]
+	}
+	return len(heights) - 1
+}
+
 // clipLinesTo truncates s (top-down) to at most n lines, or "" if n <= 0.
 // Used to enforce a computed body budget exactly, regardless of whether
 // the render function that produced s respected it internally (e.g. a

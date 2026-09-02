@@ -460,11 +460,28 @@ func (a *App) clampVMSel() {
 	}
 }
 
-// clampOverviewScroll clamps a.overviewScroll into [0, len(Nodes)-1] (0
-// with no nodes or before the first scan), writing the clamped value back
-// immediately (same pattern as clampDiffScroll/clampResultsScroll) so an
-// over-scroll doesn't leave the next up/wheel-up producing no visible
-// change until several presses "catch up".
+// overviewSideBySide reports whether the Overview tab's node cards
+// currently lay out side by side (at a.width) rather than stacked --
+// there's nothing to scroll in that layout, so both clampOverviewScroll
+// and the key bar's scroll hint gate on this.
+func (a *App) overviewSideBySide() bool {
+	if a.snap == nil {
+		return false
+	}
+	_, sideBySide := equalSplit(effectiveWidth(a.width), len(a.snap.Topo.Nodes), sideCardMinWidth)
+	return sideBySide
+}
+
+// clampOverviewScroll clamps a.overviewScroll: 0 outright with no nodes,
+// before the first scan, or while the cards lay out side by side
+// (nothing to scroll there); else to maxStackedScroll's bound, the
+// largest start index at which the remaining cards still fill the
+// budget (mirroring scrollWindow's own rule) -- so scrolling past the
+// point where every remaining card already fits doesn't manufacture a
+// "+N more nodes" footer out of an already-complete view. Writes the
+// clamped value back immediately (same pattern as clampDiffScroll/
+// clampResultsScroll) so an over-scroll doesn't leave the next up/
+// wheel-up producing no visible change until several presses "catch up".
 func (a *App) clampOverviewScroll() {
 	if a.snap == nil || len(a.snap.Topo.Nodes) == 0 {
 		a.overviewScroll = 0
@@ -473,7 +490,18 @@ func (a *App) clampOverviewScroll() {
 	if a.overviewScroll < 0 {
 		a.overviewScroll = 0
 	}
-	if max := len(a.snap.Topo.Nodes) - 1; a.overviewScroll > max {
+	if a.overviewSideBySide() {
+		a.overviewScroll = 0
+		return
+	}
+
+	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	heights := make([]int, len(projected.Topo.Nodes))
+	for i, node := range projected.Topo.Nodes {
+		heights[i] = lineCount(overviewNodeCard(projected, node)) + 2 // borders
+	}
+	_, _, _, _, _, chrome := a.renderChrome()
+	if max := maxStackedScroll(heights, a.bodyBudget(chrome)); a.overviewScroll > max {
 		a.overviewScroll = max
 	}
 }
@@ -692,6 +720,13 @@ func lineCount(s string) int {
 // line) rather than disappearing.
 func buildConfirmPanel(prompt string, w, maxLines int) string {
 	const buttons = "[y]es  [n]/esc cancel"
+	// Word-wrap first (matching how panelWrap will actually render the
+	// prompt), then clip *those* visual lines -- clipping the raw,
+	// unwrapped prompt string undercounts a narrow width's real line
+	// count, letting panelWrap's own wrap blow right past maxLines.
+	dw := dialogWidth(w)
+	wrapped := lipgloss.NewStyle().Width(dw - 2).Render(prompt)
+
 	contentBudget := maxLines - 2 // top/bottom borders
 	if contentBudget < 1 {
 		contentBudget = 1
@@ -700,22 +735,22 @@ func buildConfirmPanel(prompt string, w, maxLines int) string {
 	var body string
 	switch {
 	case promptBudget >= 1:
-		body = clipLinesTo(prompt, promptBudget) + "\n\n" + buttons
+		body = clipLinesTo(wrapped, promptBudget) + "\n\n" + buttons
 	case contentBudget >= 2:
 		// No room for the blank separator; keep one prompt line + buttons.
-		body = clipLinesTo(prompt, contentBudget-1) + "\n" + buttons
+		body = clipLinesTo(wrapped, contentBudget-1) + "\n" + buttons
 	default:
 		// Only room for the buttons line itself.
 		body = buttons
 	}
-	return panelWrap("Confirm", body, dialogWidth(w))
+	return panelWrap("Confirm", body, dw)
 }
 
 // renderChrome renders every part of View() apart from the tab body: the
 // tab row, header, status line, confirm panel, and key bar -- plus their
 // total line count, so View() and the diff/results scroll clamps (which
 // need to re-derive the exact body budget View() will use) share one
-// implementation instead of View() duplicating chromeLines' calc inline.
+// implementation instead of each duplicating the confirm-panel build.
 // The tab row, header, and key bar are a fixed cost -- never shrunk. When
 // they plus the status line and confirm panel don't fit a.height, the
 // status line is dropped first; if that alone isn't enough, the confirm
@@ -1037,7 +1072,7 @@ func (a *App) renderStatusBar() string {
 	}
 
 	var hints []keyHint
-	if a.tab == 0 {
+	if a.tab == 0 && !a.overviewSideBySide() {
 		hints = append(hints, keyHint{"up/down", "scroll"})
 	}
 	if a.tab == 1 {

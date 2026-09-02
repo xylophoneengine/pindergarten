@@ -679,6 +679,40 @@ func TestOverviewScrollRevealsHiddenNodes(t *testing.T) {
 	}
 }
 
+// TestOverviewScrollStaysAtZeroWhenEverythingFits covers the fix for
+// clampOverviewScroll clamping to len(Nodes)-1 regardless of how many
+// cards actually fit: with only 2 small node cards at 80x40 (both comfortably
+// fit already, side by side isn't triggered at this width), pressing down
+// must not scroll node 0 out of view and manufacture a "+1 more nodes"
+// footer out of an already-complete view.
+func TestOverviewScrollStaysAtZeroWhenEverythingFits(t *testing.T) {
+	s := &model.Snapshot{Topo: manyNodesTopo(2), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	sendKeyType(a, tea.KeyDown)
+	if a.overviewScroll != 0 {
+		t.Fatalf("overviewScroll = %d after pressing down with everything already visible, want 0", a.overviewScroll)
+	}
+	if view := a.View(); strings.Contains(view, "more nodes") {
+		t.Fatalf("View() = %q, want no \"more nodes\" footer -- both cards already fit", view)
+	}
+}
+
+// TestBuildConfirmPanelWrapsPromptBeforeClipping covers the fix for
+// buildConfirmPanel clipping the prompt's raw (unwrapped) lines before
+// panelWrap word-wraps it: at a narrow width, a long single-line prompt
+// wraps to several visual lines only *after* panelWrap gets it, so
+// clipping by raw line count let the wrapped result blow right past
+// maxLines. Wrapping first, then clipping, must honor maxLines exactly.
+func TestBuildConfirmPanelWrapsPromptBeforeClipping(t *testing.T) {
+	prompt := "Discard 3 pending ops and quit? [y/n]"
+	panel := buildConfirmPanel(prompt, 40, 4)
+	if n := strings.Count(panel, "\n") + 1; n > 4 {
+		t.Fatalf("buildConfirmPanel(...) has %d lines, want <= 4: %q", n, panel)
+	}
+}
+
 // TestViewWrapsWideCPUMapToWidth covers the same fix on the CPU Map tab: a
 // row of many two-glyph core cells is far wider than a narrow terminal, and
 // must not be left to overflow it.
