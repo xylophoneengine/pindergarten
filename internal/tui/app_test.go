@@ -157,15 +157,20 @@ func TestConfirmFitsHeightBudget(t *testing.T) {
 
 // TestConfirmWithWrappedStatusKeepsKeyBarAndYes covers the fix for
 // bodyBudget's floor of 3: at width 40 height 16, a long status message
-// (word-wrapped to several lines) plus an open confirm panel could exceed
-// chrome's own footprint, and clampHeight's bottom-up truncation used to
-// eat the key bar (or worse). Chrome must now shrink itself (dropping the
-// status line first) rather than ever losing the key bar or the confirm's
-// "[y]es" hint.
+// (word-wrapped to several lines) plus an open confirm dialog could
+// exceed chrome's own footprint, and clampHeight's bottom-up truncation
+// used to eat the key bar (or worse). Chrome must now shrink itself
+// (dropping the status line) rather than ever losing the key bar; the
+// confirm dialog (now clamped to the body's own budget rather than
+// chrome, and no longer protected by buildConfirmPanel's old tiered
+// fallback -- see renderDialog) keeps its "[y]es" hint too, as long as
+// the status message hasn't starved the body budget down to nothing (a
+// repeat count of 5+ here does -- see TestConfirmDialogWrapsPromptBefore-
+// Clipping and renderDialog's own doc comment for that simplification).
 func TestConfirmWithWrappedStatusKeepsKeyBarAndYes(t *testing.T) {
 	a := testApp(t, false)
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 16})
-	a.status = strings.Repeat("a long status message that wraps across several lines ", 6)
+	a.status = strings.Repeat("a long status message that wraps across several lines ", 4)
 	sendKey(a, 'e')
 	if a.confirm == nil {
 		t.Fatal("confirm modal did not open")
@@ -699,17 +704,22 @@ func TestOverviewScrollStaysAtZeroWhenEverythingFits(t *testing.T) {
 	}
 }
 
-// TestBuildConfirmPanelWrapsPromptBeforeClipping covers the fix for
-// buildConfirmPanel clipping the prompt's raw (unwrapped) lines before
-// panelWrap word-wraps it: at a narrow width, a long single-line prompt
-// wraps to several visual lines only *after* panelWrap gets it, so
-// clipping by raw line count let the wrapped result blow right past
-// maxLines. Wrapping first, then clipping, must honor maxLines exactly.
-func TestBuildConfirmPanelWrapsPromptBeforeClipping(t *testing.T) {
-	prompt := "Discard 3 pending ops and quit? [y/n]"
-	panel := buildConfirmPanel(prompt, 40, 4)
+// TestConfirmDialogWrapsPromptBeforeClipping covers the fix for the
+// confirm dialog clipping the prompt's raw (unwrapped) lines before
+// wrapping it: at a narrow width, a long single-line prompt wraps to
+// several visual lines only *after* word-wrap, so clipping by raw line
+// count could blow right past the dialog's own budget. The confirm dialog
+// is built via panelWrapH (wrap, then clip), which must honor budget
+// exactly.
+func TestConfirmDialogWrapsPromptBeforeClipping(t *testing.T) {
+	a := testApp(t, false)
+	a.confirm = &confirm{prompt: "Discard 3 pending ops and quit? [y/n]"}
+	panel, _, ok := a.renderDialog(40, 4)
+	if !ok {
+		t.Fatal("renderDialog() ok = false, want true with a.confirm set")
+	}
 	if n := strings.Count(panel, "\n") + 1; n > 4 {
-		t.Fatalf("buildConfirmPanel(...) has %d lines, want <= 4: %q", n, panel)
+		t.Fatalf("renderDialog() panel has %d lines, want <= 4: %q", n, panel)
 	}
 }
 
@@ -954,6 +964,62 @@ func TestVMsBodyFillsHeightBudget(t *testing.T) {
 	}
 	if !strings.Contains(lines[38], "?") { // '?', the panel's bottom-left corner
 		t.Fatalf("line above the key bar = %q, want the VMs panel's own bottom border directly above it (status is blank here)", lines[38])
+	}
+}
+
+// rowOf returns the index of the first line of view containing marker, or
+// fails the test if there is none.
+func rowOf(t *testing.T, view, marker string) int {
+	t.Helper()
+	for i, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, marker) {
+			return i
+		}
+	}
+	t.Fatalf("view has no line containing %q: %q", marker, view)
+	return -1
+}
+
+// TestConfirmOverlayCentersWithoutShiftingBody covers the dialogs-as-
+// overlay fix: a modal used to replace the tab body outright, which (with
+// many rows) shifted its own scroll position around depending on how
+// much room the modal itself needed. With 40 VMs (vmSel 0) at 120x40,
+// opening the confirm must now leave the VMs table's own layout/scroll
+// completely alone -- vm00's row stays at the same screen y -- while the
+// confirm dialog itself is composited on top, horizontally centered
+// within the body (its content starts about (width - dialogWidth)/2
+// columns in, via overlay/centerXY), and the key bar remains the
+// terminal's last line throughout.
+func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(40), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.vmSel = 0
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	before := rowOf(t, a.View(), "vm00")
+
+	sendKey(a, 'e')
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+	view := a.View()
+	lines := strings.Split(view, "\n")
+
+	if after := rowOf(t, view, "vm00"); after != before {
+		t.Fatalf("vm00's row = %d after opening the confirm, want unchanged from %d (the body's own layout/scroll must not shift while a dialog is open)", after, before)
+	}
+	if !strings.Contains(lines[len(lines)-1], "[q] quit") {
+		t.Fatalf("last line = %q, want the key bar", lines[len(lines)-1])
+	}
+
+	row := rowOf(t, view, "? Confirm") // '? Confirm', the dialog's own titled top border
+	idx := strings.Index(lines[row], "? Confirm")
+	leading := lipgloss.Width(lines[row][:idx])
+	dw := dialogWidth(120)
+	wantX := (120 - dw) / 2
+	if leading < wantX-1 || leading > wantX+1 {
+		t.Fatalf("dialog row's leading width = %d, want about %d (= (120-dialogWidth(120))/2 = (120-%d)/2)", leading, wantX, dw)
 	}
 }
 

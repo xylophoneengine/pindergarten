@@ -397,29 +397,42 @@ func TestWizardManualEscResetsNode(t *testing.T) {
 }
 
 // TestWizardDialogIsCenteredAndWidthCapped covers the wizard's dialog
-// treatment: at a terminal much wider than dialogMaxWidth, the panel must
-// be capped (its top border narrower than the terminal) and horizontally
-// centered (padded with roughly equal blank space on both sides).
+// treatment: wizard.view itself now returns a tight, uncentered panel --
+// App.renderFull composites it onto the (normally, fully rendered) body
+// via overlay, using centerXY for the placement math, so it's no longer
+// meaningful to look for a literal run of blank characters in the
+// composited output (the body underneath a dialog is real content, not
+// blank space, wherever the dialog doesn't cover it). At a terminal much
+// wider than dialogMaxWidth, the raw dialog panel must still be capped
+// well under the terminal width, and centerXY's own placement math must
+// still put it well clear of the left edge.
 func TestWizardDialogIsCenteredAndWidthCapped(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
 	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 300, Height: 40})
 	sendKey(a, 'p')
 	if a.wizard == nil {
 		t.Fatal("wizard did not open")
 	}
 
-	view, _ := a.wizard.view(300, 40)
-	lines := strings.Split(view, "\n")
-	top := lines[0]
-	trimmed := strings.TrimLeft(top, " ")
-	if w := lipgloss.Width(trimmed); w >= 300 {
-		t.Fatalf("wizard dialog panel width = %d, want it capped well under the 300-column terminal", w)
+	dialog, _, ok := a.renderDialog(300, 40)
+	if !ok {
+		t.Fatal("renderDialog() ok = false, want true with a.wizard open")
 	}
-	leading := len(top) - len(trimmed)
-	if leading < 50 {
-		t.Fatalf("wizard dialog top border = %q, want it visibly centered (a large left margin at width 300)", top)
+	dw := lipgloss.Width(strings.SplitN(dialog, "\n", 2)[0])
+	if dw >= 300 {
+		t.Fatalf("wizard dialog panel width = %d, want it capped well under the 300-column terminal", dw)
+	}
+
+	x, _ := centerXY(dw, lineCount(dialog), 300, 40)
+	if x < 50 {
+		t.Fatalf("centerXY x = %d, want a large left margin centering a %d-wide dialog in a 300-column terminal", x, dw)
+	}
+
+	if !strings.Contains(a.View(), "pin plain-vm") {
+		t.Fatalf("View() = %q, want the wizard's dialog composited over the body", a.View())
 	}
 }
 

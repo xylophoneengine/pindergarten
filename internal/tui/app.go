@@ -503,7 +503,7 @@ func (a *App) clampOverviewScroll() {
 	for i, node := range projected.Topo.Nodes {
 		heights[i] = lineCount(overviewNodeCard(projected, node)) + 2 // borders
 	}
-	_, _, _, _, _, chrome := a.renderChrome()
+	_, _, _, _, chrome := a.renderChrome()
 	if max := maxStackedScroll(heights, a.bodyBudget(chrome)); a.overviewScroll > max {
 		a.overviewScroll = max
 	}
@@ -658,23 +658,24 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 }
 
 // View renders the full screen: tab row (row 0, hit-tested by mouse
-// clicks), header, tab body, optional status message and confirm modal,
-// then the status bar. Table/grid content never wraps (each render
-// function truncates its own lines to fit); status/status-bar text is
-// prose and wraps via lipgloss. Chrome -- the tab row, header, status
-// line, confirm panel, and key bar -- is assembled first, by renderChrome,
-// which shrinks it (dropping the status line, then truncating the confirm
-// panel's prompt) until it fits a.height on its own, never touching the
-// key bar or the confirm panel's "[y]es .../[n]..." line. The body then
-// gets whatever's left (bodyBudget), and is force-clipped to exactly that
-// via clipLinesTo regardless of what it rendered internally (e.g. a
-// bordered panel's own height floor) -- so the body can never again push
-// chrome past a.height the way an unclamped, body-first render used to
-// (bubbletea drops overflow from the *top*, which silently shifted the
-// tab row off row 0 and threw every recorded mouse-hit y off by the same
-// amount). clampHeight/clampWidth remain a final safety net for whatever
-// still slips through (e.g. a pathologically short a.height that can't
-// even fit chrome alone).
+// clicks), header, tab body, optional status message, then the status
+// bar -- any open dialog (confirm, wizard, mem-node picker, apply flow) is
+// composited on top afterward, via renderDialog/overlay. Table/grid
+// content never wraps (each render function truncates its own lines to
+// fit); status/status-bar text is prose and wraps via lipgloss. Chrome --
+// the tab row, header, status line, and key bar -- is assembled first, by
+// renderChrome, which shrinks it (dropping the status line) until it fits
+// a.height on its own, never touching the key bar. The body then gets
+// whatever's left (bodyBudget), always the full remaining height (every
+// render function fills it -- see panelH/panelWrapH's fill option), and
+// is force-clipped to exactly that via clipLinesTo regardless of what it
+// rendered internally (e.g. a bordered panel's own height floor) -- so
+// the body can never again push chrome past a.height the way an
+// unclamped, body-first render used to (bubbletea drops overflow from the
+// *top*, which silently shifted the tab row off row 0 and threw every
+// recorded mouse-hit y off by the same amount). clampHeight/clampWidth
+// remain a final safety net for whatever still slips through (e.g. a
+// pathologically short a.height that can't even fit chrome alone).
 // Minimum terminal size below which the layout cannot be drawn honestly.
 // Like btop, a smaller window shows only a resize notice instead of a
 // half-clipped UI.
@@ -712,12 +713,28 @@ func (a *App) View() string {
 // it behind the minimum size; tests exercise the layout at small sizes
 // through it directly.
 func (a *App) renderFull() string {
-	tabs, header, statusLine, confirmPanel, keyBar, chrome := a.renderChrome()
-
+	tabs, header, statusLine, keyBar, chrome := a.renderChrome()
+	w := effectiveWidth(a.width)
 	budget := a.bodyBudget(chrome)
+
 	body, hits := a.renderBody(budget)
 	body = clipLinesTo(body, budget)
-	a.hits = offsetHits(hits, bodyY0, 0)
+
+	// Any open dialog is composited on top of the (always fully, normally
+	// rendered -- its own layout/scroll state never changes) body, centered
+	// within it, rather than replacing it: this is what keeps the body
+	// looking like a proper popup overlay instead of a prompt shifting the
+	// underlying tab's own content around. Body hits are discarded while a
+	// dialog is open -- a click outside it does nothing -- since only the
+	// dialog's own hits (if any), offset by the overlay's placement, are
+	// meaningful then.
+	if dialog, dHits, ok := a.renderDialog(w, budget); ok {
+		x, y := centerXY(lipgloss.Width(dialog), lineCount(dialog), w, budget)
+		body = overlay(body, dialog, x, y)
+		a.hits = offsetHits(dHits, bodyY0+y, x)
+	} else {
+		a.hits = offsetHits(hits, bodyY0, 0)
+	}
 
 	var b strings.Builder
 	b.WriteString(tabs)
@@ -730,10 +747,6 @@ func (a *App) renderFull() string {
 	}
 	if statusLine != "" {
 		b.WriteString(statusLine)
-		b.WriteString("\n")
-	}
-	if confirmPanel != "" {
-		b.WriteString(confirmPanel)
 		b.WriteString("\n")
 	}
 	b.WriteString(keyBar)
@@ -749,52 +762,16 @@ func lineCount(s string) int {
 	return strings.Count(s, "\n") + 1
 }
 
-// buildConfirmPanel renders the confirm modal's panel, truncating (never
-// wrapping) its prompt text to fit within maxLines total lines (borders
-// included) once space is tight: the blank separator line goes first,
-// then the prompt itself, but the borders and the "[y]es .../[n]..." key
-// line are never dropped -- a confirm modal with no visible answer key is
-// useless. When maxLines itself is too small for even that, the panel
-// still renders its unavoidable 3-line minimum (both borders plus the key
-// line) rather than disappearing.
-func buildConfirmPanel(prompt string, w, maxLines int) string {
-	const buttons = "[y]es  [n]/esc cancel"
-	// Word-wrap first (matching how panelWrap will actually render the
-	// prompt), then clip *those* visual lines -- clipping the raw,
-	// unwrapped prompt string undercounts a narrow width's real line
-	// count, letting panelWrap's own wrap blow right past maxLines.
-	dw := dialogWidth(w)
-	wrapped := lipgloss.NewStyle().Width(dw - 2).Render(prompt)
-
-	contentBudget := maxLines - 2 // top/bottom borders
-	if contentBudget < 1 {
-		contentBudget = 1
-	}
-	promptBudget := contentBudget - 2 // blank separator + buttons line
-	var body string
-	switch {
-	case promptBudget >= 1:
-		body = clipLinesTo(wrapped, promptBudget) + "\n\n" + buttons
-	case contentBudget >= 2:
-		// No room for the blank separator; keep one prompt line + buttons.
-		body = clipLinesTo(wrapped, contentBudget-1) + "\n" + buttons
-	default:
-		// Only room for the buttons line itself.
-		body = buttons
-	}
-	return panelWrap("Confirm", body, dw)
-}
-
 // renderChrome renders every part of View() apart from the tab body: the
-// tab row, header, status line, confirm panel, and key bar -- plus their
-// total line count, so View() and the diff/results scroll clamps (which
-// need to re-derive the exact body budget View() will use) share one
-// implementation instead of each duplicating the confirm-panel build.
-// The tab row, header, and key bar are a fixed cost -- never shrunk. When
-// they plus the status line and confirm panel don't fit a.height, the
-// status line is dropped first; if that alone isn't enough, the confirm
-// panel is shrunk instead (via buildConfirmPanel, truncating its prompt).
-func (a *App) renderChrome() (tabs, header, statusLine, confirmPanel, keyBar string, lines int) {
+// tab row, header, status line, and key bar -- plus their total line
+// count, so View() and the diff/results scroll clamps (which need to
+// re-derive the exact body budget View() will use) share one
+// implementation. Any open dialog is no longer part of chrome at all (see
+// renderDialog/overlay) -- it's composited onto the body afterward and
+// clamped to the body's own budget instead. The tab row, header, and key
+// bar are a fixed cost -- never shrunk; when they plus the status line
+// don't fit a.height, the status line is dropped.
+func (a *App) renderChrome() (tabs, header, statusLine, keyBar string, lines int) {
 	tabs = a.renderTabs()
 	header = a.renderHeader()
 	keyBar = a.wrapProse(a.renderStatusBar())
@@ -804,33 +781,42 @@ func (a *App) renderChrome() (tabs, header, statusLine, confirmPanel, keyBar str
 		statusLine = a.wrapProse(styleStatus(a.status))
 	}
 
-	w := effectiveWidth(a.width)
-	if a.confirm != nil {
-		panel := panelWrap("Confirm", a.confirm.prompt+"\n\n[y]es  [n]/esc cancel", dialogWidth(w))
-		confirmPanel, _ = centerDialog(panel, w)
+	lines = fixed + lineCount(statusLine)
+	if a.height > 0 && lines > a.height {
+		statusLine = ""
+		lines = fixed
 	}
-
-	lines = fixed + lineCount(statusLine) + lineCount(confirmPanel)
-	if a.height <= 0 || lines <= a.height {
-		return
-	}
-
-	// Doesn't fit: drop the status line first.
-	statusLine = ""
-	lines = fixed + lineCount(confirmPanel)
-	if lines <= a.height || a.confirm == nil {
-		return
-	}
-
-	// Still doesn't fit: shrink the confirm panel itself.
-	maxLines := a.height - fixed
-	if maxLines < 3 {
-		maxLines = 3
-	}
-	panel := buildConfirmPanel(a.confirm.prompt, w, maxLines)
-	confirmPanel, _ = centerDialog(panel, w)
-	lines = fixed + lineCount(confirmPanel)
 	return
+}
+
+// renderDialog renders whichever modal (confirm, wizard, mem-node picker,
+// apply flow) is currently open as a single self-contained panel, tight
+// to its own content -- no centering baked in, any hits 0-based relative
+// to its own top-left corner -- clamped to at most dw = dialogWidth(w)
+// wide and budget lines tall (the same budget the tab body renders into,
+// so a dialog never grows past the body's own footprint; none of these
+// stretch to fill it the way a body panel does -- a popup should stay its
+// own natural size). renderFull composites the result via overlay,
+// computing the centering offset itself so every dialog type shares one
+// placement rule instead of each rolling its own. ok is false when
+// nothing is open.
+func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
+	dw := dialogWidth(w)
+	switch {
+	case a.confirm != nil:
+		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
+		panel, _ = panelWrapH("Confirm", body, dw, budget, false)
+		return panel, nil, true
+	case a.wizard != nil:
+		p, h := a.wizard.view(dw, budget)
+		return p, h, true
+	case a.memPicker != nil:
+		p, h := a.memPicker.view(dw, budget)
+		return p, h, true
+	case a.flow != nil:
+		return a.renderFlowPanel(dw, budget), nil, true
+	}
+	return "", nil, false
 }
 
 // clampDiffScroll re-clamps a.diffScroll to the Backups tab's diff view's
@@ -849,7 +835,7 @@ func (a *App) clampDiffScroll() {
 		inner = 1
 	}
 	total := len(a.diffLinesCached(inner))
-	_, _, _, _, _, chrome := a.renderChrome()
+	_, _, _, _, chrome := a.renderChrome()
 	budget := a.bodyBudget(chrome) - 2
 	a.diffScroll = clampScroll(a.diffScroll, budget, total)
 }
@@ -880,18 +866,19 @@ func (a *App) clampResultsScroll() {
 	if inner < 1 {
 		inner = 1
 	}
-	_, _, _, _, _, chrome := a.renderChrome()
+	_, _, _, _, chrome := a.renderChrome()
 	budget := a.bodyBudget(chrome)
 	total := lineCount(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)))
 	a.flow.resultsScroll = clampScroll(a.flow.resultsScroll, budget-2, total)
 }
 
 // bodyBudget returns how many lines the tab body may use: a.height minus
-// chrome (the tab row, header, status line, confirm panel, and key bar --
-// see renderChrome), floored at 0 (never negative) since chrome always
-// wins the remaining space. a.height of 0 (before the first WindowSizeMsg)
-// is treated as unbounded, matching effectiveWidth's own convention --
-// there's nothing sane to budget against yet.
+// chrome (the tab row, header, status line, and key bar -- see
+// renderChrome; an open dialog is no longer part of chrome, see
+// renderDialog), floored at 0 (never negative) since chrome always wins
+// the remaining space. a.height of 0 (before the first WindowSizeMsg) is
+// treated as unbounded, matching effectiveWidth's own convention -- there's
+// nothing sane to budget against yet.
 func (a *App) bodyBudget(chrome int) int {
 	if a.height <= 0 {
 		return fallbackHeight
@@ -988,31 +975,26 @@ func (a *App) renderHeader() string {
 	return title + strings.Repeat(" ", gap) + rendered
 }
 
-// renderBody renders the active tab's body (or the wizard/apply-flow
-// screen in its place) alongside its clickable regions (0-based, relative
-// to the body's own top-left corner); it never panics ahead of the first
-// scanDoneMsg. budget is how many lines the body may use (see bodyBudget);
-// every render function either scrolls (keeping whatever's selected
-// visible) or truncates to stay within it.
+// renderBody renders the active tab's own body alongside its clickable
+// regions (0-based, relative to the body's own top-left corner); it never
+// panics ahead of the first scanDoneMsg. budget is how many lines the
+// body may use (see bodyBudget); every render function fills it exactly
+// (via panelH/panelWrapH's fill option). This always renders the plain
+// tab underneath, even while a dialog (confirm/wizard/mem-node picker/
+// apply flow) is open -- renderFull composites that on top separately, via
+// renderDialog/overlay -- so the active tab's own layout and scroll
+// position never change just because a dialog happens to be open over it.
 func (a *App) renderBody(budget int) (string, []hit) {
 	w := effectiveWidth(a.width)
 
 	if a.snap == nil {
+		msg := "scanning..."
 		if a.scanErr != nil {
-			return fmt.Sprintf("scan error: %v", a.scanErr), nil
+			msg = fmt.Sprintf("scan error: %v", a.scanErr)
 		}
-		return "scanning...", nil
+		return padLinesTo(msg, budget), nil
 	}
 
-	if a.wizard != nil {
-		return a.wizard.view(w, budget)
-	}
-	if a.memPicker != nil {
-		return a.memPicker.view(w, budget)
-	}
-	if a.flow != nil {
-		return a.renderFlow(w, budget), nil
-	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
 	case 0:
@@ -1051,32 +1033,30 @@ func (a *App) renderDiffView(w, budget int) string {
 	return panelInner("diff", body, w, contentBudget)
 }
 
-// renderFlow renders the apply flow's active screen inside a titled panel.
-// The review/drift/running screens are prose (word-wrap); the results
-// screen scrolls like renderDiffView (via a.flow.resultsScroll), since it
-// can be one line per applied op and there's no other "selected row" to
-// derive a window from.
-func (a *App) renderFlow(w, budget int) string {
-	dw := dialogWidth(w)
-	var out string
+// renderFlowPanel renders the apply flow's active screen inside a titled
+// panel, tight to its own content (no centering -- renderDialog/overlay
+// handle that, as one of the dialogs it composites over the body). The
+// review/drift/running screens are prose (word-wrap); the results screen
+// scrolls like renderDiffView (via a.flow.resultsScroll), since it can be
+// one line per applied op and there's no other "selected row" to derive a
+// window from.
+func (a *App) renderFlowPanel(dw, budget int) string {
 	if a.flow.screen != flowResults {
-		out, _ = panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget, false)
-	} else {
-		inner := dw - 2
-		if inner < 1 {
-			inner = 1
-		}
-		lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)), "\n")
-		contentBudget := budget - 2
-		visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
-		body := strings.Join(visible, "\n")
-		if footer := scrollFooter(offset, len(visible), total); footer != "" {
-			body += "\n" + keyBarLabelStyle.Render(footer)
-		}
-		out = panelInner(flowTitle(a.flow.screen), body, dw, 0)
+		out, _ := panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget, false)
+		return out
 	}
-	centered, _ := centerDialog(out, w)
-	return centered
+	inner := dw - 2
+	if inner < 1 {
+		inner = 1
+	}
+	lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)), "\n")
+	contentBudget := budget - 2
+	visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
+	body := strings.Join(visible, "\n")
+	if footer := scrollFooter(offset, len(visible), total); footer != "" {
+		body += "\n" + keyBarLabelStyle.Render(footer)
+	}
+	return panelInner(flowTitle(a.flow.screen), body, dw, 0)
 }
 
 // flowTitle names the apply-flow panel by its current screen.

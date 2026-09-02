@@ -92,16 +92,14 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 }
 
 // view renders the node list (with free memory) and the VM's GPU node, if
-// any, inside a titled panel, trimmed to fit budget, as a centered dialog
-// (dialogWidth(width) wide). Alongside the string it returns one "memnode"
+// any, inside a titled panel dw wide, trimmed to fit budget -- no
+// centering baked in (the caller composites it onto the body via overlay
+// and does that itself). Alongside the string it returns one "memnode"
 // hit per node line (dropped if scrolled out of view), bounded to the
-// panel's inner width (so a click in the blank space centering leaves
-// beside it can't land on it), screen-absolute (0-based relative to the
-// picker body's own top-left corner, already shifted by the centering
-// offset) and indexed by node ID (so a click maps straight onto the same
-// pickMemNode path as its digit key).
-func (p *memNodePicker) view(width, budget int) (string, []hit) {
-	dw := dialogWidth(width)
+// panel's inner width, 0-based relative to the picker panel's own
+// top-left corner, and indexed by node ID (so a click maps straight onto
+// the same pickMemNode path as its digit key).
+func (p *memNodePicker) view(dw, budget int) (string, []hit) {
 	var b strings.Builder
 	var hits []hit
 	for i, n := range p.snap.Topo.Nodes {
@@ -115,8 +113,7 @@ func (p *memNodePicker) view(width, budget int) (string, []hit) {
 	title := "set memory node for " + p.vm
 	body, kept := panelWrapH(title, strings.TrimRight(b.String(), "\n"), dw, budget, false)
 	hits = offsetHits(clipHitsToWindow(hits, kept, dw-2), 1, 1)
-	centered, xOff := centerDialog(body, width)
-	return centered, offsetHits(hits, 0, xOff)
+	return body, hits
 }
 
 // statusBarHint returns the status bar's replacement content while the

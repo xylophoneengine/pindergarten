@@ -183,30 +183,19 @@ func panelInner(title, body string, w, h int) string {
 	return lines[0] + "\n" + lines[1]
 }
 
-// panelWrap renders body (prose: sentences, messages, diffs) inside a
-// titled rounded-border box of total width w, word-wrapping via lipgloss
-// instead of truncating. Natural height, same convention as panel.
-func panelWrap(title, body string, w int) string {
-	if w < 4 {
-		w = 4
-	}
-	inner := w - 2
-	wrapped := lipgloss.NewStyle().Width(inner).Render(body)
-	return panelInner(title, wrapped, w, 0)
-}
-
 // panelH renders body (tabular/grid content, truncated -- never wrapped --
 // to fit) inside a titled rounded-border box of total width w and height
 // clip h: body is truncated (top-down, no scroll tracking -- callers
-// whose content has a natural "keep this visible" target should pre-slice
-// it, e.g. via scrollWindow, before calling this) to at most h-2 content
-// lines. When fill is true, content shorter than h-2 is padded (blank
-// interior) up to it instead of leaving the panel at its own shorter
-// natural height -- for a tab's body panels, which must occupy their
-// whole allotted budget (see panelInner); dialogs pass fill=false,
-// clamping but never stretching. Returns the panel plus how many content
-// lines are real (not padding), so the caller can drop any hits recorded
-// past that point via clipHitsToWindow.
+// whose content has a natural
+// "keep this visible" target should pre-slice it, e.g. via scrollWindow,
+// before calling this) to at most h-2 content lines. When fill is true,
+// content shorter than h-2 is padded (blank interior) up to it instead of
+// leaving the panel at its own shorter natural height -- for a tab's body
+// panels, which must occupy their whole allotted budget (see
+// panelInner); dialogs pass fill=false, clamping but never stretching.
+// Returns the panel plus how many content lines are real (not padding),
+// so the caller can drop any hits recorded past that point via
+// clipHitsToWindow.
 func panelH(title, body string, w, h int, fill bool) (string, int) {
 	if w < 4 {
 		w = 4
@@ -363,6 +352,21 @@ func clipLinesTo(s string, n int) string {
 		lines = lines[:n]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// padLinesTo pads s with blank trailing lines to at least n lines total, a
+// no-op if it already has n or more. clipLinesTo's counterpart: used for
+// the one piece of body content with no panel of its own to stretch (the
+// pre-scan "scanning..."/"scan error" placeholder) so it still fills its
+// budget -- otherwise a dialog centered vertically within that budget
+// could land past its single real line and never composite (overlay skips
+// any row beyond what the background actually has).
+func padLinesTo(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) >= n {
+		return s
+	}
+	return s + strings.Repeat("\n", n-len(lines))
 }
 
 // minSecondaryBudget is the smallest height budget worth giving a stacked
@@ -528,16 +532,58 @@ func dialogWidth(w int) int {
 	return limit
 }
 
-// centerDialog horizontally centers body (already rendered at some width
-// <= w) within a total width of w. Returns the placed string plus the
-// x-offset (columns of left padding) the placement added, since a caller
-// with recorded hit regions needs to shift their x by that same amount.
-func centerDialog(body string, w int) (string, int) {
-	x := (w - lipgloss.Width(body)) / 2
+// centerXY returns the (x, y) top-left offset that centers a dw x dh box
+// within a wf x hf field, clamped to >= 0 -- the one placement rule every
+// dialog (confirm, wizard, mem-node picker, apply flow) shares, via
+// overlay, instead of each rolling its own centering.
+func centerXY(dw, dh, wf, hf int) (x, y int) {
+	x = (wf - dw) / 2
 	if x < 0 {
 		x = 0
 	}
-	return lipgloss.PlaceHorizontal(w, lipgloss.Center, body), x
+	y = (hf - dh) / 2
+	if y < 0 {
+		y = 0
+	}
+	return x, y
+}
+
+// overlay composites dialog over base, splicing each of dialog's lines
+// into the background row at column x starting from row y: the
+// background's own content survives up to column x (its ANSI state cut
+// cleanly via ansi.Truncate, then explicitly reset so no leftover style
+// bleeds into the dialog); the rest of that row is fully replaced by the
+// dialog's own line, padded back out to the background's original line
+// width -- attempting to preserve the tail's ANSI styling past an
+// arbitrary cut point is unreliable (ansi.TruncateLeft/Cut can drop a
+// still-open style's start code), so it's simply blanked rather than
+// spliced back in. Rows the dialog doesn't reach are left untouched, and
+// the underlying body's own layout/scroll state never changes -- only
+// what's drawn on top of it does.
+func overlay(base, dialog string, x, y int) string {
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	baseLines := strings.Split(base, "\n")
+	dialogLines := strings.Split(dialog, "\n")
+	for i, dl := range dialogLines {
+		row := y + i
+		if row < 0 || row >= len(baseLines) {
+			continue
+		}
+		bg := baseLines[row]
+		total := lipgloss.Width(bg)
+		left := padRight(ansi.Truncate(bg, x, ""), x)
+		spliced := left + "\x1b[0m" + dl
+		if w := lipgloss.Width(spliced); w < total {
+			spliced += strings.Repeat(" ", total-w)
+		}
+		baseLines[row] = spliced
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 // bar renders a fixed-width single-tone ASCII progress bar, e.g.

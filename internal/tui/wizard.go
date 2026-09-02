@@ -235,15 +235,15 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 
 // view renders the active screen against w.base (the self-stripped snapshot
 // Propose ran against, used for the node map's live pin state) as a
-// centered dialog (dialogWidth(width) wide): a titled node-map panel (grid
+// self-contained dialog panel dw wide: a titled node-map panel (grid
 // content, so it truncates rather than wraps) and an info panel below it
-// (prose, so it wraps), both trimmed to fit budget. Alongside the string
-// it returns the manual screen's per-core hits, screen-absolute (0-based
-// relative to the wizard body's own top-left corner, already shifted by
-// the centering offset) -- the proposal screen's map isn't clickable, so
-// it reports none.
-func (w *wizard) view(width, budget int) (string, []hit) {
-	dw := dialogWidth(width)
+// (prose, so it wraps), both trimmed to fit budget -- no centering baked
+// in (the caller composites it onto the body via overlay and does that
+// itself, so every dialog type shares one placement rule). Alongside the
+// string it returns the manual screen's per-core hits, 0-based relative
+// to the wizard panel's own top-left corner -- the proposal screen's map
+// isn't clickable, so it reports none.
+func (w *wizard) view(dw, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d", w.vm, w.vcpus(), w.node)
 
 	var grid string
@@ -285,8 +285,7 @@ func (w *wizard) view(width, budget int) (string, []hit) {
 	if infoPanel != "" {
 		out = gridPanel + "\n" + infoPanel
 	}
-	centered, xOff := centerDialog(out, width)
-	return centered, offsetHits(hits, 0, xOff)
+	return out, hits
 }
 
 // statusBarHint returns the status bar's replacement content while the
