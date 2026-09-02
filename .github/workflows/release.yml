@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rocky10
+            image: quay.io/rockylinux/rockylinux:10
+            setup: |
+              dnf -y install dnf-plugins-core
+              dnf config-manager --set-enabled crb
+              dnf -y install gcc git make tar gzip libvirt-devel
+          - name: ubuntu26.04
+            image: ubuntu:26.04
+            setup: |
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates gcc git make libvirt-dev
+    steps:
+      - name: install build dependencies
+        run: ${{ matrix.setup }}
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go test ./...
+      - name: build
+        run: |
+          make build VERSION="${GITHUB_REF_NAME}"
+          out="pindergarten-${GITHUB_REF_NAME}-${{ matrix.name }}-$(uname -m)"
+          mv pindergarten "$out"
+          sha256sum "$out" > "$out.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            pindergarten-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*
