@@ -1048,7 +1048,7 @@ func (a *App) renderDiffView(w, budget int) string {
 	if footer := scrollFooter(offset, len(visible), total); footer != "" {
 		body += "\n" + keyBarLabelStyle.Render(footer)
 	}
-	return panelInner("diff", body, w)
+	return panelInner("diff", body, w, contentBudget)
 }
 
 // renderFlow renders the apply flow's active screen inside a titled panel.
@@ -1060,7 +1060,7 @@ func (a *App) renderFlow(w, budget int) string {
 	dw := dialogWidth(w)
 	var out string
 	if a.flow.screen != flowResults {
-		out, _ = panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget)
+		out, _ = panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget, false)
 	} else {
 		inner := dw - 2
 		if inner < 1 {
@@ -1073,7 +1073,7 @@ func (a *App) renderFlow(w, budget int) string {
 		if footer := scrollFooter(offset, len(visible), total); footer != "" {
 			body += "\n" + keyBarLabelStyle.Render(footer)
 		}
-		out = panelInner(flowTitle(a.flow.screen), body, dw)
+		out = panelInner(flowTitle(a.flow.screen), body, dw, 0)
 	}
 	centered, _ := centerDialog(out, w)
 	return centered

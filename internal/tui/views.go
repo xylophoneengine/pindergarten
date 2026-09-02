@@ -98,15 +98,15 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 }
 
 // renderOverviewTab renders the Overview tab: one bordered panel per NUMA
-// node (side by side when each would get at least sideCardMinWidth
-// columns -- each then independently height-clipped to budget, since
-// they're width-independent columns -- else stacked, starting from
-// scroll (clamped by the caller via App.clampOverviewScroll; up/down/wheel
-// on the Overview tab move it), showing as many full cards as fit budget
-// rather than truncating every card's content -- clamping each one's
-// height to whatever budget is actually left as it goes, so even a first
-// card taller than the whole budget doesn't overflow it -- so a short
-// terminal with many nodes doesn't push the key bar off-screen. A
+// node (side by side, each at the full budget height -- else stacked,
+// starting from scroll, clamped by the caller via App.clampOverviewScroll;
+// up/down/wheel on the Overview tab move it), showing as many full cards
+// as fit budget at their natural height (fitStackedCount) rather than
+// truncating every card's content, then splitting budget evenly across
+// just those shown cards (splitStackedFill) so they stretch to fill it
+// exactly instead of leaving blank space below the last one -- so a short
+// terminal with many nodes doesn't push the key bar off-screen, and a
+// tall one doesn't leave the tab looking squished to the top either. A
 // trailing "+N more nodes (scroll)" line appears once some are hidden.
 // Then a one-line-per-VM list of any domains flagged Unsupported.
 func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
@@ -119,6 +119,7 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 	}
 
 	start, n := 0, len(s.Topo.Nodes)
+	cardBudget := budget
 	if !sideBySide {
 		start = scroll
 		if start < 0 {
@@ -128,20 +129,22 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 			start = len(heights) - 1
 		}
 		n = fitStackedCount(heights[start:], budget)
+		if hidden := len(s.Topo.Nodes) - n; hidden > 0 {
+			cardBudget-- // reserve the "+N more nodes (scroll)" footer line
+			if cardBudget < 1 {
+				cardBudget = 1
+			}
+		}
 	}
+	fillHeights := splitStackedFill(cardBudget, n)
 	panels := make([]string, n)
-	used := 0
 	for k := 0; k < n; k++ {
 		i := start + k
 		h := budget
 		if !sideBySide {
-			h = heights[i]
-			if remaining := budget - used; h > remaining {
-				h = remaining
-			}
+			h = fillHeights[k]
 		}
-		panels[k], _ = panelH(fmt.Sprintf("node %d", s.Topo.Nodes[i].ID), bodies[i], cardWidths[i], h)
-		used += lineCount(panels[k])
+		panels[k], _ = panelH(fmt.Sprintf("node %d", s.Topo.Nodes[i].ID), bodies[i], cardWidths[i], h, true)
 	}
 	out := joinPanels(panels, sideBySide)
 
@@ -303,11 +306,10 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	// When the node panels stack among themselves too (nodeSideBySide
 	// false), show as many full ones as fit nodeAreaBudget -- windowed
 	// around the cursor's own node, so it's always among them -- rather
-	// than giving every one that whole budget independently (panelH never
-	// pads a panel shorter than its own natural height, so N panels each
-	// individually capped at, but not divided by, nodeAreaBudget could
-	// still sum to N times that; fixed below by clamping each to whatever
-	// budget is left as they're laid out).
+	// than giving every one that whole budget independently, then split
+	// nodeAreaBudget evenly across just those shown (splitStackedFill) so
+	// they stretch to fill it exactly instead of leaving blank space below
+	// the last one.
 	start, numNodePanels := 0, len(s.Topo.Nodes)
 	if !nodeSideBySide {
 		cursorNode := -1
@@ -319,6 +321,7 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		}
 		start, numNodePanels = fitStackedWindow(nodeHeights, nodeAreaBudget, cursorNode)
 	}
+	fillHeights := splitStackedFill(nodeAreaBudget, numNodePanels)
 
 	panels := make([]string, numNodePanels)
 	var hits []hit
@@ -333,12 +336,9 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		}
 		h := nodeAreaBudget
 		if !nodeSideBySide {
-			h = nodeHeights[i]
-			if remaining := nodeAreaBudget - cumY; h > remaining {
-				h = remaining
-			}
+			h = fillHeights[k]
 		}
-		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], h)
+		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], h, true)
 		panels[k] = p
 
 		wLimit := cpuMapHitXLimit(len(nodeCores(s, node.ID)), nodePanelWidths[i]-2)
@@ -355,7 +355,7 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 
 	var detailPanel string
 	if secondaryBudget > 0 {
-		detailPanel, _ = panelWrapH("core detail", cpuMapDetail(s, cursor), secondaryW, secondaryBudget)
+		detailPanel, _ = panelWrapH("core detail", cpuMapDetail(s, cursor), secondaryW, secondaryBudget, true)
 	}
 
 	if sideBySide {
@@ -776,7 +776,7 @@ func renderVMsTab(s *model.Snapshot, sel, w, budget int) (string, []hit) {
 	}
 
 	table, hits := renderVMs(cols, sel, primaryW-2, primaryBudget-2)
-	tablePanel := panel("VMs", table, primaryW)
+	tablePanel, _ := panelH("VMs", table, primaryW, primaryBudget, true)
 	hits = offsetHits(hits, 1, 1)
 
 	title := "detail"
@@ -785,7 +785,7 @@ func renderVMsTab(s *model.Snapshot, sel, w, budget int) (string, []hit) {
 	}
 	var detailPanel string
 	if secondaryBudget > 0 {
-		detailPanel, _ = panelWrapH(title, vmDetail(s, sel, secondaryW-2), secondaryW, secondaryBudget)
+		detailPanel, _ = panelWrapH(title, vmDetail(s, sel, secondaryW-2), secondaryW, secondaryBudget, true)
 	}
 
 	if sideBySide {

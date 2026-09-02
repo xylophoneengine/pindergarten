@@ -473,12 +473,12 @@ func renderPendingTab(q model.Queue, sel, w, budget int) (string, []hit) {
 			hits = append(hits, hit{y0: i, y1: i + 1, x0: 0, x1: primaryW - 2, kind: "pending", index: offset + i})
 		}
 	}
-	listPanel := panel("Pending", list, primaryW)
+	listPanel, _ := panelH("Pending", list, primaryW, primaryBudget, true)
 	hits = offsetHits(hits, 1, 1)
 
 	var detailPanel string
 	if secondaryBudget > 0 {
-		detailPanel, _ = panelWrapH("detail", pendingOpDetail(q, sel), secondaryW, secondaryBudget)
+		detailPanel, _ = panelWrapH("detail", pendingOpDetail(q, sel), secondaryW, secondaryBudget, true)
 	}
 
 	if sideBySide {

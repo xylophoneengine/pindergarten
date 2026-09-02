@@ -925,6 +925,38 @@ func manyVMXMLs(n int) map[string]string {
 	return xmls
 }
 
+// TestVMsBodyFillsHeightBudget covers the fix for "TUI squished to the
+// top": before, a body panel shorter than its budget (e.g. 5 VMs' worth of
+// table + detail rows, well under a 40-row terminal) left a large blank
+// gap between it and the key bar, wherever a terminal's actual height
+// happened to exceed the content's own natural size. At 120x40, View()
+// must be exactly 40 lines, its last line the key bar, the line above it
+// either the status line or (blank status, as here) directly the VMs
+// panel's own bottom border -- i.e. the panel stretches (via panelH's
+// fill option) all the way down to meet the status/key-bar row, with no
+// gap in between.
+func TestVMsBodyFillsHeightBudget(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(5), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != 40 {
+		t.Fatalf("View() has %d lines, want exactly 40: %q", len(lines), view)
+	}
+	if !strings.Contains(lines[39], "[q] quit") {
+		t.Fatalf("last line = %q, want the key bar", lines[39])
+	}
+	if a.status != "" {
+		t.Fatalf("a.status = %q, want empty for this scenario", a.status)
+	}
+	if !strings.Contains(lines[38], "?") { // '?', the panel's bottom-left corner
+		t.Fatalf("line above the key bar = %q, want the VMs panel's own bottom border directly above it (status is blank here)", lines[38])
+	}
+}
+
 // TestVMsHeightBudgetKeepsSelectionVisibleAndClickable covers the fix for
 // bubbletea silently dropping lines off the *top* of a taller-than-
 // terminal view (which shifted the tab row off row 0 and threw every

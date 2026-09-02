@@ -275,11 +275,11 @@ func (w *wizard) view(width, budget int) (string, []hit) {
 	}
 
 	gridBudget, infoBudget := splitStackedBudget(budget, lineCount(grid))
-	gridPanel, kept := panelH(title, grid, dw, gridBudget)
+	gridPanel, kept := panelH(title, grid, dw, gridBudget, false)
 	hits := offsetHits(clipHitsToWindow(gridHits, kept, dw-2), 1, 1)
 	infoPanel := ""
 	if infoBudget > 0 {
-		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), dw, infoBudget)
+		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), dw, infoBudget, false)
 	}
 	out := gridPanel
 	if infoPanel != "" {

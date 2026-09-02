@@ -211,17 +211,20 @@ func (a *App) backupsCount() int {
 func (a *App) renderBackupsTab(sel, w, budget int) (string, []hit) {
 	entries, err := backup.List(a.backupDir)
 	if err != nil {
-		return panel("Backups", fmt.Sprintf("error listing backups: %v", err), w), nil
+		p, _ := panelH("Backups", fmt.Sprintf("error listing backups: %v", err), w, budget, true)
+		return p, nil
 	}
 	if len(entries) == 0 {
-		return panel("Backups", fmt.Sprintf("no backups in %s", a.backupDir), w), nil
+		p, _ := panelH("Backups", fmt.Sprintf("no backups in %s", a.backupDir), w, budget, true)
+		return p, nil
 	}
 
 	rowBudget := budget - 3 // 2 borders + 1 header row
 	visible, offset, _ := scrollWindow(entries, rowBudget, sel)
 
 	table, hits := backupsTable(entries, visible, sel, offset, w-2)
-	return panel("Backups", table, w), offsetHits(hits, 1, 1)
+	p, _ := panelH("Backups", table, w, budget, true)
+	return p, offsetHits(hits, 1, 1)
 }
 
 // backupsEntry returns the sel-th entry from backup.List(a.backupDir),

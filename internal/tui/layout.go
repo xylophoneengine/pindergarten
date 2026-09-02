@@ -155,13 +155,23 @@ func spliceTitle(border, title string) string {
 
 // panelInner assembles the titled border box around body, which the
 // caller has already fit to w-2 columns (via truncateLines for tables/
-// grids, or lipgloss's own Width-wrap for prose).
-func panelInner(title, body string, w int) string {
+// grids, or lipgloss's own Width-wrap for prose). h > 0 pads the box (via
+// lipgloss's own Height) to exactly h content lines when body is naturally
+// shorter, so a panel with less content than its budget still visually
+// fills it (blank interior) instead of leaving the terminal looking
+// squished/empty below; h <= 0 leaves it at body's own natural height --
+// dialogs (a small popup) use that: they should clamp to, never stretch
+// to, the space available.
+func panelInner(title, body string, w, h int) string {
 	if w < 4 {
 		w = 4
 	}
 	inner := w - 2
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(inner).Render(body)
+	style := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(inner)
+	if h > 0 {
+		style = style.Height(h)
+	}
+	box := style.Render(body)
 	if title == "" {
 		return box
 	}
@@ -173,35 +183,31 @@ func panelInner(title, body string, w int) string {
 	return lines[0] + "\n" + lines[1]
 }
 
-// panel renders body (tabular/grid content) inside a titled rounded-border
-// box of total width w (borders count toward w): every line is truncated,
-// never wrapped, to fit.
-func panel(title, body string, w int) string {
-	if w < 4 {
-		w = 4
-	}
-	return panelInner(title, truncateLines(body, w-2), w)
-}
-
 // panelWrap renders body (prose: sentences, messages, diffs) inside a
 // titled rounded-border box of total width w, word-wrapping via lipgloss
-// instead of truncating.
+// instead of truncating. Natural height, same convention as panel.
 func panelWrap(title, body string, w int) string {
 	if w < 4 {
 		w = 4
 	}
 	inner := w - 2
 	wrapped := lipgloss.NewStyle().Width(inner).Render(body)
-	return panelInner(title, wrapped, w)
+	return panelInner(title, wrapped, w, 0)
 }
 
-// panelH is panel with an additional height clip: body is truncated
-// (top-down, no scroll tracking -- callers whose content has a natural
-// "keep this visible" target should pre-slice it, e.g. via scrollWindow,
-// before calling this) to at most h-2 content lines. Returns the panel
-// plus how many content lines actually survived, so the caller can drop
-// any hits recorded past that point via clipHitsToWindow.
-func panelH(title, body string, w, h int) (string, int) {
+// panelH renders body (tabular/grid content, truncated -- never wrapped --
+// to fit) inside a titled rounded-border box of total width w and height
+// clip h: body is truncated (top-down, no scroll tracking -- callers
+// whose content has a natural "keep this visible" target should pre-slice
+// it, e.g. via scrollWindow, before calling this) to at most h-2 content
+// lines. When fill is true, content shorter than h-2 is padded (blank
+// interior) up to it instead of leaving the panel at its own shorter
+// natural height -- for a tab's body panels, which must occupy their
+// whole allotted budget (see panelInner); dialogs pass fill=false,
+// clamping but never stretching. Returns the panel plus how many content
+// lines are real (not padding), so the caller can drop any hits recorded
+// past that point via clipHitsToWindow.
+func panelH(title, body string, w, h int, fill bool) (string, int) {
 	if w < 4 {
 		w = 4
 	}
@@ -213,18 +219,24 @@ func panelH(title, body string, w, h int) (string, int) {
 	if budget < 1 {
 		budget = 1
 	}
-	if len(lines) > budget {
+	kept := len(lines)
+	if kept > budget {
 		lines = lines[:budget]
-	} else {
-		budget = len(lines)
+		kept = budget
 	}
-	return panelInner(title, strings.Join(lines, "\n"), w), budget
+	padTo := 0
+	if fill {
+		padTo = budget
+	}
+	return panelInner(title, strings.Join(lines, "\n"), w, padTo), kept
 }
 
-// panelWrapH is panelWrap with the same height clip as panelH (word-wrap
-// first, then truncate top-down to at most h-2 lines). Returns the panel
-// plus how many content lines survived.
-func panelWrapH(title, body string, w, h int) (string, int) {
+// panelWrapH renders body (prose, word-wrapped) inside a titled
+// rounded-border box, with the same height clip (and fill option) as
+// panelH: word-wrap first, then truncate top-down to at most h-2 lines,
+// padding to fill when fill is true. Returns the panel plus how many
+// content lines are real (not padding).
+func panelWrapH(title, body string, w, h int, fill bool) (string, int) {
 	if w < 4 {
 		w = 4
 	}
@@ -241,12 +253,16 @@ func panelWrapH(title, body string, w, h int) (string, int) {
 	if budget < 1 {
 		budget = 1
 	}
-	if len(lines) > budget {
+	kept := len(lines)
+	if kept > budget {
 		lines = lines[:budget]
-	} else {
-		budget = len(lines)
+		kept = budget
 	}
-	return panelInner(title, strings.Join(lines, "\n"), w), budget
+	padTo := 0
+	if fill {
+		padTo = budget
+	}
+	return panelInner(title, strings.Join(lines, "\n"), w, padTo), kept
 }
 
 // fitStackedCount returns how many of n stacked panels (heights[i] lines
@@ -357,15 +373,20 @@ const minSecondaryBudget = 4
 // splitStackedBudget divides a stacked tab's total body-height budget
 // between its primary (table/grid) panel and its secondary (detail) one:
 // the primary gets only what it naturally needs (primaryNaturalLines + 2
-// for its borders), so a short list doesn't starve the detail panel, and
-// the secondary gets the rest -- down to a minimum reserve, below which
-// it's dropped entirely (budget 0) rather than rendered as an unreadable
-// sliver.
+// for its borders), capped at ~60% of budget so a long list never starves
+// the detail panel down to nothing, and the secondary gets the rest --
+// down to a minimum reserve, below which it's dropped entirely (budget 0)
+// rather than rendered as an unreadable sliver. Both returned budgets are
+// meant to be filled exactly (via panelH/panelWrapH's fill option), not
+// merely treated as a ceiling, so together they always sum to budget.
 func splitStackedBudget(budget, primaryNaturalLines int) (primary, secondary int) {
 	if budget <= minSecondaryBudget+3 {
 		return budget, 0
 	}
 	need := primaryNaturalLines + 2
+	if cap := budget * 3 / 5; need > cap { // ~60% of budget
+		need = cap
+	}
 	if max := budget - minSecondaryBudget; need > max {
 		need = max
 	}
@@ -373,6 +394,27 @@ func splitStackedBudget(budget, primaryNaturalLines int) (primary, secondary int
 		need = 3
 	}
 	return need, budget - need
+}
+
+// splitStackedFill divides budget evenly across n same-priority panels
+// (Overview's node cards, the CPU Map's per-node panels) that all stretch
+// to fill their share via panelH's fill option, once fitStackedCount/
+// fitStackedWindow has already picked which (and how many) of them to
+// show -- any remainder goes to the last panel, mirroring equalSplit's own
+// convention for dividing a width. Panics-free for n <= 0 (returns nil).
+func splitStackedFill(budget, n int) []int {
+	if n <= 0 {
+		return nil
+	}
+	base, extra := budget/n, budget%n
+	out := make([]int, n)
+	for i := range out {
+		out[i] = base
+		if i >= n-extra {
+			out[i]++
+		}
+	}
+	return out
 }
 
 // scrollWindow slices items (already-built content, one row per visual
