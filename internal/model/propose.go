@@ -110,10 +110,8 @@ func proposeOnNode(s *Snapshot, vm *VM, node int, allowed []int, rationale []str
 	// Thread selection: pack into the fewest L3 cache domains first (both
 	// siblings, in core order), then spill onto the least-used remaining
 	// threads of the same node if that is not enough.
-	pins, note, warning := selectThreads(s, node, vm.VCPUs, allowed)
-	if warning != "" {
-		warnings = append(warnings, warning)
-	}
+	pins, note, warns := selectThreads(s, node, vm.VCPUs, allowed)
+	warnings = append(warnings, warns...)
 	if note != "" {
 		rationale = append(rationale, note)
 	}
@@ -249,13 +247,16 @@ func nodeThreadCount(topo *hostinfo.Topology, node int) int {
 // node. It first tries to pack the VM into as few L3 cache domains as
 // possible: among node's fully-free cores (both allowed, if allowed is
 // set, and unclaimed), grouped by L3 domain, it picks the smallest domain
-// that alone has enough free cores (best fit) -- so a domain a few cores
-// short of empty is preferred over fragmenting a domain that would
-// otherwise stay wholly free for a later VM. If no single domain has
-// enough, it spreads over as few domains as it can (largest-free-first,
-// ties by lower L3 id) until enough free cores are gathered or every
-// domain has been used. Cores with L3 == -1 (unknown cache topology) all
-// fall into one pseudo-group, so a host with no cache data degrades to a
+// whose free THREAD count alone covers vcpus (best fit) -- so a domain a
+// few cores short of empty is preferred over fragmenting a domain that
+// would otherwise stay wholly free for a later VM. If no single domain
+// has enough, it spreads over as few domains as it can (largest-free-
+// thread-first, ties by lower L3 id) until enough free threads are
+// gathered or every domain has been used -- even when that total still
+// falls short (the only domain that exists, too small on its own), in
+// which case the placement note still names it and the fallback below
+// fills the rest. Cores with L3 == -1 (unknown cache topology) all fall
+// into one pseudo-group, so a host with no cache data degrades to a
 // single group covering every free core -- plain core order, as before
 // this packing rule existed. Whatever fully-free cores this yields fills
 // vcpus first, both siblings of a core before the next core, in core
@@ -270,12 +271,15 @@ func nodeThreadCount(topo *hostinfo.Topology, node int) int {
 // needs to report "not enough", only which VMs got shared onto.
 //
 // Returns the pins, a placement note describing which domain(s) the
-// fully-free part came from (empty if none did -- no fully-free cores at
-// all, or only one domain existed and it still wasn't enough, same as
-// before this rule), and a warning combining the cross-domain-spread and
-// thread-sharing sentences that apply (space-joined; empty if neither
-// applies).
-func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]int, string, string) {
+// fully-free part came from (empty only when there were no fully-free
+// cores at all), and the warnings that apply, in order: the
+// cross-domain-spread sentence (only when more than one domain was
+// needed to cover vcpus), then the thread-sharing sentence (only when the
+// fallback had to reuse an already-claimed thread) -- nil if neither
+// applies. Each is its own slice element rather than one joined string:
+// the wizard renders one Warning per line and truncates at the dialog
+// width, so a joined sentence loses its second half.
+func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]int, string, []string) {
 	var allowedSet map[int]bool
 	if allowed != nil {
 		allowedSet = make(map[int]bool, len(allowed))
@@ -284,6 +288,12 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 		}
 	}
 	inAllowed := func(t int) bool { return allowedSet == nil || allowedSet[t] }
+	// coreAllowed reports whether every one of c's threads is allowed; a
+	// core counts as usable only when ALL of its threads pass, never on a
+	// bare majority. This can never actually reject a core today: the
+	// wizard's "within: L3 #k" filter -- the only caller that ever sets
+	// allowed -- always passes a whole L3 domain's threads, so every core
+	// in that domain already has every one of its threads allowed.
 	coreAllowed := func(c hostinfo.Core) bool {
 		for _, t := range c.Threads {
 			if !inAllowed(t) {
@@ -301,13 +311,9 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 	}
 	var groups []*l3Group
 	byL3 := make(map[int]*l3Group)
-	threadsPerCore := 0
 	for _, c := range s.Topo.Cores {
 		if c.Node != node || !coreFullyFree(s, c) || !coreAllowed(c) {
 			continue
-		}
-		if threadsPerCore == 0 {
-			threadsPerCore = len(c.Threads)
 		}
 		g, ok := byL3[c.L3]
 		if !ok {
@@ -317,20 +323,30 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 		}
 		g.cores = append(g.cores, c)
 	}
+	groupThreads := func(g *l3Group) int {
+		n := 0
+		for _, c := range g.cores {
+			n += len(c.Threads)
+		}
+		return n
+	}
 
 	var freeThreads []int
-	var note, crossWarning string
+	var note string
+	var warnings []string
 	if len(groups) > 0 {
-		needed := (vcpus + threadsPerCore - 1) / threadsPerCore
+		needed := vcpus
 
 		var bestFit *l3Group
+		bestFitThreads := 0
 		for _, g := range groups {
-			if len(g.cores) < needed {
+			gt := groupThreads(g)
+			if gt < needed {
 				continue
 			}
-			if bestFit == nil || len(g.cores) < len(bestFit.cores) ||
-				(len(g.cores) == len(bestFit.cores) && g.l3 < bestFit.l3) {
-				bestFit = g
+			if bestFit == nil || gt < bestFitThreads ||
+				(gt == bestFitThreads && g.l3 < bestFit.l3) {
+				bestFit, bestFitThreads = g, gt
 			}
 		}
 
@@ -338,39 +354,46 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 		if bestFit != nil {
 			chosen = []*l3Group{bestFit}
 			note = fmt.Sprintf(
-				"Threads come from L3 domain #%d, the smallest fully free L3 domain that fits this VM.", bestFit.l3)
+				"Threads come from L3 domain #%d, the smallest L3 domain with enough free cores.", bestFit.l3)
 		} else {
 			rest := make([]*l3Group, len(groups))
 			copy(rest, groups)
 			sort.Slice(rest, func(i, j int) bool {
-				if len(rest[i].cores) != len(rest[j].cores) {
-					return len(rest[i].cores) > len(rest[j].cores)
+				ti, tj := groupThreads(rest[i]), groupThreads(rest[j])
+				if ti != tj {
+					return ti > tj
 				}
 				return rest[i].l3 < rest[j].l3
 			})
 			total := 0
 			for _, g := range rest {
 				chosen = append(chosen, g)
-				total += len(g.cores)
+				total += groupThreads(g)
 				if total >= needed {
 					break
 				}
 			}
+
+			ids := make([]int, len(chosen))
+			for i, g := range chosen {
+				ids[i] = g.l3
+			}
+			sort.Ints(ids)
+			parts := make([]string, len(ids))
+			for i, id := range ids {
+				parts[i] = fmt.Sprintf("#%d", id)
+			}
+
 			if len(chosen) > 1 {
-				ids := make([]int, len(chosen))
-				for i, g := range chosen {
-					ids[i] = g.l3
-				}
-				sort.Ints(ids)
-				parts := make([]string, len(ids))
-				for i, id := range ids {
-					parts[i] = fmt.Sprintf("#%d", id)
-				}
 				note = fmt.Sprintf(
-					"No single L3 domain on node %d has %d fully free cores; threads are spread over L3 domains %s.",
+					"No single L3 domain on node %d has %d free threads; threads are spread over L3 domains %s.",
 					node, needed, strings.Join(parts, ", "))
-				crossWarning = fmt.Sprintf(
-					"This VM spans %d L3 domains; cross-domain cache traffic costs latency.", len(chosen))
+				warnings = append(warnings, fmt.Sprintf(
+					"This VM spans %d L3 domains; cross-domain cache traffic costs latency.", len(chosen)))
+			} else {
+				note = fmt.Sprintf(
+					"L3 domain %s has only %d free thread(s), not enough for this VM; the rest comes from shared threads.",
+					parts[0], total)
 			}
 		}
 
@@ -387,7 +410,7 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 		pins[vcpu] = []int{freeThreads[vcpu]}
 	}
 	if vcpu == vcpus {
-		return pins, note, crossWarning
+		return pins, note, warnings
 	}
 
 	assigned := make(map[int]bool, len(pins))
@@ -427,19 +450,15 @@ func selectThreads(s *Snapshot, node int, vcpus int, allowed []int) (map[int][]i
 	}
 
 	if len(sharedNames) == 0 {
-		return pins, note, crossWarning
+		return pins, note, warnings
 	}
 	names := make([]string, 0, len(sharedNames))
 	for name := range sharedNames {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	shareWarning := "Not enough free cores on this node; this VM ends up sharing threads with: " + strings.Join(names, ", ")
-	warning := shareWarning
-	if crossWarning != "" {
-		warning = crossWarning + " " + shareWarning
-	}
-	return pins, note, warning
+	warnings = append(warnings, "Not enough free cores on this node; this VM ends up sharing threads with: "+strings.Join(names, ", "))
+	return pins, note, warnings
 }
 
 // assignedThreads returns the threads pins assigns, sorted ascending.

@@ -392,17 +392,15 @@ func TestSelectThreadsPrefersWholeFreeL3(t *testing.T) {
 	snap := snapWithUsedThreads("hog", 0, 12) // core 0 (threads 0,12) used
 	pins, note, warning := selectThreads(snap, 0, 6, nil)
 
-	if warning != "" {
-		t.Errorf("warning = %q, want none (the whole VM fits one domain)", warning)
+	want := map[int][]int{0: {3}, 1: {15}, 2: {4}, 3: {16}, 4: {5}, 5: {17}}
+	if !reflect.DeepEqual(pins, want) {
+		t.Errorf("pins = %v, want %v (L3 domain #1's 3 free cores, L3 #0 left untouched)", pins, want)
+	}
+	if len(warning) != 0 {
+		t.Errorf("warning = %v, want none (the whole VM fits one domain)", warning)
 	}
 	if !strings.Contains(note, "L3 domain #1") {
 		t.Errorf("note = %q, want mention of L3 domain #1", note)
-	}
-	for vcpu, thr := range pins {
-		id := thr[0]
-		if got := snap.Topo.Threads[id].L3; got != 1 {
-			t.Errorf("pins[%d] = thread %d (L3 #%d), want every thread from L3 #1", vcpu, id, got)
-		}
 	}
 }
 
@@ -419,8 +417,8 @@ func TestSelectThreadsBestFitLeavesEmptyDomains(t *testing.T) {
 	if !reflect.DeepEqual(pins, want) {
 		t.Errorf("pins = %v, want %v (L3 #0's own 2 free cores)", pins, want)
 	}
-	if warning != "" {
-		t.Errorf("warning = %q, want none", warning)
+	if len(warning) != 0 {
+		t.Errorf("warning = %v, want none", warning)
 	}
 	if !strings.Contains(note, "L3 domain #0") {
 		t.Errorf("note = %q, want mention of L3 domain #0", note)
@@ -438,22 +436,20 @@ func TestSelectThreadsSpansFewestDomainsWhenNoneFits(t *testing.T) {
 	snap := snapWithUsedThreads("hog", 0, 12, 3, 15, 6, 18, 9, 21) // core 0,3,6,9 used, one per domain
 	pins, note, warning := selectThreads(snap, 0, 10, nil)
 
-	if len(pins) != 10 {
-		t.Fatalf("len(pins) = %d, want 10 (fully filled from fully-free cores)", len(pins))
+	want := map[int][]int{
+		0: {1}, 1: {13}, 2: {2}, 3: {14},
+		4: {4}, 5: {16}, 6: {5}, 7: {17},
+		8: {7}, 9: {19},
+	}
+	if !reflect.DeepEqual(pins, want) {
+		t.Errorf("pins = %v, want %v (domains #0, #1, #2 in core order; thread 8/20 in domain #2 left unused)", pins, want)
 	}
 	if !strings.Contains(note, "L3 domains #0, #1, #2") {
 		t.Errorf("note = %q, want it to name L3 domains #0, #1, #2", note)
 	}
-	if !strings.Contains(warning, "spans 3 L3 domains") {
-		t.Errorf("warning = %q, want it to mention \"spans 3 L3 domains\"", warning)
-	}
-	l3ByThread := func(threads []int) int { return snap.Topo.Threads[threads[0]].L3 }
-	used := map[int]bool{}
-	for _, thr := range pins {
-		used[l3ByThread(thr)] = true
-	}
-	if len(used) != 3 {
-		t.Errorf("pins touch %d distinct L3 domains, want 3: %v", len(used), used)
+	joined := strings.Join(warning, " ")
+	if !strings.Contains(joined, "spans 3 L3 domains") {
+		t.Errorf("warning = %v, want it to mention \"spans 3 L3 domains\"", warning)
 	}
 }
 
@@ -471,8 +467,8 @@ func TestSelectThreadsWithinFilterUnchanged(t *testing.T) {
 	if !reflect.DeepEqual(pins, want) {
 		t.Errorf("pins = %v, want %v", pins, want)
 	}
-	if warning != "" {
-		t.Errorf("warning = %q, want none", warning)
+	if len(warning) != 0 {
+		t.Errorf("warning = %v, want none", warning)
 	}
 	if !strings.Contains(note, "L3 domain #2") {
 		t.Errorf("note = %q, want mention of L3 domain #2", note)
@@ -483,21 +479,23 @@ func TestSelectThreadsWithinFilterUnchanged(t *testing.T) {
 // now reached through the packing rule instead of the old flat scan:
 // every core is used except one (core 2, L3 #0), so a 4-vcpu VM's last 2
 // vcpus must reuse already-claimed threads. Only one domain ever had any
-// free cores, so no placement note is expected; the sharing warning must
-// still fire and pins must still be 1:1.
+// free cores, and it alone was too small (2 free threads for 4 vcpus), so
+// the placement note still names it (the part that was actually used);
+// the sharing warning must still fire and pins must still be 1:1.
 func TestSelectThreadsFallbackStillShares(t *testing.T) {
 	used := []int{0, 12, 1, 13, 3, 15, 4, 16, 5, 17, 6, 18, 7, 19, 8, 20, 9, 21, 10, 22, 11, 23}
 	snap := snapWithUsedThreads("hog", used...)
 	pins, note, warning := selectThreads(snap, 0, 4, nil)
 
-	if note != "" {
-		t.Errorf("note = %q, want none (only one domain ever had a free core)", note)
+	if !strings.Contains(note, "L3 domain #0") {
+		t.Errorf("note = %q, want mention of L3 domain #0 (its 2 free threads are used before the fallback)", note)
 	}
-	if !strings.Contains(warning, "sharing threads with:") {
-		t.Errorf("warning = %q, want mention of \"sharing threads with:\"", warning)
+	joined := strings.Join(warning, " ")
+	if !strings.Contains(joined, "sharing threads with:") {
+		t.Errorf("warning = %v, want mention of \"sharing threads with:\"", warning)
 	}
-	if !strings.Contains(warning, "hog") {
-		t.Errorf("warning = %q, want mention of hog", warning)
+	if !strings.Contains(joined, "hog") {
+		t.Errorf("warning = %v, want mention of hog", warning)
 	}
 	for vcpu, thr := range pins {
 		if len(thr) != 1 {
@@ -507,4 +505,47 @@ func TestSelectThreadsFallbackStillShares(t *testing.T) {
 	if len(pins) != 4 {
 		t.Fatalf("len(pins) = %d, want 4", len(pins))
 	}
+}
+
+// TestProposeWithinL3Placement is a ProposeWithin-level check that
+// selectThreads' two return values land in the right Proposal field: the
+// placement note in Rationale, the cross-domain-spread sentence in
+// Warnings. A selectThreads-only test wouldn't catch the two being
+// swapped at the proposeOnNode call site; this would.
+func TestProposeWithinL3Placement(t *testing.T) {
+	t.Run("single domain", func(t *testing.T) {
+		snap := &Snapshot{
+			Topo:        l3Topo(),
+			VMs:         []VM{{Name: "vm", VCPUs: 6, MemoryKiB: 100}},
+			Use:         map[int]ThreadUse{0: {VMs: []string{"hog"}}, 12: {VMs: []string{"hog"}}},
+			BoundMemKiB: map[int]uint64{},
+		}
+		got, err := ProposeWithin(snap, "vm", 0, nil)
+		if err != nil {
+			t.Fatalf("ProposeWithin: %v", err)
+		}
+		if !strings.Contains(strings.Join(got.Rationale, " "), "L3 domain #") {
+			t.Errorf("Rationale = %v, want mention of an L3 domain", got.Rationale)
+		}
+	})
+
+	t.Run("spread across domains", func(t *testing.T) {
+		use := map[int]ThreadUse{}
+		for _, th := range []int{0, 12, 3, 15, 6, 18, 9, 21} {
+			use[th] = ThreadUse{VMs: []string{"hog"}}
+		}
+		snap := &Snapshot{
+			Topo:        l3Topo(),
+			VMs:         []VM{{Name: "vm", VCPUs: 10, MemoryKiB: 100}},
+			Use:         use,
+			BoundMemKiB: map[int]uint64{},
+		}
+		got, err := ProposeWithin(snap, "vm", 0, nil)
+		if err != nil {
+			t.Fatalf("ProposeWithin: %v", err)
+		}
+		if !strings.Contains(strings.Join(got.Warnings, " "), "spans") {
+			t.Errorf("Warnings = %v, want mention of \"spans\"", got.Warnings)
+		}
+	})
 }
