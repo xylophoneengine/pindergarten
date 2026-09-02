@@ -252,10 +252,21 @@ func TestCPUMapNoL3DataRendersUnchanged(t *testing.T) {
 // panel's own right border into "..". At widths 120 and 121 with
 // realHostTopo (whose L3 domains trigger the longer legend), every line
 // must fit within w and never show that truncation artifact.
+//
+// clipLinesTo(out, budget) mirrors renderFull's own final step (View()
+// force-clips the whole rendered body down to its height budget,
+// regardless of what a render function produced internally): reserving
+// only 1 line of primaryBudget for the legend, when it actually wraps to
+// 2 lines at these widths (its 61-col content doesn't fit primaryW's 60),
+// left mapBlock -- and so the whole joined body -- one line taller than
+// budget, and that top-down clip silently dropped the legend's second
+// line, the one holding "boundary".
 func TestCPUMapLegendFitsPrimaryWidth(t *testing.T) {
 	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	const budget = 24
 	for _, w := range []int{120, 121} {
-		out, _ := renderCPUMapTab(s, 0, w, 24)
+		out, _ := renderCPUMapTab(s, 0, w, budget)
+		out = clipLinesTo(out, budget)
 		for i, l := range strings.Split(out, "\n") {
 			if lw := lipgloss.Width(l); lw > w {
 				t.Fatalf("width %d: line %d width = %d, want <= %d: %q", w, i, lw, w, l)
@@ -263,6 +274,14 @@ func TestCPUMapLegendFitsPrimaryWidth(t *testing.T) {
 		}
 		if strings.Contains(out, "..") {
 			t.Fatalf("width %d: renderCPUMapTab() = %q, want no \"..\" truncation artifact", w, out)
+		}
+		// The legend wraps word-by-word at these widths, splitting "L3" and
+		// "boundary" onto separate physical lines (lipgloss's own
+		// Style.Width wrap) -- so check both halves survived rather than
+		// the literal joined phrase, which no longer appears contiguous
+		// once wrapped.
+		if !strings.Contains(out, "L3") || !strings.Contains(out, "boundary") {
+			t.Fatalf("width %d: renderCPUMapTab() = %q, want both \"L3\" and \"boundary\" present (legend's 2nd wrapped line must not be clipped off)", w, out)
 		}
 	}
 }

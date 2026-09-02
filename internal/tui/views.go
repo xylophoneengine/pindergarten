@@ -577,7 +577,14 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		primaryBudget, secondaryBudget = splitStackedBudget(budget, naturalNodeLines+1)
 	}
 
-	nodeAreaBudget := primaryBudget - 1 // reserve the legend line below
+	// legend is built up front (not just at concatenation time below) so
+	// its actual line count -- 2 once word-wrapped at widths where the L3
+	// entry doesn't fit on one line, not always 1 -- can be reserved out of
+	// primaryBudget here. Reserving a flat 1 let the legend's second line
+	// (holding "boundary") get silently dropped by the caller's final
+	// clipLinesTo once mapBlock came out one line taller than primaryBudget.
+	legend := lipgloss.NewStyle().Width(primaryW).Render(cpuMapLegend(withL3))
+	nodeAreaBudget := primaryBudget - lineCount(legend)
 	if nodeAreaBudget < 3 {
 		nodeAreaBudget = 3
 	}
@@ -642,8 +649,9 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 	// ".." once the final assembled view got truncated back down to the
 	// terminal's actual width). truncateLines is a last-resort safety net
 	// in case wrapping still left something wider (a single unbreakable
-	// token longer than primaryW, say).
-	legend := lipgloss.NewStyle().Width(primaryW).Render(cpuMapLegend(withL3))
+	// token longer than primaryW, say). legend itself was already built
+	// above, before nodeAreaBudget, so its real line count could be
+	// reserved out of the budget rather than assumed to always be 1.
 	mapBlock := truncateLines(joinPanels(panels, nodeSideBySide)+"\n"+legend, primaryW)
 
 	var detailPanel string
