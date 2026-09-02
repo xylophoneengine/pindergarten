@@ -11,27 +11,22 @@ reality.
 
 Built with help from Claude (Anthropic).
 
-## Screenshots
+<img src="docs/screenshots/topology.png" alt="Topology tab: the whole machine as nested socket, node and L3 boxes with one glyph per thread" width="900">
 
-![Overview](docs/screenshots/overview.png)
-Overview: per-node memory and thread usage, plus a socket/NUMA/L3 hardware summary.
+*The Topology tab: sockets, NUMA nodes and L3 domains as nested boxes, one
+glyph per hardware thread, GPUs listed on the node they hang off.*
 
-![Topology](docs/screenshots/topology.png)
-Topology: the full machine drawn as a ruler grid, one box per socket, node, and L3 domain.
+## Why NUMA pinning matters
 
-![CPU Map](docs/screenshots/cpumap.png)
-CPU Map: every thread's pin state, with a detail panel for the selected core.
-
-![VMs](docs/screenshots/vms.png)
-VMs: each domain's state, pins, memory node, and flagged conflicts.
-
-![Pin wizard](docs/screenshots/wizard.png)
-Pin wizard: a proposed placement for an unpinned VM, opened with `p` in edit mode.
-
-![Pending](docs/screenshots/pending.png)
-Pending: staged operations queued for the next apply.
-
-Regenerate these with `make screenshots` (writes into `docs/screenshots/`).
+A VM whose vCPUs run on one NUMA node while its guest memory lives on
+another pays a cross-node memory latency penalty on every access, which
+shows up as inconsistent, hard-to-diagnose performance, especially under
+GPU passthrough workloads that are latency sensitive. Left unmanaged across
+many VMs on a shared host, memory allocations also drift onto whichever
+node has free pages at boot time, fragmenting host RAM until new VMs can no
+longer find a contiguous NUMA-local allocation. Pinning vCPUs to threads on
+the same socket as a VM's bound memory node keeps both the VM's performance
+and the host's memory layout predictable.
 
 ## Install / build
 
@@ -73,6 +68,9 @@ GitHub release. Pick the one matching your host's distro so the glibc and
 libvirt it links against match. Every push and pull request runs the same
 test matrix plus the lint gate.
 
+The screenshots in this README are rendered from a staged fixture by
+`make screenshots` (writes into `docs/screenshots/`).
+
 ## Usage
 
     pindergarten [-c URI] [-backup-dir PATH]
@@ -81,6 +79,11 @@ test matrix plus the lint gate.
   system libvirtd).
 - `-backup-dir PATH`: where domain XML backups are written before each
   change. Defaults to a per-user location; see Backups below.
+
+<img src="docs/screenshots/overview.png" alt="Overview tab: per-node memory and thread bars on the left, socket/node/L3/GPU hardware summary on the right" width="700">
+
+*Overview: per-node memory and thread usage, GPUs and the VMs living on
+each node, plus a socket/NUMA/L3 hardware summary.*
 
 pindergarten starts read-only: it can scan and display, but it will not
 write anything to libvirt. On disk it only creates the backup directory at
@@ -99,6 +102,11 @@ The layout needs a terminal of at least 80x16 characters. Below that the
 screen shows only a resize notice; enlarge the window or zoom out and the
 interface returns.
 
+<img src="docs/screenshots/cpumap.png" alt="CPU Map tab: one row of thread glyphs per NUMA node grouped by L3 domain, core detail panel at the bottom" width="700">
+
+*CPU Map: every thread's pin state, grouped by L3 domain, with a detail
+panel for the selected core.*
+
 ## How changes apply
 
 Every change you stage (pinning a vCPU to a thread, stripping a pin,
@@ -107,6 +115,16 @@ is config-only: it edits the domain's `<cputune>` and/or `<numatune>` XML
 via `virDomainDefineXML` and nothing else. It takes effect the next time the
 VM boots; it never touches a running VM's live scheduling or memory
 placement.
+
+<img src="docs/screenshots/vms.png" alt="VMs tab: table of domains with state, vCPUs, memory, pins and flags, detail panel on the right" width="700">
+
+*VMs: each domain's state, pins, memory node, and flagged conflicts.*
+
+<img src="docs/screenshots/wizard.png" alt="Pin wizard popup: node, within, threads and memory node fields with a live glyph preview of the chosen node" width="700">
+
+*Pin wizard (`p` in edit mode): a proposed placement for the selected VM,
+with node, L3 domain, thread list and memory node editable and previewed
+live before staging.*
 
 Staged changes sit in the Pending tab as a queue, not applied immediately.
 This includes a restore: pressing `R` on a backup in the Backups tab stages
@@ -117,6 +135,11 @@ read when you staged the change (a drift check), so a change made outside
 pindergarten in the meantime does not get silently clobbered. A backup of a
 domain's XML is written before every write to that domain, with no
 exceptions.
+
+<img src="docs/screenshots/pending.png" alt="Pending tab: numbered list of staged operations with a detail panel describing the selected one" width="700">
+
+*Pending: staged operations queued for the next apply, each with the XML
+hash it was staged against.*
 
 ## Backups
 
@@ -192,15 +215,3 @@ Apply review and drift (after `a`, while applying):
 | `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data (closes the drift screen even if other operations are still drifted) |
 | `esc` | drift screen | close back to browsing; every operation, drifted or not, stays queued untouched |
 | any key | results screen | dismiss the results screen and rescan |
-
-## Why NUMA pinning matters
-
-A VM whose vCPUs run on one NUMA node while its guest memory lives on
-another pays a cross-node memory latency penalty on every access, which
-shows up as inconsistent, hard-to-diagnose performance, especially under
-GPU passthrough workloads that are latency sensitive. Left unmanaged across
-many VMs on a shared host, memory allocations also drift onto whichever
-node has free pages at boot time, fragmenting host RAM until new VMs can no
-longer find a contiguous NUMA-local allocation. Pinning vCPUs to threads on
-the same socket as a VM's bound memory node keeps both the VM's performance
-and the host's memory layout predictable.
