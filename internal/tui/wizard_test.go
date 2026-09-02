@@ -1430,3 +1430,31 @@ func TestPinRefusedReadOnly(t *testing.T) {
 		t.Fatalf("status = %q, want the edit-mode hint", a.status)
 	}
 }
+
+// TestWizardStatusBarFitsAtMinimumWidth guards the wizard's status bar
+// against the clipping that 63decf4 and 63ea655 both shipped: with the
+// widest pending prefix ("0 pending ops  ") and the wizard's own hint, the
+// bar must still fit an 80-column terminal on one row, with the apply and
+// cancel hints intact at the end.
+func TestWizardStatusBarFitsAtMinimumWidth(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	bar := a.renderStatusBar()
+	if n := strings.Count(bar, "\n") + 1; n != 1 {
+		t.Fatalf("renderStatusBar() = %q, want one row, got %d", bar, n)
+	}
+	if w := lipgloss.Width(bar); w > 80 {
+		t.Fatalf("renderStatusBar() width = %d, want <= 80: %q", w, bar)
+	}
+	if !strings.Contains(bar, "[A] apply") || !strings.Contains(bar, "[C] cancel") {
+		t.Fatalf("renderStatusBar() = %q, want the apply and cancel hints intact", bar)
+	}
+}

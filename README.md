@@ -195,8 +195,10 @@ typing into the threads field -- staged with `[A]pply` or dropped with
 
 | Key | Action |
 |-----|--------|
-| up/down / `j k` | move between the node/within/threads/memory node/core-grid fields; inside the grid, up/down / `j k` move the cursor by row; at the grid's top/bottom edge they leave to the previous/next field |
+| up/down / `j k` | previous/next field (node, within, threads, memory node, core grid); inside the grid, move the cursor by row, leaving the grid at its top/bottom edge |
 | left/right / `h l` | cycle the focused field's value, move the caret within the threads field, or move the core-grid cursor |
+| mouse wheel | move the core-grid cursor by row |
+| mouse click | focus a field, toggle a grid core, or press `[A]pply` / `[C]ancel` |
 | backspace | (threads field) delete the character before the caret |
 | `space` | (core grid) toggle the cursor's core into/out of the threads field |
 | `a` | re-fill the threads field from the current proposal |

@@ -59,8 +59,10 @@ var helpKeys = []helpEntry{
 	{"Set memory node", "digit 0-9", "stage a memory-node-only change to that node (a pick crossing the VM's GPU node opens a yes/no confirm first)"},
 	{"Set memory node", "esc", "cancel"},
 
-	{"Pin wizard", "up/down / j k", "move between the node/within/threads/memory node/core-grid fields; inside the grid, up/down / j k move the cursor by row; at the grid's top/bottom edge they leave to the previous/next field"},
-	{"Pin wizard", "left/right / h l", "cycle the focused field's value, move the caret within the threads field, or move the core-grid cursor"},
+	{"Pin wizard", "up/down / j k", "previous/next field; in the core grid, move the cursor by row (leaving at its top/bottom edge)"},
+	{"Pin wizard", "left/right / h l", "cycle the field's value, move the threads caret, or move the grid cursor"},
+	{"Pin wizard", "mouse wheel", "move the core-grid cursor by row"},
+	{"Pin wizard", "mouse click", "focus a field, toggle a grid core, or press [A]pply / [C]ancel"},
 	{"Pin wizard", "backspace", "(threads field) delete the character before the caret"},
 	{"Pin wizard", "space", "(core grid) toggle the cursor's core into/out of the threads field"},
 	{"Pin wizard", "a", "re-fill the threads field from the current proposal"},

@@ -764,7 +764,7 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 // wizard is open: its own keys, since edit/quit/pin/strip are inert while
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
-	return "[arrows] move/edit [space] toggle [a] autofill [A] apply [C] cancel"
+	return "[arrows] move  [space] toggle  [a] fill  [A] apply  [C] cancel"
 }
 
 // openWizard implements the 'p' key on the VMs tab: after the shared
@@ -900,8 +900,8 @@ func (w *wizard) scrollGrid(delta, perRow int) {
 	if w.cursor < 0 {
 		w.cursor = 0
 	}
-	if max := len(cores) - 1; w.cursor > max {
-		w.cursor = max
+	if last := len(cores) - 1; w.cursor > last {
+		w.cursor = last
 	}
 }
 
