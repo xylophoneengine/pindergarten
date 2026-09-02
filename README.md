@@ -43,8 +43,9 @@ At runtime, only the libvirt client library is needed, not the -devel
 headers: `libvirt-libs` on Rocky/RHEL, `libvirt0` on Debian/Ubuntu.
 
 Prebuilt binaries: pushing a `v*` tag runs the release workflow, which
-builds and tests inside Rocky Linux 10 and Ubuntu 26.04 containers and
-attaches `pindergarten-<tag>-rocky10-x86_64` and
+builds and tests inside Rocky Linux 9, Rocky Linux 10 and Ubuntu 26.04
+containers and attaches `pindergarten-<tag>-rocky9-x86_64`,
+`pindergarten-<tag>-rocky10-x86_64` and
 `pindergarten-<tag>-ubuntu26.04-x86_64` (plus `.sha256` files) to the
 GitHub release. Pick the one matching your host's distro so the glibc and
 libvirt it links against match. Every push and pull request runs the same

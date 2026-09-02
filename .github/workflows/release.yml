@@ -16,6 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: rocky9
+            image: quay.io/rockylinux/rockylinux:9
+            setup: |
+              dnf -y install dnf-plugins-core
+              dnf config-manager --set-enabled crb
+              dnf -y install gcc git make tar gzip libvirt-devel
           - name: rocky10
             image: quay.io/rockylinux/rockylinux:10
             setup: |
