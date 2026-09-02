@@ -112,6 +112,33 @@ func TestOverviewNodeCardNamesGPU(t *testing.T) {
 	}
 }
 
+// TestOverviewNodeCardListsAllGPUs covers the follow-up review nit: the
+// card used to list only GPUs some VM was actually using, by matching
+// s.VMs' own passthrough device lists -- a GPU still driven directly by
+// the host (never passed to a VM) never showed up at all, even though
+// the secondary hardware panel already lists every GPU regardless. Both
+// of realHostTopo's node-0 GPUs must now appear, one per line, in their
+// own format: the nvidia device (passed to gpu-vm) as "vm: gpu-vm", the
+// amdgpu one (host-driven, no VM claims it) as "host (amdgpu)".
+func TestOverviewNodeCardListsAllGPUs(t *testing.T) {
+	s := &model.Snapshot{
+		Topo:        realHostTopo(),
+		Use:         map[int]model.ThreadUse{},
+		BoundMemKiB: map[int]uint64{},
+		VMs: []model.VM{{
+			Name:    "gpu-vm",
+			Devices: []model.Device{{Addr: "0000:09:00.0", Node: 0}},
+		}},
+	}
+	out := renderOverviewCards(s, 100, 24, 0)
+	if !strings.Contains(out, "gpu 09:00.0  NVIDIA GA102  vm: gpu-vm") {
+		t.Fatalf("renderOverviewCards() = %q, want the passthrough GPU line naming its VM", out)
+	}
+	if !strings.Contains(out, "gpu 06:00.0  AMD  host (amdgpu)") {
+		t.Fatalf("renderOverviewCards() = %q, want the host-driven GPU line (no VM claims it)", out)
+	}
+}
+
 // TestOverviewUnknownTotalMemory covers a node whose MemTotalKiB is 0 (not
 // reported by sysfs): the memory bar must say "total unknown" rather than
 // a meaningless "0%".

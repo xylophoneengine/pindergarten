@@ -88,9 +88,10 @@ func nodeThreadStats(s *model.Snapshot, node hostinfo.Node) (pinned, pending, to
 // its used/total and, when overcommitted, a red OVER marker right next to
 // the percentage -- MemTotalKiB == 0 shows "total unknown" instead of a
 // meaningless 0%), a threads bar (pinned solid, pending a second color),
-// and the gpus:/vms: lists. The node's own id is the panel's title, not a
-// line here, and free/pinned-count figures already visible in the bars
-// aren't repeated in a separate summary line.
+// one line per GPU on the node (gpuLinesOnNode) and a "vms:" list. The
+// node's own id is the panel's title, not a line here, and free/pinned-
+// count figures already visible in the bars aren't repeated in a
+// separate summary line.
 func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 	bound := s.BoundMemKiB[node.ID]
 
@@ -120,8 +121,8 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 	}
 	b.WriteString("\n")
 
-	if gpus := gpusOnNode(s, node.ID); gpus != "" {
-		b.WriteString("gpus: " + gpus + "\n")
+	for _, line := range gpuLinesOnNode(s, node.ID) {
+		b.WriteString(line + "\n")
 	}
 	if vms := vmsOnNode(s, node.ID); vms != "" {
 		b.WriteString("vms: " + vms + "\n")
@@ -130,16 +131,15 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 }
 
 // overviewCardNaturalHeight estimates node's card height (memory/free/
-// threads lines, +1 each for a present gpus:/vms: line, +2 borders)
-// without actually rendering the card -- cheap enough to call once per
-// node just to seed splitStackedBudget's primary/secondary split, mirroring
-// how renderVMsTab/renderCPUMapTab estimate their own primary panel's
-// natural size from a formula rather than a full render.
+// threads lines, one per gpuLinesOnNode entry, +1 for a present vms:
+// line, +2 borders) without actually rendering the card -- cheap enough
+// to call once per node just to seed splitStackedBudget's primary/
+// secondary split, mirroring how renderVMsTab/renderCPUMapTab estimate
+// their own primary panel's natural size from a formula rather than a
+// full render.
 func overviewCardNaturalHeight(s *model.Snapshot, node hostinfo.Node) int {
 	h := 5 // memory + free + threads lines, plus 2 borders
-	if gpusOnNode(s, node.ID) != "" {
-		h++
-	}
+	h += len(gpuLinesOnNode(s, node.ID))
 	if vmsOnNode(s, node.ID) != "" {
 		h++
 	}
@@ -355,41 +355,45 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 	return out
 }
 
-// pciDeviceByAddr returns the device in devices whose Addr matches addr,
-// or nil when there's no match.
-func pciDeviceByAddr(devices []hostinfo.PCIDevice, addr string) *hostinfo.PCIDevice {
-	for i := range devices {
-		if devices[i].Addr == addr {
-			return &devices[i]
-		}
-	}
-	return nil
-}
-
-// gpusOnNode returns one "gpu <addr>  <vendor/device name>  (<driver>)"
-// entry (see pciDisplayName/pciDriverOrNone, the same naming helpers the
-// hardware panel and Topology's own GPU boxes use) per PCI device, across
-// all VMs, whose Node matches node -- joined by "; " when there's more
-// than one -- or "" when there are none. A VM device with no match in
-// s.Topo.PCIDevices (a hand-built fixture missing PCIDevices data, most
-// likely) falls back to its bare address alone, same as before this
-// point named GPUs by address only.
-func gpusOnNode(s *model.Snapshot, node int) string {
-	var parts []string
+// vmUsingDevice returns the name of the VM whose passthrough device list
+// references addr, or "" if none does. Shared by Topology's GPU boxes
+// (renderTopoGPUBox, which only needs the bool "is there one") and
+// gpuLinesOnNode (which needs the name itself, for the "vm: <name>"
+// suffix).
+func vmUsingDevice(s *model.Snapshot, addr string) string {
 	for _, v := range s.VMs {
 		for _, d := range v.Devices {
-			if d.Node != node {
-				continue
+			if d.Addr == addr {
+				return v.Name
 			}
-			dev := pciDeviceByAddr(s.Topo.PCIDevices, d.Addr)
-			if dev == nil {
-				parts = append(parts, d.Addr)
-				continue
-			}
-			parts = append(parts, fmt.Sprintf("gpu %s  %s  (%s)", dev.Addr, pciDisplayName(*dev), pciDriverOrNone(dev.Driver)))
 		}
 	}
-	return strings.Join(parts, "; ")
+	return ""
+}
+
+// gpuLinesOnNode returns one line per display-class PCI device attached
+// to node (s.Topo.PCIDevices, not just the ones some VM happens to be
+// using -- the hardware panel already lists every GPU on the host; the
+// card used to list only passed-through ones, by bare address): "gpu
+// <addr>  <vendor/device name>  vm: <name>" when a VM is using it
+// (vmUsingDevice), or "gpu <addr>  <vendor/device name>  host (<driver>)"
+// when it's still host-driven. panelH already truncates any line that
+// doesn't fit the card's own width, so no truncation logic is needed
+// here.
+func gpuLinesOnNode(s *model.Snapshot, node int) []string {
+	var lines []string
+	for _, dev := range s.Topo.PCIDevices {
+		if dev.Node != node || !isDisplayDevice(dev.Class) {
+			continue
+		}
+		addr := strings.TrimPrefix(dev.Addr, "0000:")
+		if vm := vmUsingDevice(s, dev.Addr); vm != "" {
+			lines = append(lines, fmt.Sprintf("gpu %s  %s  vm: %s", addr, pciDisplayName(dev), vm))
+		} else {
+			lines = append(lines, fmt.Sprintf("gpu %s  %s  host (%s)", addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver)))
+		}
+	}
+	return lines
 }
 
 // vmsOnNode returns the comma-separated names of VMs whose MemNodes include

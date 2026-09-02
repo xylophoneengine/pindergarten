@@ -121,6 +121,30 @@ func renderTopoCoreBox(s *model.Snapshot, globalIdx int, core hostinfo.Core) box
 	return boxChild{block, []hit{{y0: 1, y1: 2, x0: 1, x1: 1 + cw, kind: "topocore", index: globalIdx}}}
 }
 
+// clampBoxWidth returns inner clamped to fit within maxWidth (a box's own
+// total-width budget, border included): if inner's natural width
+// (maxLineWidth(inner)+2) already fits, inner is returned unchanged
+// alongside that natural width; otherwise inner is truncated -- never
+// wrapped -- to maxWidth-2 and the width returned is maxWidth itself.
+// Every box-building function below calls this right after assembling
+// its own inner/body content, so a too-wide child (or, before this fix,
+// the compact grid's own hardcoded-32-cores-per-row content) can never
+// propagate an over-width body up to its parent: panelInner's own
+// lipgloss.Width().Render() call WORD-WRAPS a body wider than the width
+// it's given rather than truncating it, which is what corrupted the
+// whole nested drawing's borders once a too-wide body finally reached
+// the outermost machine box (the only place this clamp used to be
+// applied at all, as machineBoxWidth, width-only -- it clamped the
+// chosen width but never the body handed to panelInner alongside it).
+func clampBoxWidth(inner string, maxWidth int) (string, int) {
+	w := maxLineWidth(inner) + 2
+	if w > maxWidth {
+		inner = truncateLines(inner, maxWidth-2)
+		w = maxWidth
+	}
+	return inner, w
+}
+
 // renderTopoL3Box renders one L3-domain box: title "L3 #k", containing
 // one core box per core in that domain -- hostinfo.L3Domain.Threads is a
 // thread list, not a core list, so the cores that actually share this
@@ -136,27 +160,42 @@ func renderTopoL3Box(s *model.Snapshot, l3 hostinfo.L3Domain, maxWidth int) boxC
 		children = append(children, renderTopoCoreBox(s, i, core))
 	}
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
-	w := maxLineWidth(inner) + 2
+	inner, w := clampBoxWidth(inner, maxWidth)
 	block := panelInner(fmt.Sprintf("L3 #%d", l3.ID), inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
 
 // renderTopoCompactGrid renders cores as a dense glyph grid: nodeMapCell's
 // plain two-glyph cell per core (no cursor -- compact mode has none, per
-// the brief), one space between cores, coresPerRow per row -- the same
-// density renderNodeMap already uses for the CPU Map tab's own per-node
-// grid, but restricted to an arbitrary core subset (an L3 domain's cores,
-// or a whole node's when there's no L3 data) and hit-indexed by each
-// core's GLOBAL s.Topo.Cores position (idxs[i], parallel to cores[i])
-// rather than a per-node-local one -- renderTopoCoreBox/renderTopoL3Box
-// need that same global index for their own "topocore" hits, so this
-// does too, to jump to the right core on the CPU Map tab.
-func renderTopoCompactGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int) (string, []hit) {
+// the brief), one space between cores -- the same density renderNodeMap
+// already uses for the CPU Map tab's own per-node grid, but restricted to
+// an arbitrary core subset (an L3 domain's cores, or a whole node's when
+// there's no L3 data) and hit-indexed by each core's GLOBAL s.Topo.Cores
+// position (idxs[i], parallel to cores[i]) rather than a per-node-local
+// one -- renderTopoCoreBox/renderTopoL3Box need that same global index
+// for their own "topocore" hits, so this does too, to jump to the right
+// core on the CPU Map tab. Cores per row is min(coresPerRow, (maxWidth-1)
+// /3) -- each cell is 2 columns plus a 1-column separator (3N-1 for N
+// cells) -- rather than always coresPerRow (32, 95 columns): a fixed
+// row width regardless of maxWidth is exactly what let the compact grid
+// ignore its parent's own width budget and, once nested boxes shrink-
+// wrapped around it, corrupt the whole drawing's borders once it was
+// finally forced to fit (see clampBoxWidth). x0 = col*3 is unchanged --
+// hit columns still follow directly from the column index, whatever the
+// row width actually wrapped at.
+func renderTopoCompactGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int, maxWidth int) (string, []hit) {
+	perRow := (maxWidth - 1) / 3
+	if perRow > coresPerRow {
+		perRow = coresPerRow
+	}
+	if perRow < 1 {
+		perRow = 1
+	}
 	var b strings.Builder
 	var hits []hit
 	col, row := 0, 0
 	for i, core := range cores {
-		if col == coresPerRow {
+		if col == perRow {
 			b.WriteString("\n")
 			row++
 			col = 0
@@ -175,12 +214,16 @@ func renderTopoCompactGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int)
 // renderTopoCompactBox renders one compact-mode box for a group of cores:
 // title "<label>  cores <range>  threads <range>" (formatCPURanges, the
 // same compact range notation the Overview hardware panel's L3 lines
-// use), body a dense glyph grid (renderTopoCompactGrid) instead of one
-// bordered box per core -- per-core boxes (3 rows + borders each) can't
-// scale to hundreds of cores, where this stays a handful of rows. label
-// is "L3 #k" (an L3 domain) or "cores" (a whole node, when the topology
-// has no L3 data at all -- see renderTopoNodeBox).
-func renderTopoCompactBox(s *model.Snapshot, label string, cores []hostinfo.Core, idxs []int) boxChild {
+// use) -- or, when label is "" (a whole node with no L3 data, see
+// renderTopoNodeCoresCompact), just "cores <range>  threads <range>"
+// with no leading label at all (a non-empty label used to be prefixed
+// unconditionally, producing a doubled "cores  cores <range>" for this
+// case). Body is a dense glyph grid (renderTopoCompactGrid) instead of
+// one bordered box per core -- per-core boxes (3 rows + borders each)
+// can't scale to hundreds of cores, where this stays a handful of rows.
+// The grid (and so the box itself, via clampBoxWidth) is wrapped to fit
+// maxWidth, this box's own total-width budget.
+func renderTopoCompactBox(s *model.Snapshot, label string, cores []hostinfo.Core, idxs []int, maxWidth int) boxChild {
 	coreIDs := make([]int, len(cores))
 	var threadIDs []int
 	for i, c := range cores {
@@ -188,9 +231,12 @@ func renderTopoCompactBox(s *model.Snapshot, label string, cores []hostinfo.Core
 		threadIDs = append(threadIDs, c.Threads...)
 	}
 	sort.Ints(threadIDs)
-	body, hits := renderTopoCompactGrid(s, cores, idxs)
-	title := fmt.Sprintf("%s  cores %s  threads %s", label, formatCPURanges(coreIDs), formatCPURanges(threadIDs))
-	w := maxLineWidth(body) + 2
+	body, hits := renderTopoCompactGrid(s, cores, idxs, maxWidth-2)
+	body, w := clampBoxWidth(body, maxWidth)
+	title := fmt.Sprintf("cores %s  threads %s", formatCPURanges(coreIDs), formatCPURanges(threadIDs))
+	if label != "" {
+		title = label + "  " + title
+	}
 	if minW := len(title) + 4; w < minW {
 		w = minW
 	}
@@ -201,7 +247,7 @@ func renderTopoCompactBox(s *model.Snapshot, label string, cores []hostinfo.Core
 // renderTopoL3BoxCompact is renderTopoL3Box's compact-mode counterpart:
 // same core selection (Core.L3 == l3.ID), rendered as one dense grid box
 // (renderTopoCompactBox) instead of one bordered box per core.
-func renderTopoL3BoxCompact(s *model.Snapshot, l3 hostinfo.L3Domain) boxChild {
+func renderTopoL3BoxCompact(s *model.Snapshot, l3 hostinfo.L3Domain, maxWidth int) boxChild {
 	var cores []hostinfo.Core
 	var idxs []int
 	for i, core := range s.Topo.Cores {
@@ -211,15 +257,17 @@ func renderTopoL3BoxCompact(s *model.Snapshot, l3 hostinfo.L3Domain) boxChild {
 		cores = append(cores, core)
 		idxs = append(idxs, i)
 	}
-	return renderTopoCompactBox(s, fmt.Sprintf("L3 #%d", l3.ID), cores, idxs)
+	return renderTopoCompactBox(s, fmt.Sprintf("L3 #%d", l3.ID), cores, idxs, maxWidth)
 }
 
 // renderTopoNodeCoresCompact is compact mode's fallback for a topology
 // with no L3 domain data at all: the same "skip a level with no data"
 // gating renderTopoNodeBox's detailed branch already uses, but grouping
 // the whole node's cores into one dense grid box directly (there's no L3
-// level to nest under) instead of one core box per core.
-func renderTopoNodeCoresCompact(s *model.Snapshot, node hostinfo.Node) boxChild {
+// level to nest under) instead of one core box per core. label "" drops
+// renderTopoCompactBox's "L3 #k" prefix, since there's no L3 domain to
+// name here.
+func renderTopoNodeCoresCompact(s *model.Snapshot, node hostinfo.Node, maxWidth int) boxChild {
 	var cores []hostinfo.Core
 	var idxs []int
 	for i, core := range s.Topo.Cores {
@@ -229,27 +277,16 @@ func renderTopoNodeCoresCompact(s *model.Snapshot, node hostinfo.Node) boxChild 
 		cores = append(cores, core)
 		idxs = append(idxs, i)
 	}
-	return renderTopoCompactBox(s, "cores", cores, idxs)
-}
-
-// gpuInUse reports whether any VM's passthrough device list references
-// addr -- used to color a GPU box by whether it's actually assigned.
-func gpuInUse(s *model.Snapshot, addr string) bool {
-	for _, v := range s.VMs {
-		for _, d := range v.Devices {
-			if d.Addr == addr {
-				return true
-			}
-		}
-	}
-	return false
+	return renderTopoCompactBox(s, "", cores, idxs, maxWidth)
 }
 
 // renderTopoGPUBox renders one leaf box for a display-class PCI device:
 // title "gpu <addr, domain prefix dropped>  <vendor/device name>
-// (<driver>)", content a colored "in use"/"free" word (see gpuInUse) --
-// ponytail: the box's title/border can't safely carry ANSI color of its
-// own (panelInner's title-splicing treats it as plain runes), so the
+// (<driver>)", content a colored "in use"/"free" word (see
+// vmUsingDevice, views.go -- also used by the Overview node card's own
+// GPU lines, which need the VM's name too, not just whether one exists)
+// -- ponytail: the box's title/border can't safely carry ANSI color of
+// its own (panelInner's title-splicing treats it as plain runes), so the
 // "colored by whether a VM passes it through" requirement is satisfied
 // via this content line instead; upgrade to a styled title if
 // panelInner ever grows ANSI-aware title splicing.
@@ -257,7 +294,7 @@ func renderTopoGPUBox(s *model.Snapshot, dev hostinfo.PCIDevice) boxChild {
 	addr := strings.TrimPrefix(dev.Addr, "0000:")
 	title := fmt.Sprintf("gpu %s  %s  (%s)", addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver))
 	content := barEmptyStyle.Render("free")
-	if gpuInUse(s, dev.Addr) {
+	if vmUsingDevice(s, dev.Addr) != "" {
 		content = barFilledStyle.Render("in use")
 	}
 	w := lipgloss.Width(content) + 2
@@ -284,7 +321,7 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, comp
 			if l3.Node != node.ID {
 				continue
 			}
-			children = append(children, renderTopoL3BoxCompact(s, l3))
+			children = append(children, renderTopoL3BoxCompact(s, l3, maxWidth-2))
 		}
 	case len(s.Topo.L3Domains) > 0:
 		for _, l3 := range s.Topo.L3Domains {
@@ -294,7 +331,7 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, comp
 			children = append(children, renderTopoL3Box(s, l3, maxWidth-2))
 		}
 	case compact:
-		children = append(children, renderTopoNodeCoresCompact(s, node))
+		children = append(children, renderTopoNodeCoresCompact(s, node, maxWidth-2))
 	default:
 		for i, core := range s.Topo.Cores {
 			if core.Node != node.ID {
@@ -311,8 +348,8 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, comp
 	}
 
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
+	inner, w := clampBoxWidth(inner, maxWidth)
 	title := fmt.Sprintf("node %d  %s", node.ID, fmtKiB(node.MemTotalKiB))
-	w := maxLineWidth(inner) + 2
 	block := panelInner(title, inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
@@ -329,7 +366,7 @@ func renderTopoUnknownBox(s *model.Snapshot, devs []hostinfo.PCIDevice, maxWidth
 		children = append(children, renderTopoGPUBox(s, dev))
 	}
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
-	w := maxLineWidth(inner) + 2
+	inner, w := clampBoxWidth(inner, maxWidth)
 	block := panelInner("unknown locality", inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
@@ -347,11 +384,11 @@ func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int, 
 		children = append(children, renderTopoNodeBox(s, *node, maxWidth-2, compact))
 	}
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
+	inner, w := clampBoxWidth(inner, maxWidth)
 	title := fmt.Sprintf("socket %d", sock.ID)
 	if sock.Model != "" {
 		title += "  " + sock.Model
 	}
-	w := maxLineWidth(inner) + 2
 	block := panelInner(title, inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
@@ -389,7 +426,7 @@ func buildTopologyTabCompact(s *model.Snapshot, w int) (string, []hit) {
 // shared implementation.
 func buildTopologyTabMode(s *model.Snapshot, w int, compact bool) (string, []hit) {
 	inner, hits := wrapBoxesInto(topologyChildren(s, w, compact), w-2)
-	mw := machineBoxWidth(inner, w)
+	inner, mw := clampBoxWidth(inner, w)
 	block := panelInner(topologyMachineTitle(s), inner, mw, 0)
 	return truncateLines(block, w), offsetHits(hits, 1, 1)
 }
@@ -437,18 +474,6 @@ func topologyMachineTitle(s *model.Snapshot) string {
 	return "machine  " + fmtKiB(totalMem)
 }
 
-// machineBoxWidth returns the machine box's own width: shrink-wrapped to
-// its widest child (plus borders), the same as every level below it
-// already does, rather than always claiming the full body width w --
-// but never wider than w itself.
-func machineBoxWidth(inner string, w int) int {
-	mw := maxLineWidth(inner) + 2
-	if mw > w {
-		mw = w
-	}
-	return mw
-}
-
 // topologyInnerForZoom returns the Topology tab's raw, unbordered content
 // (topologyChildren wrapped via wrapBoxesInto -- the machine box's own
 // border/fill isn't added yet) for override at width w: a non-auto
@@ -494,7 +519,7 @@ func renderTopologyTab(s *model.Snapshot, w, budget, scroll int, zoom topoZoom) 
 	visible, offset, _ := windowAt(lines, contentBudget, scroll)
 	body := strings.Join(visible, "\n")
 
-	mw := machineBoxWidth(body, w)
+	body, mw := clampBoxWidth(body, w)
 	block := truncateLines(panelInner(topologyMachineTitle(s), body, mw, contentBudget), w)
 
 	visibleHits := make([]hit, 0, len(hits))

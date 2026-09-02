@@ -315,6 +315,55 @@ func TestTopologyAutoPicksCompactForManyCores(t *testing.T) {
 	}
 }
 
+// isBorderGlyph reports whether r is one of panelInner's rounded-border
+// glyphs -- the left edge or a corner -- used to check that a body line
+// is a real box border row, not a wrapped fragment of one.
+func isBorderGlyph(r rune) bool {
+	return r == '\u2502' || r == '\u256d' || r == '\u2570'
+}
+
+// TestTopologyCompactRespectsParentWidth covers the review's Important
+// finding: renderTopoCompactGrid/renderTopoCompactBox used to ignore
+// their parent's own width budget entirely (coresPerRow hardcoded to 32,
+// 95 columns, regardless of maxWidth) -- so at widths narrower than
+// that, the enclosing node/machine boxes shrink-wrapped around a body
+// wider than the terminal, and panelInner's own lipgloss Width() call
+// WORD-WRAPPED the over-wide body instead of truncating it, corrupting
+// the whole nested drawing: border runs split onto their own lines, and
+// every hit's (y0, x0) -- computed for the unwrapped layout -- pointed
+// at the wrong cell once that happened. At widths 80/90/100 (all
+// narrower than one 32-core compact row) with 200 cores across 2 nodes,
+// in both auto and forced-compact zoom, every body line must start with
+// a real border glyph (never a bare continuation of a wrapped one) and
+// fit within the width, and every topocore hit must still land on an
+// actual glyph character.
+func TestTopologyCompactRespectsParentWidth(t *testing.T) {
+	s := &model.Snapshot{Topo: bigTwoNodeTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	for _, w := range []int{80, 90, 100} {
+		for _, zoom := range []topoZoom{topoZoomAuto, topoZoomCompact} {
+			body, hits := renderTopologyTab(s, w, 40, 0, zoom)
+			lines := strings.Split(body, "\n")
+			for i, l := range lines {
+				if lw := lipgloss.Width(l); lw > w {
+					t.Fatalf("width %d zoom %d: line %d width = %d, want <= %d: %q", w, zoom, i, lw, w, l)
+				}
+				r := []rune(l)
+				if len(r) == 0 || !isBorderGlyph(r[0]) {
+					t.Fatalf("width %d zoom %d: line %d = %q, want it to start with a border glyph (a wrapped border fragment otherwise)", w, zoom, i, l)
+				}
+			}
+			for _, h := range hits {
+				if h.kind != "topocore" {
+					continue
+				}
+				if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+					t.Fatalf("width %d zoom %d: hit %+v lands on %q, want a glyph character", w, zoom, h, r)
+				}
+			}
+		}
+	}
+}
+
 // TestTopologyAutoPicksDetailedWhenItFits covers the other side of auto
 // mode: realHostTopo (12 cores) at 120x40 easily fits, so auto must keep
 // the more informative detailed drawing (individual "core N" boxes), not
@@ -338,6 +387,25 @@ func TestTopologyCompactL3BoxTitle(t *testing.T) {
 	body, _ := buildTopologyTabCompact(s, 120)
 	if !strings.Contains(body, "L3 #0  cores 0-5  threads 0-5,12-17") {
 		t.Fatalf("buildTopologyTabCompact() = %q, want L3 #0's compact title with core/thread ranges", body)
+	}
+}
+
+// TestTopologyCompactNoL3TitleNotDoubled covers a review nit: with no L3
+// domain data at all, renderTopoNodeCoresCompact used to pass the label
+// "cores" into renderTopoCompactBox, which prefixed it onto its own
+// "cores <range>  threads <range>" text unconditionally -- producing the
+// doubled "cores  cores 0-1  threads 0-1,4-5" on testTopo's node 0. It
+// must read "cores 0-1  threads 0-1,4-5", no leading label at all (the
+// L3 case, covered by TestTopologyCompactL3BoxTitle above, is
+// unaffected: it still gets its "L3 #k" prefix).
+func TestTopologyCompactNoL3TitleNotDoubled(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, _ := buildTopologyTabCompact(s, 100)
+	if strings.Contains(body, "cores  cores") {
+		t.Fatalf("buildTopologyTabCompact() = %q, want no doubled \"cores  cores\"", body)
+	}
+	if !strings.Contains(body, "cores 0-1  threads 0-1,4-5") {
+		t.Fatalf("buildTopologyTabCompact() = %q, want node 0's compact title \"cores 0-1  threads 0-1,4-5\" (no label prefix)", body)
 	}
 }
 
