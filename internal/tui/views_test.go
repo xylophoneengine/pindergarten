@@ -99,6 +99,89 @@ func TestOverviewUnknownTotalMemory(t *testing.T) {
 	}
 }
 
+// realHostTopo mirrors this project's own dev box (see internal/hostinfo's
+// TestReadRealHostMirror): an AMD Ryzen 9 5900X, 1 socket, 1 NUMA node, 12
+// cores (24 threads, SMT pairs i/i+12), two L3 domains (cores 0-5 and
+// 6-11), and two display GPUs (one amdgpu, one nvidia) -- the first
+// fixture in this package to actually populate Sockets/L3Domains/
+// PCIDevices, since everything before the topology round left them at
+// their zero value. VendorName/DeviceName are hand-picked simplified
+// names (not what a real pci.ids lookup would resolve to) matching the
+// round's own smoke-render spec.
+func realHostTopo() *hostinfo.Topology {
+	threads := make(map[int]hostinfo.Thread, 24)
+	cores := make([]hostinfo.Core, 0, 12)
+	nodeThreads := make([]int, 0, 24)
+	for c := 0; c < 12; c++ {
+		l3 := 0
+		if c >= 6 {
+			l3 = 1
+		}
+		sibling := c + 12
+		threads[c] = hostinfo.Thread{ID: c, Core: c, Socket: 0, Node: 0, Sibling: sibling, L3: l3}
+		threads[sibling] = hostinfo.Thread{ID: sibling, Core: c, Socket: 0, Node: 0, Sibling: c, L3: l3}
+		cores = append(cores, hostinfo.Core{Socket: 0, ID: c, Node: 0, L3: l3, Threads: []int{c, sibling}})
+		nodeThreads = append(nodeThreads, c, sibling)
+	}
+	return &hostinfo.Topology{
+		Nodes:   []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 32 * 1024 * 1024, MemFreeKiB: 16 * 1024 * 1024}},
+		Cores:   cores,
+		Threads: threads,
+		Sockets: []hostinfo.Socket{{ID: 0, Model: "AMD Ryzen 9 5900X 12-Core Processor", Nodes: []int{0}}},
+		L3Domains: []hostinfo.L3Domain{
+			{ID: 0, Node: 0, Socket: 0, Threads: []int{0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17}},
+			{ID: 1, Node: 0, Socket: 0, Threads: []int{6, 7, 8, 9, 10, 11, 18, 19, 20, 21, 22, 23}},
+		},
+		PCIDevices: []hostinfo.PCIDevice{
+			{Addr: "0000:06:00.0", Class: "030000", VendorID: "1002", DeviceID: "743f", VendorName: "AMD", Driver: "amdgpu", Node: 0},
+			{Addr: "0000:09:00.0", Class: "030000", VendorID: "10de", DeviceID: "2216", VendorName: "NVIDIA", DeviceName: "GA102", Driver: "nvidia", Node: 0},
+		},
+	}
+}
+
+// TestOverviewHardwarePanel covers point 2 of the topology brief: the
+// Overview tab's secondary (right, or below when stacked) panel becomes a
+// simplified lstopo-style hardware listing once the topology has socket
+// data -- socket, its node(s), each node's L3 domains and GPUs.
+func TestOverviewHardwarePanel(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out := renderOverviewTab(s, 140, 24, 0)
+
+	for _, want := range []string{
+		"hardware",
+		"socket 0",
+		"AMD Ryzen 9 5900X 12-Core Processor",
+		"node 0",
+		"24 threads",
+		"L3 #0",
+		"0-5,12-17",
+		"L3 #1",
+		"6-11,18-23",
+		"gpu 0000:06:00.0",
+		"AMD",
+		"(amdgpu)",
+		"gpu 0000:09:00.0",
+		"NVIDIA GA102",
+		"(nvidia)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("renderOverviewTab() = %q, want %q present", out, want)
+		}
+	}
+}
+
+// TestOverviewHardwarePanelSkippedWithoutSocketData covers the fallback:
+// a topology with no Sockets at all (every fixture elsewhere in this
+// package, and any hand-built one in general) renders the cards at the
+// full body width/budget, no empty "hardware" panel taking up room.
+func TestOverviewHardwarePanelSkippedWithoutSocketData(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out := renderOverviewTab(s, 140, 24, 0)
+	if strings.Contains(out, "hardware") {
+		t.Fatalf("renderOverviewTab() = %q, want no \"hardware\" panel without socket data", out)
+	}
+}
+
 func TestCPUMapMarksPinned(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
 	out, _ := renderCPUMapTab(s, -1, 80, 24)

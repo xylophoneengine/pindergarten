@@ -31,6 +31,38 @@ func fmtKiB(kib uint64) string {
 	}
 }
 
+// formatCPURanges compacts a sorted, deduplicated list of ints into range
+// notation ("0-5,12-17"), the same style Linux's own sysfs cpulist files
+// use (and hostinfo.ParseCPUList understands) -- unlike hostinfo.
+// FormatCPUList's plain comma list (used elsewhere in this package for
+// short, usually-non-contiguous lists: a core's own thread pair, a VM's
+// pin set), a whole L3 domain's thread list is long and naturally
+// contiguous, so the compact form reads far better.
+func formatCPURanges(ids []int) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	var parts []string
+	start, prev := ids[0], ids[0]
+	flush := func(end int) {
+		if start == end {
+			parts = append(parts, strconv.Itoa(start))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", start, end))
+		}
+	}
+	for _, id := range ids[1:] {
+		if id == prev+1 {
+			prev = id
+			continue
+		}
+		flush(prev)
+		start, prev = id, id
+	}
+	flush(prev)
+	return strings.Join(parts, ",")
+}
+
 // overviewBarWidth is the fixed width (brackets included) of the memory and
 // threads progress bars on the Overview tab.
 const overviewBarWidth = 22
@@ -97,19 +129,36 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderOverviewTab renders the Overview tab: one bordered panel per NUMA
-// node (side by side, each at the full budget height -- else stacked,
-// starting from scroll, clamped by the caller via App.clampOverviewScroll;
-// up/down/wheel on the Overview tab move it), showing as many full cards
-// as fit budget at their natural height (fitStackedCount) rather than
-// truncating every card's content, then splitting budget evenly across
-// just those shown cards (splitStackedFill) so they stretch to fill it
-// exactly instead of leaving blank space below the last one -- so a short
-// terminal with many nodes doesn't push the key bar off-screen, and a
-// tall one doesn't leave the tab looking squished to the top either. A
-// trailing "+N more nodes (scroll)" line appears once some are hidden.
-// Then a one-line-per-VM list of any domains flagged Unsupported.
-func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
+// overviewCardNaturalHeight estimates node's card height (memory/free/
+// threads lines, +1 each for a present gpus:/vms: line, +2 borders)
+// without actually rendering the card -- cheap enough to call once per
+// node just to seed splitStackedBudget's primary/secondary split, mirroring
+// how renderVMsTab/renderCPUMapTab estimate their own primary panel's
+// natural size from a formula rather than a full render.
+func overviewCardNaturalHeight(s *model.Snapshot, node hostinfo.Node) int {
+	h := 5 // memory + free + threads lines, plus 2 borders
+	if gpusOnNode(s, node.ID) != "" {
+		h++
+	}
+	if vmsOnNode(s, node.ID) != "" {
+		h++
+	}
+	return h
+}
+
+// renderOverviewCards renders the Overview tab's primary (left, or above
+// when stacked) panel: one bordered card per NUMA node (side by side,
+// each at the full budget height -- else stacked, starting from scroll,
+// clamped by the caller via App.clampOverviewScroll; up/down/wheel on the
+// Overview tab move it), showing as many full cards as fit budget at
+// their natural height (fitStackedCount) rather than truncating every
+// card's content, then splitting budget evenly across just those shown
+// cards (splitStackedFill) so they stretch to fill it exactly instead of
+// leaving blank space below the last one -- so a short terminal with many
+// nodes doesn't push the key bar off-screen, and a tall one doesn't leave
+// the tab looking squished to the top either. A trailing "+N more nodes
+// (scroll)" line appears once some are hidden.
+func renderOverviewCards(s *model.Snapshot, w, budget, scroll int) string {
 	cardWidths, sideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
 	bodies := make([]string, len(s.Topo.Nodes))
 	heights := make([]int, len(s.Topo.Nodes))
@@ -151,6 +200,146 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 	if !sideBySide {
 		if hidden := len(s.Topo.Nodes) - n; hidden > 0 {
 			out += "\n" + keyBarLabelStyle.Render(fmt.Sprintf("+%d more nodes (scroll)", hidden))
+		}
+	}
+	return out
+}
+
+// nodeByID returns the node with the given id from nodes, or nil if there
+// is none.
+func nodeByID(nodes []hostinfo.Node, id int) *hostinfo.Node {
+	for i := range nodes {
+		if nodes[i].ID == id {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+// pciDisplayName renders a PCI device's vendor/device name for the
+// hardware tree: "<VendorName> <DeviceName>" (either half omitted if
+// empty), falling back to the bare hex IDs ("<vendorID>:<deviceID>") when
+// neither name resolved (no pci.ids file, or an unknown vendor).
+func pciDisplayName(d hostinfo.PCIDevice) string {
+	name := strings.TrimSpace(d.VendorName + " " + d.DeviceName)
+	if name == "" {
+		name = d.VendorID + ":" + d.DeviceID
+	}
+	return name
+}
+
+// pciDriverOrNone renders a PCI device's bound driver, or "none" when it
+// has none.
+func pciDriverOrNone(driver string) string {
+	if driver == "" {
+		return "none"
+	}
+	return driver
+}
+
+// isDisplayDevice reports whether class (a hostinfo.PCIDevice.Class hex
+// string, no "0x" prefix) is a display controller (0x03xxxx).
+func isDisplayDevice(class string) bool {
+	return strings.HasPrefix(class, "03")
+}
+
+// renderOverviewHardware renders the Overview tab's secondary (right, or
+// below when stacked) panel: a simplified lstopo-style hardware listing --
+// one block per socket ("socket N  <CPU model>"), each with its own NUMA
+// nodes ("  node N  <threads> threads  mem <total>"), each with its own
+// L3 domains ("    L3 #k  threads <cpulist>") and display-class PCI
+// devices ("    gpu <addr>  <vendor/device name>  (<driver>)"). Filled to
+// budget like every body panel (see panelH's fill option); topo.Sockets
+// empty (a topology hostinfo.Read never actually produces, but hand-built
+// fixtures elsewhere in this package sometimes do) just renders an empty
+// panel rather than erroring.
+func renderOverviewHardware(s *model.Snapshot, w, budget int) string {
+	var b strings.Builder
+	for _, sock := range s.Topo.Sockets {
+		title := fmt.Sprintf("socket %d", sock.ID)
+		if sock.Model != "" {
+			title += "  " + sock.Model
+		}
+		b.WriteString(title + "\n")
+		for _, nodeID := range sock.Nodes {
+			node := nodeByID(s.Topo.Nodes, nodeID)
+			if node == nil {
+				continue
+			}
+			fmt.Fprintf(&b, "  node %d  %d threads  mem %s\n", nodeID, len(node.Threads), fmtKiB(node.MemTotalKiB))
+			for _, l3 := range s.Topo.L3Domains {
+				if l3.Node != nodeID || l3.Socket != sock.ID {
+					continue
+				}
+				fmt.Fprintf(&b, "    L3 #%d  threads %s\n", l3.ID, formatCPURanges(l3.Threads))
+			}
+			for _, dev := range s.Topo.PCIDevices {
+				if dev.Node != nodeID || !isDisplayDevice(dev.Class) {
+					continue
+				}
+				fmt.Fprintf(&b, "    gpu %s  %s  (%s)\n", dev.Addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver))
+			}
+		}
+	}
+	body := strings.TrimRight(b.String(), "\n")
+	panel, _ := panelH("hardware", body, w, budget, true)
+	return panel
+}
+
+// overviewCardsLayout returns the width and budget the Overview tab's node
+// cards actually get: the whole w/budget when the topology has no socket
+// data at all (a hand-built fixture, most likely -- hostinfo.Read never
+// actually produces this -- so the hardware panel would be empty and is
+// skipped entirely), or when the hardware panel sits beside the cards
+// (splitBodyWidth judged the terminal wide enough); otherwise (stacked)
+// the cards' own natural height (estimated via overviewCardNaturalHeight,
+// not a full render) caps their share via splitStackedBudget, the same
+// primary/secondary split every other stacked tab uses. Shared by
+// renderOverviewTab and App.clampOverviewScroll so the actual layout and
+// the scroll clamp always agree on how much room the cards have.
+func overviewCardsLayout(s *model.Snapshot, w, budget int) (cardsW, cardsBudget, hardwareBudget int) {
+	if len(s.Topo.Sockets) == 0 {
+		return w, budget, 0
+	}
+	primaryW, _, sideBySide := splitBodyWidth(w)
+	if sideBySide {
+		return primaryW, budget, budget
+	}
+	_, cardsSideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
+	natural := 0
+	for _, node := range s.Topo.Nodes {
+		h := overviewCardNaturalHeight(s, node)
+		if cardsSideBySide {
+			if h > natural {
+				natural = h
+			}
+		} else {
+			natural += h
+		}
+	}
+	cardsBudget, hardwareBudget = splitStackedBudget(budget, natural)
+	return w, cardsBudget, hardwareBudget
+}
+
+// renderOverviewTab renders the Overview tab: the node cards (renderOverview-
+// Cards) as the primary panel, the hardware listing (renderOverviewHardware)
+// as the secondary one -- side by side when the terminal is wide enough
+// (splitBodyWidth), else stacked with the cards first and the hardware
+// listing below, splitting budget between them the same way every other
+// stacked tab does (splitStackedBudget). Then a one-line-per-VM list of
+// any domains flagged Unsupported.
+func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
+	primaryW, primaryBudget, secondaryBudget := overviewCardsLayout(s, w, budget)
+
+	cards := renderOverviewCards(s, primaryW, primaryBudget, scroll)
+	out := cards
+	if secondaryBudget > 0 {
+		_, secondaryW, sideBySide := splitBodyWidth(w)
+		hardware := renderOverviewHardware(s, secondaryW, secondaryBudget)
+		if sideBySide {
+			out = lipgloss.JoinHorizontal(lipgloss.Top, cards, " ", hardware)
+		} else {
+			out = cards + "\n" + hardware
 		}
 	}
 

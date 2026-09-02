@@ -306,7 +306,7 @@ func Read(sysfsRoot string) (*Topology, error) {
 // domains are produced and every thread keeps its default L3 of -1.
 func readL3Domains(cpuDirs []string, threads map[int]Thread) ([]L3Domain, error) {
 	seen := map[string]bool{}
-	var rawLists []string
+	var groups [][]int
 	for _, dir := range cpuDirs {
 		base := filepath.Base(dir)
 		id, err := strconv.Atoi(strings.TrimPrefix(base, "cpu"))
@@ -343,24 +343,26 @@ func readL3Domains(cpuDirs []string, threads map[int]Thread) ([]L3Domain, error)
 			if err != nil {
 				return nil, fmt.Errorf("hostinfo: reading shared_cpu_list in %q: %w", idxDir, err)
 			}
-			if !seen[raw] {
-				seen[raw] = true
-				rawLists = append(rawLists, raw)
+			ids, err := ParseCPUList(raw)
+			if err != nil {
+				return nil, fmt.Errorf("hostinfo: parsing shared_cpu_list %q: %w", raw, err)
+			}
+			if len(ids) == 0 {
+				continue
+			}
+			// Dedupe on the parsed, canonically-formatted set rather than
+			// the raw sysfs string: two cache/indexN/shared_cpu_list files
+			// naming the same set of CPUs in a different (but equivalent)
+			// textual form -- e.g. "0-5,12-17" vs "0,1,2,3,4,5,12,13,14,
+			// 15,16,17" -- must still collapse to one domain, not two.
+			key := FormatCPUList(ids)
+			if !seen[key] {
+				seen[key] = true
+				groups = append(groups, ids)
 			}
 		}
 	}
 
-	groups := make([][]int, 0, len(rawLists))
-	for _, raw := range rawLists {
-		ids, err := ParseCPUList(raw)
-		if err != nil {
-			return nil, fmt.Errorf("hostinfo: parsing shared_cpu_list %q: %w", raw, err)
-		}
-		if len(ids) == 0 {
-			continue
-		}
-		groups = append(groups, ids)
-	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i][0] < groups[j][0] })
 
 	domains := make([]L3Domain, 0, len(groups))
@@ -556,6 +558,14 @@ func parsePCIIDs(s string) pciNames {
 	for _, line := range strings.Split(s, "\n") {
 		switch {
 		case line == "" || strings.HasPrefix(line, "#"):
+			continue
+		case strings.HasPrefix(line, "C "):
+			// The device-class section (e.g. "C 03  Display controller"):
+			// its own indented lines look just like vendor/device lines,
+			// so clear curVendor to keep them from being misfiled as
+			// devices of whatever real vendor came last before this
+			// section started.
+			curVendor = ""
 			continue
 		case strings.HasPrefix(line, "\t\t"):
 			continue // subvendor line: not needed

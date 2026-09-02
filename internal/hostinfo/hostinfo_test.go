@@ -341,10 +341,14 @@ func TestReadRealHostMirror(t *testing.T) {
 		{"processor": "23", "physical id": "0", "model name": "AMD Ryzen 9 5900X 12-Core Processor"},
 	})
 	pciIDsPath := filepath.Join(root, "pci.ids")
-	writePCIIDs(t, pciIDsPath, "1002  Advanced Micro Devices, Inc. [AMD/ATI]\n"+
+	writePCIIDs(t, pciIDsPath, "# comment line, and a blank line above/below it should be ignored\n\n"+
+		"1002  Advanced Micro Devices, Inc. [AMD/ATI]\n"+
 		"\t743f  Navi 10 [Radeon RX 5700 XT]\n"+
+		"\t\t1002 0123  Some Board Vendor's Radeon variant\n"+ // subvendor line: ignored
 		"10de  NVIDIA Corporation\n"+
-		"\t2216  GA102 [GeForce RTX 3080 Ti]\n")
+		"\t2216  GA102 [GeForce RTX 3080 Ti]\n"+
+		"C 03  Display controller\n"+ // device-class section: its own indented
+		"\t00  VGA compatible controller\n") // lines must not be read as devices
 	pciIDsPaths = []string{pciIDsPath}
 
 	topo, err := Read(root)

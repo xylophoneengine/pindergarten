@@ -517,7 +517,8 @@ func (a *App) clampOverviewScroll() {
 		heights[i] = lineCount(overviewNodeCard(projected, node)) + 2 // borders
 	}
 	_, _, _, _, chrome := a.renderChrome()
-	if max := maxStackedScroll(heights, a.bodyBudget(chrome)); a.overviewScroll > max {
+	_, cardsBudget, _ := overviewCardsLayout(projected, effectiveWidth(a.width), a.bodyBudget(chrome))
+	if max := maxStackedScroll(heights, cardsBudget); a.overviewScroll > max {
 		a.overviewScroll = max
 	}
 }
