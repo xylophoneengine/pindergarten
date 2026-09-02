@@ -806,7 +806,14 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 			offset = cursorRow - shownRows + 1
 		}
 	}
-	gridLines, usedOffset, total := windowWithFooter(gridLinesAll, previewBudget, offset)
+	// No room left for the grid at all: skip it outright rather than let
+	// footerBudget force a one-line window plus footer that would push the
+	// button row past the budget (and its click hits out of the panel).
+	var gridLines []string
+	usedOffset, total := 0, 0
+	if previewBudget > 0 {
+		gridLines, usedOffset, total = windowWithFooter(gridLinesAll, previewBudget, offset)
+	}
 	previewLines := append([]string{}, gridLines...)
 	if footer := scrollFooter(usedOffset, len(gridLines), total); footer != "" {
 		previewLines = append(previewLines, keyBarLabelStyle.Render(footer))

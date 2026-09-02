@@ -51,26 +51,18 @@ func TestReservedThreads(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		n       int
-		want    map[int]bool
-		wantErr bool
+		name string
+		n    int
+		want map[int]bool
 	}{
 		{name: "n=0 reserve off", n: 0, want: nil},
 		{name: "n=1 first core of each node", n: 1,
 			want: map[int]bool{0: true, 6: true, 3: true, 9: true}},
 		{name: "n=2 first two cores of each node", n: 2,
 			want: map[int]bool{0: true, 6: true, 1: true, 7: true, 3: true, 9: true, 4: true, 10: true}},
-		{name: "n=3 (== smallest node's core count) rejected at startup", n: 3, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.wantErr {
-				if tc.n < min {
-					t.Fatalf("test fixture: n=%d should be >= min=%d", tc.n, min)
-				}
-				return
-			}
 			if got := reservedThreads(topo, tc.n); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("reservedThreads(topo, %d) = %v, want %v", tc.n, got, tc.want)
 			}

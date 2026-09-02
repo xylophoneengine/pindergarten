@@ -1693,3 +1693,26 @@ func TestWizardStatusBarFitsAtMinimumWidth(t *testing.T) {
 		t.Fatalf("renderStatusBar() = %q, want the apply and cancel hints intact", bar)
 	}
 }
+
+// TestWizardEmulatorFieldUsesRanges pins the checkbox label to the same
+// range formatter the summary line uses: a contiguous reserved set reads
+// "0-1,4-5", never the comma-per-thread "0,1,4,5".
+func TestWizardEmulatorFieldUsesRanges(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	a.snap.Reserved = map[int]bool{0: true, 4: true, 2: true, 6: true}
+	enterEdit(a)
+	a.tab = tabVMs
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	// Widen node 0's reserve to two whole cores after opening (the
+	// proposal already exists, so capacity is not re-checked here).
+	a.wizard.base.Reserved = map[int]bool{0: true, 1: true, 4: true, 5: true, 2: true, 6: true}
+	a.wizard.field = fieldEmulator
+	sendKeyType(a, tea.KeySpace)
+	if got := a.wizard.emulatorFieldValue(); !strings.Contains(got, "threads 0-1,4-5") {
+		t.Fatalf("emulatorFieldValue() = %q, want ranges \"threads 0-1,4-5\"", got)
+	}
+}

@@ -211,7 +211,7 @@ func showcaseApp(t *testing.T) *App {
 		return model.Build(showcaseTopo(), doms, showcasePCINode), domsMap, nil
 	}
 
-	a := New(f, scan, t.TempDir(), "v0.1.0")
+	a := New(f, scan, t.TempDir(), "v0.1.1")
 	runScan(t, a)
 	a.Update(tea.WindowSizeMsg{Width: screenshotWidth, Height: screenshotHeight})
 	enterEdit(a)
