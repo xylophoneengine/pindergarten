@@ -131,7 +131,7 @@ Set memory node (after `n`):
 
 | Key | Action |
 |-----|--------|
-| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node needs the same digit again to confirm |
+| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node opens a yes/no confirm ("Bind memory across the GPU's node anyway?") before staging |
 | `esc` | cancel |
 
 Pin wizard (after `p`): a form (node, within, threads, memory node, a
@@ -144,7 +144,7 @@ live preview) plus the manual grid as an alternative threads editor.
 | backspace | form, threads field | delete the character before the caret |
 | `a` | form | re-fill the threads field from the current proposal |
 | `m` | form | open the manual grid, an alternative threads editor |
-| `enter` | form | stage, once the threads field is valid; a placement that crosses the VM's GPU node needs a second `enter` to confirm, never blocked outright |
+| `enter` | form | stage, once the threads field is valid; a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
 | `esc` | form / manual | cancel back out |
 | `h`/`l`/`j`/`k`, up/down | manual | move the cursor across the node's cores |
 | `space` | manual | toggle the thread pair under the cursor |

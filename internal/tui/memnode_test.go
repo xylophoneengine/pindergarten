@@ -235,15 +235,12 @@ func TestMemNodeEscCancels(t *testing.T) {
 	}
 }
 
-// TestMemNodeWarnsOnGPUMismatch covers the non-blocking GPU-locality
-// warning: vm2XML's hostdev resolves to node 1 (vm2PCINode), so picking
-// node 0 must stage successfully but surface a warning.
-// TestMemNodeWarnsOnGPUMismatch covers the amendment folded into the pin
-// wizard v2 round: picking a node that crosses the VM's GPU node is
-// still never blocked outright, but -- like the wizard form's own
-// confirm-on-first-enter -- the first press only arms a loud warning;
-// the same digit pressed again actually stages.
-func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
+// openMemPickerCrossingGPU opens the mem-node picker for vm2 (whose
+// hostdev resolves to node 1 via vm2PCINode) -- shared setup for the
+// TestMemNodeGPUCross* confirm tests below, mirroring
+// openWizardCrossingGPU.
+func openMemPickerCrossingGPU(t *testing.T) *App {
+	t.Helper()
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
 	enterEdit(a)
@@ -253,22 +250,50 @@ func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
 	if a.memPicker == nil {
 		t.Fatal("mem-node picker did not open")
 	}
+	return a
+}
+
+// TestMemNodeGPUCrossOpensConfirm covers pickMemNode's confirm path (the
+// fix for the old pendingConfirm "pick again" softening): picking node 0
+// while vm2's GPU sits on node 1 opens App's shared y/n confirm instead
+// of staging outright -- nothing is queued yet, and the picker stays open
+// underneath, untouched.
+func TestMemNodeGPUCrossOpensConfirm(t *testing.T) {
+	a := openMemPickerCrossingGPU(t)
+
 	sendKey(a, '0')
 
+	if a.confirm == nil {
+		t.Fatal("no confirm opened when picking a node crossing the GPU node")
+	}
+	if a.confirm.prompt != "Bind memory across the GPU's node anyway? [y/n]" {
+		t.Fatalf("confirm.prompt = %q, want the GPU-cross confirm text", a.confirm.prompt)
+	}
 	if a.memPicker == nil {
-		t.Fatal("picker closed on the first press crossing the GPU node, want it armed instead")
+		t.Fatal("picker closed while the confirm is open, want it to stay open underneath")
 	}
 	if a.queue.Len() != 0 {
-		t.Fatalf("queue.Len() = %d after the first press, want 0 (not staged yet)", a.queue.Len())
+		t.Fatalf("queue.Len() = %d before confirming, want 0 (not staged yet)", a.queue.Len())
 	}
-	if !strings.Contains(a.status, "GPU is on node 1") {
-		t.Fatalf("status = %q, want the GPU-locality warning", a.status)
+}
+
+// TestMemNodeGPUCrossYStages covers the confirm's "y": it stages exactly
+// the picked node (0, not the GPU's node 1) with the Summary's "crosses
+// GPU node" suffix, closing both the confirm and the picker.
+func TestMemNodeGPUCrossYStages(t *testing.T) {
+	a := openMemPickerCrossingGPU(t)
+	sendKey(a, '0')
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
 	}
 
-	sendKey(a, '0') // second press of the same node: confirms
+	sendKey(a, 'y')
 
+	if a.confirm != nil {
+		t.Fatal("confirm still open after y")
+	}
 	if a.memPicker != nil {
-		t.Fatal("picker still open after the confirming second press")
+		t.Fatal("picker still open after y")
 	}
 	if a.queue.Len() != 1 {
 		t.Fatalf("queue.Len() = %d, want 1 (warning must not block staging)", a.queue.Len())
@@ -279,5 +304,49 @@ func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
 	}
 	if !strings.Contains(op.Summary, "crosses GPU node") {
 		t.Fatalf("op.Summary = %q, want the crosses-GPU-node suffix", op.Summary)
+	}
+}
+
+// TestMemNodeGPUCrossNKeepsPickerOpen covers the confirm's "n": it must
+// only dismiss the confirm, not the picker, staging nothing.
+func TestMemNodeGPUCrossNKeepsPickerOpen(t *testing.T) {
+	a := openMemPickerCrossingGPU(t)
+	sendKey(a, '0')
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	sendKey(a, 'n')
+
+	if a.confirm != nil {
+		t.Fatal("confirm still open after n")
+	}
+	if a.memPicker == nil {
+		t.Fatal("picker closed after declining the confirm with n, want it to stay open")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after n, want 0", a.queue.Len())
+	}
+}
+
+// TestMemNodeGPUCrossEscKeepsPickerOpen mirrors
+// TestMemNodeGPUCrossNKeepsPickerOpen for esc.
+func TestMemNodeGPUCrossEscKeepsPickerOpen(t *testing.T) {
+	a := openMemPickerCrossingGPU(t)
+	sendKey(a, '0')
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	sendKeyType(a, tea.KeyEsc)
+
+	if a.confirm != nil {
+		t.Fatal("confirm still open after esc")
+	}
+	if a.memPicker == nil {
+		t.Fatal("picker closed by esc, want only the confirm to have closed")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after esc, want 0", a.queue.Len())
 	}
 }

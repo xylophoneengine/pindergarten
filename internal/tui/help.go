@@ -56,7 +56,7 @@ var helpKeys = []helpEntry{
 	{"Topology", "up/down / j k", "scroll the drawing"},
 	{"Topology", "mouse click", "on a core box: jump to that core on the CPU Map tab"},
 
-	{"Set memory node", "digit 0-9", "stage a memory-node-only change to that node"},
+	{"Set memory node", "digit 0-9", "stage a memory-node-only change to that node (a pick crossing the VM's GPU node opens a yes/no confirm first)"},
 	{"Set memory node", "esc", "cancel"},
 
 	{"Pin wizard", "up/down / j k", "(form) move between the node/within/threads/memory node fields"},
@@ -64,7 +64,7 @@ var helpKeys = []helpEntry{
 	{"Pin wizard", "backspace", "(form, threads field) delete the character before the caret"},
 	{"Pin wizard", "a", "(form) re-fill the threads field from the current proposal"},
 	{"Pin wizard", "m", "(form) open the manual grid, an alternative threads editor"},
-	{"Pin wizard", "enter", "(form) stage; twice, if it crosses the VM's GPU node, to confirm"},
+	{"Pin wizard", "enter", "(form) stage, once valid; a placement crossing the VM's GPU node opens a yes/no confirm first"},
 	{"Pin wizard", "esc", "(form / manual) cancel back out"},
 	{"Pin wizard", "h/l/j/k, up/down", "(manual) move the cursor across the node's cores"},
 	{"Pin wizard", "space", "(manual) toggle the thread pair under the cursor"},

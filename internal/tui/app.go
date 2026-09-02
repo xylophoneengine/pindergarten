@@ -1204,7 +1204,15 @@ func flowTitle(screen flowScreen) string {
 // renderStatusBar renders the bottom key bar: "N pending ops" followed by
 // "[key] label" hints (bold key, dim label) for whatever's clickable/keyable
 // right now. While a wizard/mem-node-picker/apply-flow screen is open, its
-// own (unstyled) hint line replaces the default set.
+// own (unstyled) hint line replaces the default set. A confirm has no case
+// of its own here (unlike renderDialog's, which does put it first): its own
+// "[y]es  [n]/esc cancel" hint already lives inside the confirm panel
+// itself, so this falls through to whichever of the cases below still
+// matches while a confirm is open on top of it (a wizard/mem-node-picker
+// GPU-cross confirm keeps showing that screen's own hint; a plain confirm
+// with nothing open underneath falls all the way through to the default
+// set -- several tests pin the key bar's usual quit/rescan/edit hints
+// staying visible under that kind of confirm).
 func (a *App) renderStatusBar() string {
 	pending := pluralize(a.queue.Len(), "pending op")
 

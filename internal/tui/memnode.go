@@ -22,14 +22,6 @@ type memNodePicker struct {
 	stagedHash string
 	stagedXML  string          // domain XML at open time (same XML stagedHash hashes), for the drift screen's diff
 	snap       *model.Snapshot // for rendering each node's free memory
-
-	// pendingConfirm is the node id awaiting a second pick to confirm it
-	// crosses the VM's GPU node (see crossesGPU/App.pickMemNode) -- the
-	// same loud-warning, confirm-on-first-press softening the pin
-	// wizard's form uses for the same condition, since picking a node
-	// here is otherwise a single keypress with no separate "enter" to
-	// gate on. -1 means nothing is armed.
-	pendingConfirm int
 }
 
 // newMemNodePicker builds a picker for vm, computing gpuNode/pinNode from
@@ -37,21 +29,21 @@ type memNodePicker struct {
 // against.
 func newMemNodePicker(vm *model.VM, stagedHash, stagedXML string, snap *model.Snapshot) *memNodePicker {
 	return &memNodePicker{
-		vm:             vm.Name,
-		pins:           copyPinsMap(vm.Pins),
-		gpuNode:        vm.GPUNode(),
-		pinNode:        pinsNode(snap.Topo, vm.Pins),
-		stagedHash:     stagedHash,
-		stagedXML:      stagedXML,
-		snap:           snap,
-		pendingConfirm: -1,
+		vm:         vm.Name,
+		pins:       copyPinsMap(vm.Pins),
+		gpuNode:    vm.GPUNode(),
+		pinNode:    pinsNode(snap.Topo, vm.Pins),
+		stagedHash: stagedHash,
+		stagedXML:  stagedXML,
+		snap:       snap,
 	}
 }
 
 // crossesGPU reports whether picking node would cross the VM's GPU node
 // -- the one warning reason (of warning's two) that gets the loud,
-// confirm-on-first-press treatment; "differs from the current pin node"
-// stays a plain, immediate warning, since it isn't a locality concern.
+// confirm-via-App.confirm treatment (see App.pickMemNode); "differs from
+// the current pin node" stays a plain, immediate warning, since it isn't
+// a locality concern.
 func (p *memNodePicker) crossesGPU(node int) bool {
 	return p.gpuNode != -1 && node != p.gpuNode
 }
@@ -204,27 +196,35 @@ func (a *App) handleMemNodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // pickMemNode stages a memory-node op for the open picker's VM if node
 // names an existing topology node, appending its (non-blocking) plain
 // warning line, styled, to the status. A pick that crosses the VM's GPU
-// node is never blocked either, but does need a second pick of the same
-// node to confirm -- the first just arms pendingConfirm and shows a
-// loud warning explaining why nothing staged yet, mirroring the pin
-// wizard form's own confirm-on-first-enter softening; the mouse click
-// and the digit key share this same gate, since they both funnel
-// through here. Closes the picker once something actually stages.
-// Shared by the digit-key handler and the node-line mouse click.
+// node is never blocked either, but does open the shared App.confirm y/n
+// dialog first (mirroring the pin wizard form's own tryStage): the op is
+// built right here, from the pick that triggered it, and staged verbatim
+// on "y"; "n"/esc just dismiss the confirm, leaving the picker open with
+// nothing staged (see App.handleConfirmKey, routed ahead of the picker --
+// App.handleKey). The mouse click and the digit key share this same gate,
+// since they both funnel through here. A non-crossing pick still closes
+// the picker immediately, same as before. Shared by the digit-key handler
+// and the node-line mouse click.
 func (a *App) pickMemNode(node int) {
 	if !a.memPicker.hasNode(node) {
-		return
-	}
-	if a.memPicker.crossesGPU(node) && a.memPicker.pendingConfirm != node {
-		a.memPicker.pendingConfirm = node
-		a.status = gpuWarningStyle.Render(fmt.Sprintf(
-			"GPU is on node %d; node %d crosses it -- pick node %d again to confirm", a.memPicker.gpuNode, node, node))
 		return
 	}
 	op := a.memPicker.buildOp(node)
 	status := "staged: " + op.Summary
 	if warn := a.memPicker.warning(node); warn != "" {
 		status += "\n" + warningStyle.Render(warn)
+	}
+	if a.memPicker.crossesGPU(node) {
+		a.confirm = &confirm{
+			prompt: "Bind memory across the GPU's node anyway? [y/n]",
+			yes: func() tea.Cmd {
+				a.queue.Add(op)
+				a.status = status
+				a.memPicker = nil
+				return nil
+			},
+		}
+		return
 	}
 	a.queue.Add(op)
 	a.status = status

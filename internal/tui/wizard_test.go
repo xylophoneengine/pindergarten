@@ -310,15 +310,13 @@ func TestWizardManualRoundTrip(t *testing.T) {
 }
 
 // TestWizardFormCyclesNodeAndWarnsOnGPUCross covers the form's node field
-// (left/right cycles, re-proposing within the new node) and the loud,
-// confirm-on-first-enter GPU-crossing softening: vm2's hostdev forces the
-// proposal onto node 1; cycling the node field to 0 must re-propose there
-// (a fresh, valid 2-thread selection on node 0) and show the crosses-GPU
-// warning. Pressing enter there must NOT stage on the first press (only
-// arm the confirmation) but must on the second, landing the op on node 0
-// with the Summary's "crosses GPU node" suffix -- proving the override is
-// soft (never blocked outright), matching the design spec's locality
-// rule, while still requiring a deliberate second confirmation.
+// (left/right cycles, re-proposing within the new node) and the loud
+// GPU-crossing warning: vm2's hostdev forces the proposal onto node 1;
+// cycling the node field to 0 must re-propose there (a fresh, valid
+// 2-thread selection on node 0) and show the crosses-GPU warning. What
+// happens on enter from here is covered separately below (see
+// openWizardCrossingGPU and the TestWizardGPUCross* tests), since that's
+// now App's shared y/n confirm dialog rather than the wizard's own state.
 func TestWizardFormCyclesNodeAndWarnsOnGPUCross(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
@@ -348,21 +346,76 @@ func TestWizardFormCyclesNodeAndWarnsOnGPUCross(t *testing.T) {
 	if !strings.Contains(view, "GPU at 0000:81:00.0 is on node 1") {
 		t.Fatalf("view() = %q, want the crosses-GPU-node warning", view)
 	}
+}
 
-	sendKeyType(a, tea.KeyEnter) // first enter: must only arm, not stage
+// openWizardCrossingGPU opens the pin wizard for vm2 (whose hostdev forces
+// its proposal onto node 1) and cycles the node field to node 0, leaving a
+// valid, GPU-crossing form with enter not yet pressed -- shared setup for
+// the TestWizardGPUCross* confirm tests below.
+func openWizardCrossingGPU(t *testing.T) *App {
+	t.Helper()
+	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
 	if a.wizard == nil {
-		t.Fatal("wizard closed on the first enter while crossing the GPU node, want it armed instead")
+		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
-	if !a.wizard.crossConfirmed {
-		t.Fatal("crossConfirmed = false after the first enter, want it armed")
+	sendKeyType(a, tea.KeyLeft) // cycle node 1 -> node 0 (wraps), a GPU-crossing pick
+	if a.wizard.node != 0 {
+		t.Fatalf("node = %d, want 0 after cycling", a.wizard.node)
+	}
+	return a
+}
+
+// TestWizardGPUCrossEnterOpensConfirm covers tryStage's confirm path (the
+// fix for the old crossConfirmed "press enter again" softening): a valid
+// form that crosses the GPU node opens App's shared y/n confirm on the
+// first enter instead of staging outright -- nothing is queued yet, and
+// the wizard stays open underneath, untouched.
+func TestWizardGPUCrossEnterOpensConfirm(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	threadsBefore := a.wizard.threadsText
+
+	sendKeyType(a, tea.KeyEnter)
+
+	if a.confirm == nil {
+		t.Fatal("no confirm opened on enter while crossing the GPU node")
+	}
+	if a.confirm.prompt != "Pin across the GPU's node anyway? [y/n]" {
+		t.Fatalf("confirm.prompt = %q, want the GPU-cross confirm text", a.confirm.prompt)
+	}
+	if a.wizard == nil {
+		t.Fatal("wizard closed while the confirm is open, want it to stay open underneath")
+	}
+	if a.wizard.threadsText != threadsBefore {
+		t.Fatalf("threadsText changed to %q while the confirm is open, want %q unchanged", a.wizard.threadsText, threadsBefore)
 	}
 	if a.queue.Len() != 0 {
 		t.Fatalf("queue.Len() = %d after the first enter, want 0 (not staged yet)", a.queue.Len())
 	}
+}
 
-	sendKeyType(a, tea.KeyEnter) // second enter: now stages
+// TestWizardGPUCrossYStages covers the confirm's "y": it stages exactly
+// what the preview showed (op.MemNode 0, not the GPU's node 1) with the
+// Summary's "crosses GPU node" suffix, closing both the confirm and the
+// wizard.
+func TestWizardGPUCrossYStages(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	sendKey(a, 'y')
+
+	if a.confirm != nil {
+		t.Fatal("confirm still open after y")
+	}
 	if a.wizard != nil {
-		t.Fatal("wizard still open after the confirming second enter")
+		t.Fatal("wizard still open after y")
 	}
 	if a.queue.Len() != 1 {
 		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
@@ -373,6 +426,79 @@ func TestWizardFormCyclesNodeAndWarnsOnGPUCross(t *testing.T) {
 	}
 	if !strings.Contains(op.Summary, "crosses GPU node") {
 		t.Fatalf("op.Summary = %q, want the crosses-GPU-node suffix", op.Summary)
+	}
+}
+
+// TestWizardGPUCrossNKeepsFormOpen covers the confirm's "n": it must only
+// dismiss the confirm, not the wizard -- the form stays open with every
+// field exactly as the operator left it, so declining the cross doesn't
+// cost them the filled-in form.
+func TestWizardGPUCrossNKeepsFormOpen(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	wantNode, wantThreads := a.wizard.node, a.wizard.threadsText
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	sendKey(a, 'n')
+
+	if a.confirm != nil {
+		t.Fatal("confirm still open after n")
+	}
+	if a.wizard == nil {
+		t.Fatal("wizard closed after declining the confirm with n, want it to stay open")
+	}
+	if a.wizard.node != wantNode || a.wizard.threadsText != wantThreads {
+		t.Fatalf("form fields changed after n: node=%d threads=%q, want node=%d threads=%q",
+			a.wizard.node, a.wizard.threadsText, wantNode, wantThreads)
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after n, want 0", a.queue.Len())
+	}
+}
+
+// TestWizardGPUCrossEscKeepsFormOpen mirrors TestWizardGPUCrossNKeepsFormOpen
+// for esc: the bug this fixes had esc, while the old crossConfirmed flag
+// was armed, cancel the WHOLE wizard instead of just the confirm --
+// losing the operator's filled-in form for declining one cross-node pick.
+func TestWizardGPUCrossEscKeepsFormOpen(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	wantNode, wantThreads := a.wizard.node, a.wizard.threadsText
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	sendKeyType(a, tea.KeyEsc)
+
+	if a.confirm != nil {
+		t.Fatal("confirm still open after esc")
+	}
+	if a.wizard == nil {
+		t.Fatal("wizard closed by esc, want only the confirm to have closed")
+	}
+	if a.wizard.node != wantNode || a.wizard.threadsText != wantThreads {
+		t.Fatalf("form fields changed after esc: node=%d threads=%q, want node=%d threads=%q",
+			a.wizard.node, a.wizard.threadsText, wantNode, wantThreads)
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after esc, want 0", a.queue.Len())
+	}
+}
+
+// TestWizardGPUCrossWarningShownOnce covers the fix for the GPU-cross
+// warning printing twice in the same popup: it must appear loud (under
+// the node field) exactly once, not again in the tail warnings list --
+// see currentWarnings, which deliberately omits it now that viewForm
+// prints it itself.
+func TestWizardGPUCrossWarningShownOnce(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+
+	view, _ := a.wizard.view(200, 40)
+	const warningPrefix = "GPU at 0000:81:00.0 is on node 1"
+	if n := strings.Count(view, warningPrefix); n != 1 {
+		t.Fatalf("view() contains the GPU-cross warning %d times, want exactly 1:\n%s", n, view)
 	}
 }
 
@@ -430,6 +556,62 @@ func TestWizardFormWithinFilterRestrictsThreads(t *testing.T) {
 		if !l3Zero[id] {
 			t.Fatalf("threads = %v, want all within L3 #0 (0-5,12-17)", ids)
 		}
+	}
+}
+
+// TestWizardFormWithinFilterRejectsHandTypedOutsideL3 covers parseThreads'
+// L3 check: with within = L3 #0 (threads 0-5,12-17), a hand-typed 4-thread
+// list drawn from L3 #1 instead (6,7,8,9 -- same node 0, so the node check
+// alone would pass it) must still be rejected, naming the first offending
+// thread and the filter it's not in, even though the field still displays
+// "L3 #0".
+func TestWizardFormWithinFilterRejectsHandTypedOutsideL3(t *testing.T) {
+	topo := realHostTopo()
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"four-vcpu": fourVCPUWizardXML}}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(topo, doms, noNode), domsMap, nil
+	}
+	a := New(f, scan, t.TempDir(), "test")
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	a.wizard.field = fieldWithin
+	sendKeyType(a, tea.KeyRight) // any -> L3 #0 (threads 0-5,12-17)
+	if a.wizard.within != 0 {
+		t.Fatalf("within = %d, want 0 (L3 #0)", a.wizard.within)
+	}
+
+	a.wizard.field = fieldThreads
+	a.wizard.threadsText = "6-9" // valid node (0), wrong count is not the point here: 4 threads, all in L3 #1
+	a.wizard.threadsCaret = len(a.wizard.threadsText)
+
+	ids, errMsg := a.wizard.parseThreads()
+	if errMsg == "" {
+		t.Fatalf("parseThreads() = %v, nil error, want a rejection naming the L3 #0 filter", ids)
+	}
+	if !strings.Contains(errMsg, "not in L3 #0") {
+		t.Fatalf("parseThreads() error = %q, want it to name the L3 #0 filter", errMsg)
+	}
+
+	sendKeyType(a, tea.KeyEnter)
+	if a.wizard == nil {
+		t.Fatal("wizard closed on enter with an out-of-filter thread list, want it to stay open")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d, want 0 (an out-of-filter list must not stage)", a.queue.Len())
 	}
 }
 

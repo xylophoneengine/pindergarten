@@ -47,14 +47,13 @@ type wizard struct {
 	vcpus      int    // the VM's own vcpu count, fixed for the life of the wizard
 
 	// Form screen state.
-	node           int             // current node choice
-	within         int             // -1 = "any", else an L3Domain.ID -- the form's thread-source filter
-	threadsText    string          // editable cpulist text
-	threadsCaret   int             // caret position within threadsText, 0..len(threadsText)
-	memSel         int             // -2 = "same as node", -1 = "leave", else an explicit node id
-	field          wizardFormField // focused field
-	proposal       *model.Proposal // last successful ProposeWithin(node, within) result; nil if that combination has no valid proposal (e.g. an L3 filter too small for VCPUs) -- 'a' and the preview/summary's Warnings fall back to nothing when nil
-	crossConfirmed bool            // armed by one Enter while crossesGPUWarning() is non-empty; a second Enter then actually stages -- reset by any field-changing key
+	node         int             // current node choice
+	within       int             // -1 = "any", else an L3Domain.ID -- the form's thread-source filter
+	threadsText  string          // editable cpulist text
+	threadsCaret int             // caret position within threadsText, 0..len(threadsText)
+	memSel       int             // -2 = "same as node", -1 = "leave", else an explicit node id
+	field        wizardFormField // focused field
+	proposal     *model.Proposal // last successful ProposeWithin(node, within) result; nil if that combination has no valid proposal (e.g. an L3 filter too small for VCPUs) -- 'a' and the preview/summary's Warnings fall back to nothing when nil
 
 	// Manual screen state (an alternative editor for the form's threads
 	// field, scoped to the form's current node -- see 'm').
@@ -90,8 +89,13 @@ func newWizard(vm string, proposal *model.Proposal, vcpus int, stagedHash, stage
 
 // update handles one key on whichever screen is active. done reports the
 // wizard should close; when done and op is non-nil, the caller stages it,
-// else the wizard was cancelled.
-func (w *wizard) update(msg tea.KeyMsg) (bool, *model.PendingOp) {
+// else the wizard was cancelled. When confirmPrompt is non-empty, done is
+// always false (the wizard stays open, unmodified) and the caller must
+// instead open a y/n confirm with that prompt: a "yes" answer stages op
+// verbatim and closes the wizard itself (see App.handleWizardKey) -- this
+// is how a GPU-node-crossing stage is confirmed, replacing the old
+// press-enter-twice softening with App's shared confirm dialog.
+func (w *wizard) update(msg tea.KeyMsg) (done bool, op *model.PendingOp, confirmPrompt string) {
 	if w.screen == manualScreen {
 		return w.updateManual(msg)
 	}
@@ -109,45 +113,43 @@ func isThreadsChar(r rune) bool {
 // always move the focused field; left/right edit the caret when
 // fieldThreads is focused, else cycle that field's value; 'a' re-fills
 // threadsText from the last proposal; 'm' opens the manual grid; enter
-// validates and stages (or, the first time while crossesGPUWarning() is
-// non-empty, just arms crossConfirmed and waits for a second enter --
-// see tryStage); esc cancels the whole wizard.
-func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp) {
+// validates and either stages outright or (see tryStage) hands back a
+// confirmPrompt for the caller to gate on instead; esc cancels the whole
+// wizard.
+func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
 	if w.field == fieldThreads {
 		switch {
 		case msg.Type == tea.KeyLeft:
 			if w.threadsCaret > 0 {
 				w.threadsCaret--
 			}
-			return false, nil
+			return false, nil, ""
 		case msg.Type == tea.KeyRight:
 			if w.threadsCaret < len(w.threadsText) {
 				w.threadsCaret++
 			}
-			return false, nil
+			return false, nil, ""
 		case msg.Type == tea.KeyBackspace:
 			if w.threadsCaret > 0 {
 				w.threadsText = w.threadsText[:w.threadsCaret-1] + w.threadsText[w.threadsCaret:]
 				w.threadsCaret--
-				w.crossConfirmed = false
 			}
-			return false, nil
+			return false, nil, ""
 		case msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && isThreadsChar(msg.Runes[0]):
 			r := string(msg.Runes[0])
 			w.threadsText = w.threadsText[:w.threadsCaret] + r + w.threadsText[w.threadsCaret:]
 			w.threadsCaret++
-			w.crossConfirmed = false
-			return false, nil
+			return false, nil, ""
 		}
 	}
 
 	switch {
 	case msg.Type == tea.KeyUp, isRune(msg, 'k'):
 		w.field = (w.field - 1 + numFormFields) % numFormFields
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 		w.field = (w.field + 1) % numFormFields
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyLeft, msg.Type == tea.KeyRight:
 		delta := 1
 		if msg.Type == tea.KeyLeft {
@@ -161,42 +163,45 @@ func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp) {
 		case fieldMemNode:
 			w.cycleMemNode(delta)
 		}
-		return false, nil
+		return false, nil, ""
 	case isRune(msg, 'a'):
 		w.autofillThreads()
-		return false, nil
+		return false, nil, ""
 	case isRune(msg, 'm'):
 		w.screen = manualScreen
 		w.cursor = 0
 		ids, _ := w.parseThreads()
 		w.selected = threadSet(ids)
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyEnter:
 		return w.tryStage()
 	case msg.Type == tea.KeyEsc:
-		return true, nil
+		return true, nil, ""
 	}
-	return false, nil
+	return false, nil, ""
 }
 
 // tryStage validates the current form: an invalid thread list never
-// stages (the error already shows under the field via view()). A valid
-// one that crosses the GPU node arms crossConfirmed on the first enter
-// (a loud warning explains why nothing happened yet) rather than staging
-// outright -- the operator must press enter again, now that it's armed,
-// to actually confirm. A valid, non-crossing list always stages on the
-// first enter.
-func (w *wizard) tryStage() (bool, *model.PendingOp) {
+// stages (the error already shows under the field via view()) and
+// returns no confirm prompt either. A valid list that crosses the GPU
+// node builds the op right here, from the current field values, and hands
+// it back with the confirm prompt the caller (App.handleWizardKey) must
+// put to the operator via the shared App.confirm dialog -- the op it
+// stages on "yes" is exactly this one, snapshotted at the moment enter was
+// pressed, not re-read later; cycleNode/cycleWithin/cycleMemNode need no
+// "reset the armed confirm" bookkeeping of their own because of this (the
+// old crossConfirmed flag they used to clear is gone). A valid,
+// non-crossing list always stages outright on enter, same as before.
+func (w *wizard) tryStage() (bool, *model.PendingOp, string) {
 	ids, errMsg := w.parseThreads()
 	if errMsg != "" {
-		return false, nil
-	}
-	if w.crossesGPUWarning() != "" && !w.crossConfirmed {
-		w.crossConfirmed = true
-		return false, nil
+		return false, nil, ""
 	}
 	op := w.buildOp(ids)
-	return true, &op
+	if w.crossesGPUWarning() != "" {
+		return false, &op, "Pin across the GPU's node anyway? [y/n]"
+	}
+	return true, &op, ""
 }
 
 // cycleNode advances w.node by delta (wrapping) in topology node-ID
@@ -220,7 +225,6 @@ func (w *wizard) cycleNode(delta int) {
 	idx = (idx + delta + len(nodes)) % len(nodes)
 	w.node = nodes[idx].ID
 	w.within = -1
-	w.crossConfirmed = false
 	w.reproposeAndFill()
 }
 
@@ -249,7 +253,6 @@ func (w *wizard) cycleWithin(delta int) {
 	}
 	idx = (idx + delta + len(opts)) % len(opts)
 	w.within = opts[idx]
-	w.crossConfirmed = false
 	w.reproposeAndFill()
 }
 
@@ -265,7 +268,10 @@ func (w *wizard) memNodeOptions() []int {
 }
 
 // cycleMemNode advances the "memory node" field by delta (wrapping).
-// Independent of node/within -- it never re-proposes.
+// Independent of node/within -- it never re-proposes. It needs no
+// "confirm" bookkeeping of its own: tryStage builds the confirm's op from
+// whatever memSel (and every other field) reads at the moment enter is
+// pressed, so any earlier cycleMemNode call is already reflected in it.
 func (w *wizard) cycleMemNode(delta int) {
 	opts := w.memNodeOptions()
 	idx := 0
@@ -332,14 +338,17 @@ func (w *wizard) autofillThreads() {
 	}
 	w.threadsText = formatCPURanges(assignedThreads(w.proposal.Pins))
 	w.threadsCaret = len(w.threadsText)
-	w.crossConfirmed = false
 }
 
 // parseThreads validates threadsText: a cpulist (hostinfo.ParseCPUList)
-// naming exactly vcpus threads, every one on w.node and actually online
+// naming exactly vcpus threads, every one on w.node, actually online
 // (present in base.Topo.Threads -- an offline CPU has no Thread entry at
-// all, same as one that never existed). Returns the parsed, sorted
-// thread ids and "" on success, or nil and the first problem found.
+// all, same as one that never existed), and -- when the "within" field
+// has an L3 filter set (w.within >= 0) -- inside that L3 domain too, so a
+// hand-typed list can't quietly slip in a thread from a different L3
+// domain on the same node while the field still shows the narrower
+// filter. Returns the parsed, sorted thread ids and "" on success, or nil
+// and the first problem found.
 func (w *wizard) parseThreads() ([]int, string) {
 	ids, err := hostinfo.ParseCPUList(w.threadsText)
 	if err != nil {
@@ -348,6 +357,10 @@ func (w *wizard) parseThreads() ([]int, string) {
 	if len(ids) != w.vcpus {
 		return nil, fmt.Sprintf("%d threads given, need %d", len(ids), w.vcpus)
 	}
+	var allowed map[int]bool
+	if w.within >= 0 {
+		allowed = threadSet(l3ThreadsOnNode(w.base, w.node, w.within))
+	}
 	for _, t := range ids {
 		th, ok := w.base.Topo.Threads[t]
 		if !ok {
@@ -355,6 +368,9 @@ func (w *wizard) parseThreads() ([]int, string) {
 		}
 		if th.Node != w.node {
 			return nil, fmt.Sprintf("thread %d is on node %d", t, th.Node)
+		}
+		if allowed != nil && !allowed[t] {
+			return nil, fmt.Sprintf("thread %d not in L3 #%d", t, w.within)
 		}
 	}
 	return ids, ""
@@ -490,7 +506,7 @@ func (w *wizard) buildOp(ids []int) model.PendingOp {
 // accepted here; the form's own live validation reports a count
 // mismatch, same as if the operator had typed it by hand. esc returns
 // to the form without touching threadsText.
-func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp) {
+func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
 	cores := nodeCores(w.base, w.node)
 
 	switch {
@@ -498,36 +514,35 @@ func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp) {
 		if w.cursor > 0 {
 			w.cursor--
 		}
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyRight, isRune(msg, 'l'):
 		if w.cursor < len(cores)-1 {
 			w.cursor++
 		}
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyUp, isRune(msg, 'k'):
 		if w.cursor-coresPerRow >= 0 {
 			w.cursor -= coresPerRow
 		}
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 		if w.cursor+coresPerRow < len(cores) {
 			w.cursor += coresPerRow
 		}
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeySpace:
 		w.toggleCore(cores)
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyEnter:
 		w.threadsText = formatCPURanges(assignedThreads(assignSelected(w.selected)))
 		w.threadsCaret = len(w.threadsText)
-		w.crossConfirmed = false
 		w.screen = formScreen
-		return false, nil
+		return false, nil, ""
 	case msg.Type == tea.KeyEsc:
 		w.screen = formScreen
-		return false, nil
+		return false, nil, ""
 	}
-	return false, nil
+	return false, nil, ""
 }
 
 // toggleCore toggles every thread of the cursor's core in w.selected: if
@@ -598,14 +613,15 @@ func (w *wizard) threadsFieldValue() string {
 }
 
 // currentWarnings returns the last proposal's own Warnings (share-count/
-// memory-shortfall) alongside the live crossesGPUWarning, when ids is a
-// currently-valid thread list -- an invalid one already shows its own
-// error under the threads field instead.
+// memory-shortfall) when ids is a currently-valid thread list -- an
+// invalid one already shows its own error under the threads field
+// instead. The GPU-cross warning is deliberately NOT repeated here:
+// viewForm already prints it loud (gpuWarningStyle) right under the node
+// field, and listing it a second time in this tail-of-popup warnings list
+// would just be visual noise -- see crossesGPUWarning's own caller in
+// viewForm.
 func (w *wizard) currentWarnings(ids []int) []string {
 	var warnings []string
-	if warn := w.crossesGPUWarning(); warn != "" {
-		warnings = append(warnings, warn)
-	}
 	if len(ids) > 0 && w.proposal != nil {
 		warnings = append(warnings, w.proposal.Warnings...)
 	}
@@ -666,9 +682,6 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 	head = append(head, "  "+w.nodeHint(w.node))
 	if warn := w.crossesGPUWarning(); warn != "" {
 		head = append(head, strings.Split(lipgloss.NewStyle().Width(inner).Render(gpuWarningStyle.Render(warn)), "\n")...)
-		if !w.crossConfirmed {
-			head = append(head, gpuWarningStyle.Render("press enter again to confirm"))
-		}
 	}
 
 	addField(fieldWithin, w.renderFieldRow(fieldWithin, fmt.Sprintf("< %s >", withinLabel(w.within))))
@@ -827,9 +840,28 @@ func (a *App) openWizard() (tea.Model, tea.Cmd) {
 }
 
 // handleWizardKey routes a key to the open wizard, staging or discarding it
-// once the wizard reports done.
+// once the wizard reports done. When the wizard instead hands back a
+// confirmPrompt (a valid stage that crosses the VM's GPU node), the
+// wizard stays open and untouched -- App opens its own shared y/n confirm
+// dialog on top of it instead: "y" stages op verbatim and closes the
+// wizard; "n"/esc (handled by App.handleConfirmKey, routed there ahead of
+// the wizard -- see App.handleKey) just dismiss the confirm, leaving the
+// form/manual screen exactly as the operator left it.
 func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	done, op := a.wizard.update(msg)
+	done, op, prompt := a.wizard.update(msg)
+	if prompt != "" {
+		staged := *op
+		a.confirm = &confirm{
+			prompt: prompt,
+			yes: func() tea.Cmd {
+				a.queue.Add(staged)
+				a.status = "staged: " + staged.Summary
+				a.wizard = nil
+				return nil
+			},
+		}
+		return a, nil
+	}
 	if done {
 		if op != nil {
 			a.queue.Add(*op)
