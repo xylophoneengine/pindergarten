@@ -12,15 +12,7 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
-// wizardScreen is one of the two screens the pin wizard can show.
-type wizardScreen int
-
-const (
-	formScreen wizardScreen = iota
-	manualScreen
-)
-
-// wizardFormField is one of the form screen's four navigable fields, in
+// wizardFormField is one of the form's five navigable fields, in
 // on-screen order.
 type wizardFormField int
 
@@ -29,24 +21,23 @@ const (
 	fieldWithin
 	fieldThreads
 	fieldMemNode
+	fieldGrid
 	numFormFields
 )
 
-// wizard is the pin-wizard v2 state machine: one form screen (node,
-// within, threads, memory node, a live preview) plus the existing
-// per-core manual grid as an alternative thread-list editor, entered via
-// 'm' and returning to the form with its selection written into the
-// threads field. App holds one (nil when closed); while non-nil, App
-// routes key input to update and renders view in place of the tab body.
+// wizard is the pin-wizard v3 state machine: one form (node, within,
+// threads, memory node) with a live preview grid that doubles as the
+// editor -- toggling a core directly rewrites the threads field, no
+// separate screen involved. App holds one (nil when closed); while
+// non-nil, App routes key input to update and renders view in place of
+// the tab body.
 type wizard struct {
 	vm         string
 	base       *model.Snapshot // snapshot Propose ran against: the VM's own current pins/membind projected away, so its own threads read as free rather than occupied
-	screen     wizardScreen
 	stagedHash string
 	stagedXML  string // domain XML at open time (same XML stagedHash hashes), for the drift screen's diff
 	vcpus      int    // the VM's own vcpu count, fixed for the life of the wizard
 
-	// Form screen state.
 	node         int             // current node choice
 	within       int             // -1 = "any", else an L3Domain.ID -- the form's thread-source filter
 	threadsText  string          // editable cpulist text
@@ -54,11 +45,7 @@ type wizard struct {
 	memSel       int             // -2 = "same as node", -1 = "leave", else an explicit node id
 	field        wizardFormField // focused field
 	proposal     *model.Proposal // last successful ProposeWithin(node, within) result; nil if that combination has no valid proposal (e.g. an L3 filter too small for VCPUs) -- 'a' and the preview/summary's Warnings fall back to nothing when nil
-
-	// Manual screen state (an alternative editor for the form's threads
-	// field, scoped to the form's current node -- see 'm').
-	cursor   int          // core index within nodeCores(base, node)
-	selected map[int]bool // thread ids selected
+	cursor       int             // core index within nodeCores(base, node), used when field == fieldGrid
 }
 
 // newWizard opens a wizard for vm (vcpus its own vcpu count), seeded from
@@ -73,7 +60,6 @@ func newWizard(vm string, proposal *model.Proposal, vcpus int, stagedHash, stage
 	w := &wizard{
 		vm:         vm,
 		base:       base,
-		screen:     formScreen,
 		stagedHash: stagedHash,
 		stagedXML:  stagedXML,
 		vcpus:      vcpus,
@@ -87,25 +73,6 @@ func newWizard(vm string, proposal *model.Proposal, vcpus int, stagedHash, stage
 	return w
 }
 
-// update handles one key on whichever screen is active. done reports the
-// wizard should close; when done and op is non-nil, the caller stages it,
-// else the wizard was cancelled. When confirmPrompt is non-empty, done is
-// always false (the wizard stays open, unmodified) and the caller must
-// instead open a y/n confirm with that prompt: a "yes" answer stages op
-// verbatim and closes the wizard itself (see App.handleWizardKey) -- this
-// is how a GPU-node-crossing stage is confirmed, replacing the old
-// press-enter-twice softening with App's shared confirm dialog. perRow is
-// the manual grid's own cores-per-row (only used by updateManual's j/k --
-// see updateManual), computed by the caller the same way viewManual
-// renders it (coresPerRowForInner(dw-2)) so a row of cursor movement
-// always matches a row on screen.
-func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.PendingOp, confirmPrompt string) {
-	if w.screen == manualScreen {
-		return w.updateManual(msg, perRow)
-	}
-	return w.updateForm(msg)
-}
-
 // isThreadsChar reports whether r is a character the threads field
 // accepts: digits, comma, dash -- exactly hostinfo.ParseCPUList's own
 // cpulist grammar.
@@ -113,14 +80,20 @@ func isThreadsChar(r rune) bool {
 	return (r >= '0' && r <= '9') || r == ',' || r == '-'
 }
 
-// updateForm handles one key on the form screen: up/down (or j/k)
+// update handles one key on the form: up/down (or j/k, outside the grid)
 // always move the focused field; left/right edit the caret when
-// fieldThreads is focused, else cycle that field's value; 'a' re-fills
-// threadsText from the last proposal; 'm' opens the manual grid; enter
+// fieldThreads is focused, move the grid cursor when fieldGrid is
+// focused, else cycle that field's value; space toggles the grid
+// cursor's core; 'a' re-fills threadsText from the last proposal; 'A'
 // validates and either stages outright or (see tryStage) hands back a
-// confirmPrompt for the caller to gate on instead; esc cancels the whole
-// wizard.
-func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
+// confirmPrompt for the caller to gate on instead; 'C' and esc cancel the
+// whole wizard. perRow is the preview grid's own cores-per-row, computed
+// by the caller the same way view renders it (coresPerRowForInner(dw-2))
+// so a row of grid cursor movement always matches a row on screen.
+func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.PendingOp, confirmPrompt string) {
+	if perRow < 1 {
+		perRow = 1
+	}
 	if w.field == fieldThreads {
 		switch {
 		case msg.Type == tea.KeyLeft:
@@ -143,6 +116,39 @@ func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
 			r := string(msg.Runes[0])
 			w.threadsText = w.threadsText[:w.threadsCaret] + r + w.threadsText[w.threadsCaret:]
 			w.threadsCaret++
+			return false, nil, ""
+		}
+	}
+
+	if w.field == fieldGrid {
+		cores := nodeCores(w.base, w.node)
+		switch {
+		case msg.Type == tea.KeyLeft, isRune(msg, 'h'):
+			if w.cursor > 0 {
+				w.cursor--
+			}
+			return false, nil, ""
+		case msg.Type == tea.KeyRight, isRune(msg, 'l'):
+			if w.cursor < len(cores)-1 {
+				w.cursor++
+			}
+			return false, nil, ""
+		case msg.Type == tea.KeyUp, isRune(msg, 'k'):
+			if w.cursor-perRow >= 0 {
+				w.cursor -= perRow
+			} else {
+				w.field = fieldMemNode
+			}
+			return false, nil, ""
+		case msg.Type == tea.KeyDown, isRune(msg, 'j'):
+			if w.cursor+perRow < len(cores) {
+				w.cursor += perRow
+			} else {
+				w.field = fieldNode
+			}
+			return false, nil, ""
+		case msg.Type == tea.KeySpace:
+			w.toggleCore(cores)
 			return false, nil, ""
 		}
 	}
@@ -171,14 +177,10 @@ func (w *wizard) updateForm(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
 	case isRune(msg, 'a'):
 		w.autofillThreads()
 		return false, nil, ""
-	case isRune(msg, 'm'):
-		w.screen = manualScreen
-		w.cursor = 0
-		ids, _ := w.parseThreads()
-		w.selected = threadSet(ids)
-		return false, nil, ""
-	case msg.Type == tea.KeyEnter:
+	case isRune(msg, 'A'):
 		return w.tryStage()
+	case isRune(msg, 'C'):
+		return true, nil, ""
 	case msg.Type == tea.KeyEsc:
 		return true, nil, ""
 	}
@@ -229,6 +231,7 @@ func (w *wizard) cycleNode(delta int) {
 	idx = (idx + delta + len(nodes)) % len(nodes)
 	w.node = nodes[idx].ID
 	w.within = -1
+	w.cursor = 0
 	w.reproposeAndFill()
 }
 
@@ -503,82 +506,38 @@ func (w *wizard) buildOp(ids []int) model.PendingOp {
 	}
 }
 
-// updateManual handles one key on the manual grid: an alternative
-// editor for the form's threads field, scoped to the form's current
-// node. enter writes the current selection back into threadsText (as a
-// cpulist, via formatCPURanges) and returns to the form -- any count is
-// accepted here; the form's own live validation reports a count
-// mismatch, same as if the operator had typed it by hand. esc returns
-// to the form without touching threadsText. perRow (see update) is the
-// same cores-per-row viewManual just rendered at -- up/down must step by
-// it, not a fixed guess, or the cursor drifts off its own visual column
-// (it used to step by the package-level coresPerRow constant, which only
-// ever matched the actual rendered row width by coincidence).
-func (w *wizard) updateManual(msg tea.KeyMsg, perRow int) (bool, *model.PendingOp, string) {
-	cores := nodeCores(w.base, w.node)
-	if perRow < 1 {
-		perRow = 1
-	}
-
-	switch {
-	case msg.Type == tea.KeyLeft, isRune(msg, 'h'):
-		if w.cursor > 0 {
-			w.cursor--
-		}
-		return false, nil, ""
-	case msg.Type == tea.KeyRight, isRune(msg, 'l'):
-		if w.cursor < len(cores)-1 {
-			w.cursor++
-		}
-		return false, nil, ""
-	case msg.Type == tea.KeyUp, isRune(msg, 'k'):
-		if w.cursor-perRow >= 0 {
-			w.cursor -= perRow
-		}
-		return false, nil, ""
-	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
-		if w.cursor+perRow < len(cores) {
-			w.cursor += perRow
-		}
-		return false, nil, ""
-	case msg.Type == tea.KeySpace:
-		w.toggleCore(cores)
-		return false, nil, ""
-	case msg.Type == tea.KeyEnter:
-		w.threadsText = formatCPURanges(assignedThreads(assignSelected(w.selected)))
-		w.threadsCaret = len(w.threadsText)
-		w.screen = formScreen
-		return false, nil, ""
-	case msg.Type == tea.KeyEsc:
-		w.screen = formScreen
-		return false, nil, ""
-	}
-	return false, nil, ""
-}
-
-// toggleCore toggles every thread of the cursor's core in w.selected: if
-// any of them is unselected, it selects all of them; if all are already
-// selected, it deselects all of them.
+// toggleCore toggles the cursor's core (a nodeCores(base, node) index)
+// into or out of the threads field: parses threadsText into a set
+// (empty if it's currently invalid, so a bad hand-typed list doesn't
+// block the grid from starting fresh), applies the same all-selected/
+// any-unselected rule the old manual grid used, then writes the sorted
+// result back as a cpulist with the caret at the end.
 func (w *wizard) toggleCore(cores []hostinfo.Core) {
 	if w.cursor < 0 || w.cursor >= len(cores) {
 		return
 	}
 	core := cores[w.cursor]
 
+	ids, _ := w.parseThreads()
+	selected := threadSet(ids)
+
 	allSelected := true
 	for _, t := range core.Threads {
-		if !w.selected[t] {
+		if !selected[t] {
 			allSelected = false
 			break
 		}
 	}
 	for _, t := range core.Threads {
 		if allSelected {
-			delete(w.selected, t)
+			delete(selected, t)
 		} else {
-			w.selected[t] = true
+			selected[t] = true
 		}
 	}
+
+	w.threadsText = formatCPURanges(assignedThreads(assignSelected(selected)))
+	w.threadsCaret = len(w.threadsText)
 }
 
 // formLabelWidth is the widest field label ("memory node"), so every
@@ -627,10 +586,10 @@ func (w *wizard) threadsFieldValue() string {
 // memory-shortfall) when ids is a currently-valid thread list -- an
 // invalid one already shows its own error under the threads field
 // instead. The GPU-cross warning is deliberately NOT repeated here:
-// viewForm already prints it loud (gpuWarningStyle) right under the node
+// view already prints it loud (gpuWarningStyle) right under the node
 // field, and listing it a second time in this tail-of-popup warnings list
 // would just be visual noise -- see crossesGPUWarning's own caller in
-// viewForm.
+// view.
 func (w *wizard) currentWarnings(ids []int) []string {
 	var warnings []string
 	if len(ids) > 0 && w.proposal != nil {
@@ -654,28 +613,17 @@ func (w *wizard) summaryLine(ids []int) string {
 	return fmt.Sprintf("%d vcpus -> node %d threads %s; memory -> %s", w.vcpus, w.node, threads, memText)
 }
 
-// view renders the active screen against w.base as a single self-
-// contained dialog panel dw wide -- one border, not two stacked boxes --
-// top-down truncated to fit budget (the same "never exceed the popup"
-// rule every dialog in this package follows). Alongside the string it
-// returns the active screen's own clickable hits, 0-based relative to
-// the wizard panel's own top-left corner.
+// view renders the form against w.base as a single self-contained dialog
+// panel dw wide -- one border, not two stacked boxes -- top-down
+// truncated to fit budget (the same "never exceed the popup" rule every
+// dialog in this package follows). Alongside the string it returns the
+// form's own clickable hits, 0-based relative to the wizard panel's own
+// top-left corner: node/within/threads/memory-node/grid rows ("formfield"
+// hit kind, index the wizardFormField -- the grid's own formfield hit
+// covers the whole block, so a click there that misses a cell still
+// focuses it), the grid's own cells ("wizardcore", clickable regardless of
+// focus), and the two [A]pply/[C]ancel buttons ("wizardbtn", index 0/1).
 func (w *wizard) view(dw, budget int) (string, []hit) {
-	if w.screen == manualScreen {
-		return w.viewManual(dw, budget)
-	}
-	return w.viewForm(dw, budget)
-}
-
-// viewForm renders the form screen: node/within/threads/memory-node
-// fields (each a click-to-focus row, "formfield" hit kind, index the
-// wizardFormField), their own hint/error/warning lines, a rule, then the
-// preview -- a dense glyph strip of w.node (renderNodeMap, no cursor --
-// the preview isn't itself clickable, unlike the manual grid) windowed
-// to whatever budget is left (so a node with more rows than fit still
-// renders, just clipped -- see the width/height invariant tests), the
-// one-line summary, and the current warnings.
-func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus)", w.vm, w.vcpus)
 	inner := dw - 2
 	if inner < 1 {
@@ -708,11 +656,14 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 
 	head = append(head, strings.Repeat("-", inner))
 
+	const applyLabel, cancelLabel = "[A]pply", "[C]ancel"
 	var tail []string
 	tail = append(tail, w.summaryLine(ids))
 	for _, wm := range w.currentWarnings(ids) {
 		tail = append(tail, warningStyle.Render(wm))
 	}
+	btnRow := len(tail) // the button line's row within tail, for its own hits below
+	tail = append(tail, applyLabel+"  "+cancelLabel)
 
 	contentBudget := budget - 2
 	if contentBudget < 1 {
@@ -726,20 +677,60 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 	if len(ids) > 0 {
 		highlight = threadSet(ids)
 	}
+	cursor := -1
+	if w.field == fieldGrid {
+		cursor = w.cursor
+	}
+	perRow := coresPerRowForInner(inner)
 	// perRow is derived from inner (the dialog's own content width), so
 	// the grid wraps to fit rather than needing truncateLines to cut a
 	// too-wide row short below -- kept as a safety net regardless (a
 	// single-line grid at inner+1 width from integer rounding, say).
-	grid, _ := renderNodeMap(w.base, w.node, highlight, -1, "", coresPerRowForInner(inner))
-	grid = truncateLines(grid, inner)
-	gridLines, _, total := windowWithFooter(strings.Split(grid, "\n"), previewBudget, 0)
-	preview := strings.Join(gridLines, "\n")
-	if footer := scrollFooter(0, len(gridLines), total); footer != "" {
-		preview += "\n" + keyBarLabelStyle.Render(footer)
+	grid, gridHits := renderNodeMap(w.base, w.node, highlight, cursor, "wizardcore", perRow)
+	gridLinesAll := strings.Split(truncateLines(grid, inner), "\n")
+
+	// Only the grid's own focus scrolls the preview to keep the cursor's
+	// row in view; unfocused, it stays pinned to the top like before.
+	offset := 0
+	if w.field == fieldGrid {
+		shownRows := footerBudget(len(gridLinesAll), previewBudget)
+		if cursorRow := w.cursor / perRow; cursorRow >= shownRows {
+			offset = cursorRow - shownRows + 1
+		}
+	}
+	gridLines, usedOffset, total := windowWithFooter(gridLinesAll, previewBudget, offset)
+	previewLines := append([]string{}, gridLines...)
+	if footer := scrollFooter(usedOffset, len(gridLines), total); footer != "" {
+		previewLines = append(previewLines, keyBarLabelStyle.Render(footer))
 	}
 
+	// Grid cell hits are 0-based within the grid (renderNodeMap's own
+	// convention): shift by the window's own offset, dropping any cell
+	// hit that scrolled out of view, then by the grid's row within the
+	// body.
+	gridRowOff := len(head)
+	for _, h := range gridHits {
+		h.y0 -= usedOffset
+		h.y1 -= usedOffset
+		if h.y0 < 0 || h.y0 >= len(gridLines) {
+			continue
+		}
+		h.y0 += gridRowOff
+		h.y1 += gridRowOff
+		hits = append(hits, h)
+	}
+	if len(gridLines) > 0 {
+		hits = append(hits, hit{y0: gridRowOff, y1: gridRowOff + len(gridLines), x0: 0, x1: inner, kind: "formfield", index: int(fieldGrid)})
+	}
+
+	tailRowOff := len(head) + len(previewLines)
+	hits = append(hits,
+		hit{y0: tailRowOff + btnRow, y1: tailRowOff + btnRow + 1, x0: 0, x1: len(applyLabel), kind: "wizardbtn", index: 0},
+		hit{y0: tailRowOff + btnRow, y1: tailRowOff + btnRow + 1, x0: len(applyLabel) + 2, x1: len(applyLabel) + 2 + len(cancelLabel), kind: "wizardbtn", index: 1},
+	)
+
 	lines := append([]string{}, head...)
-	lines = append(lines, strings.Split(preview, "\n")...)
+	lines = append(lines, previewLines...)
 	lines = append(lines, tail...)
 
 	kept := len(lines)
@@ -756,63 +747,11 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 	return panel, offsetHits(clipHitsToWindow(hits, kept, inner), 1, 1)
 }
 
-// viewManual renders the manual grid screen: the node-map grid
-// (truncated, never wrapped), a "-" rule, then a short info line, all
-// inside the same titled panel, top-down truncated to fit budget.
-func (w *wizard) viewManual(dw, budget int) (string, []hit) {
-	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d: manual", w.vm, w.vcpus, w.node)
-
-	inner := dw - 2
-	if inner < 1 {
-		inner = 1
-	}
-	grid, gridHits := renderNodeMap(w.base, w.node, w.selected, w.cursor, "wizardcore", coresPerRowForInner(inner))
-	var info strings.Builder
-	fmt.Fprintf(&info, "selected %d/%d\n", len(w.selected), w.vcpus)
-	if warn := w.crossesGPUWarning(); warn != "" {
-		info.WriteString(warningStyle.Render(warn))
-		info.WriteString("\n")
-	}
-
-	gridLines := strings.Split(truncateLines(grid, inner), "\n")
-	var infoLines []string
-	if infoText := strings.TrimRight(info.String(), "\n"); infoText != "" {
-		infoLines = strings.Split(lipgloss.NewStyle().Width(inner).Render(infoText), "\n")
-	}
-
-	lines := append([]string{}, gridLines...)
-	if len(infoLines) > 0 {
-		lines = append(lines, strings.Repeat("-", inner))
-		lines = append(lines, infoLines...)
-	}
-
-	contentBudget := budget - 2
-	if contentBudget < 1 {
-		contentBudget = 1
-	}
-	kept := len(lines)
-	if kept > contentBudget {
-		lines = lines[:contentBudget]
-		kept = contentBudget
-	}
-	panel := panelInner(title, strings.Join(lines, "\n"), dw, 0)
-
-	gridKept := kept
-	if gridKept > len(gridLines) {
-		gridKept = len(gridLines)
-	}
-	hits := offsetHits(clipHitsToWindow(gridHits, gridKept, inner), 1, 1)
-	return panel, hits
-}
-
 // statusBarHint returns the status bar's replacement content while the
 // wizard is open: its own keys, since edit/quit/pin/strip are inert while
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
-	if w.screen == manualScreen {
-		return "[h/l/j/k/up/down] move  [space] toggle  [enter] accept  [esc] back"
-	}
-	return "[up/down] field  [left/right] change/edit  [a] autofill  [m] manual  [enter] stage  [esc] cancel"
+	return "[up/down] field  [left/right] change/edit  [space] toggle core  [a] autofill  [A] apply  [C] cancel"
 }
 
 // openWizard implements the 'p' key on the VMs tab: after the shared
@@ -854,11 +793,11 @@ func (a *App) openWizard() (tea.Model, tea.Cmd) {
 // dialog on top of it instead: "y" stages op verbatim and closes the
 // wizard; "n"/esc (handled by App.handleConfirmKey, routed there ahead of
 // the wizard -- see App.handleKey) just dismiss the confirm, leaving the
-// form/manual screen exactly as the operator left it. The manual grid's
-// cores-per-row is computed here, the same way (dialogWidth then
-// coresPerRowForInner) renderDialog will render it, and handed to
-// wizard.update so its own up/down stepping always matches what's on
-// screen -- see the wizard.update/updateManual doc comments.
+// form exactly as the operator left it. The preview grid's cores-per-row
+// is computed here, the same way (dialogWidth then coresPerRowForInner)
+// renderDialog will render it, and handed to wizard.update so its own
+// up/down stepping always matches what's on screen -- see wizard.update's
+// own doc comment.
 func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
 	done, op, prompt := a.wizard.update(msg, coresPerRowForInner(dw-2))
@@ -887,31 +826,45 @@ func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// handleWizardMouse routes a left click: on the form screen, a click on
-// a field row focuses it (matching the brief's "navigated with up/down
-// (or click)"); on the manual screen, a click on the node map moves the
-// cursor to the clicked core and toggles it, same as arrow keys + space.
-func (a *App) handleWizardMouse(msg tea.MouseMsg) {
+// handleWizardMouse routes a left click: on a "wizardcore" hit (checked
+// first, so a hit on the cell wins over the grid's own broader
+// "formfield" hit underneath it), it focuses fieldGrid, moves the cursor
+// there and toggles it, same as arrow keys + space; on a plain "formfield"
+// hit, it just focuses that field; on a "wizardbtn" hit, it replays the
+// same synthesized key ('A' for index 0, 'C' for index 1) through
+// handleWizardKey, so the confirm plumbing (a GPU-crossing stage) is
+// shared with the real keypress. Always returns a, nil (nothing here ever
+// produces a different model or a Cmd); the return value only exists so a
+// caller that wants it can chain, and app.go's own call site ignores it.
+func (a *App) handleWizardMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return
-	}
-	if a.wizard.screen != manualScreen {
-		for _, h := range a.hits {
-			if h.kind == "formfield" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
-				a.wizard.field = wizardFormField(h.index)
-				return
-			}
-		}
-		return
+		return a, nil
 	}
 	cores := nodeCores(a.wizard.base, a.wizard.node)
 	for _, h := range a.hits {
 		if h.kind == "wizardcore" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			a.wizard.field = fieldGrid
 			a.wizard.cursor = h.index
 			a.wizard.toggleCore(cores)
-			return
+			return a, nil
 		}
 	}
+	for _, h := range a.hits {
+		if h.kind == "formfield" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			a.wizard.field = wizardFormField(h.index)
+			return a, nil
+		}
+	}
+	for _, h := range a.hits {
+		if h.kind == "wizardbtn" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			r := rune('A')
+			if h.index == 1 {
+				r = 'C'
+			}
+			return a.handleWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	return a, nil
 }
 
 // nodeCores returns s.Topo.Cores restricted to node, in topology order.
@@ -931,11 +884,10 @@ func nodeCores(s *model.Snapshot, node int) []hostinfo.Core {
 // render in the wizard highlight style, the core at cursor (a nodeCores
 // index, -1 for none) renders reverse-video instead. Alongside the string
 // it returns one hit of the given kind per cell (kind "" records no hits
-// at all -- the wizard form's own preview isn't clickable), 0-based
-// relative to the grid's own top-left corner (x0 = the cell's column *
-// 3), indexed by its position in nodeCores(s, node) -- the CPU Map tab,
-// whose cursor is a *global* s.Topo.Cores index, translates that back via
-// globalCoreIndices.
+// at all), 0-based relative to the grid's own top-left corner (x0 = the
+// cell's column * 3), indexed by its position in nodeCores(s, node) --
+// the CPU Map tab, whose cursor is a *global* s.Topo.Cores index,
+// translates that back via globalCoreIndices.
 func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int, kind string, perRow int) (string, []hit) {
 	if perRow < 1 {
 		perRow = 1
@@ -1014,7 +966,7 @@ func threadSet(ids []int) map[int]bool {
 }
 
 // assignSelected assigns vcpu i to the i-th selected thread in ascending
-// order, per the manual-adjust acceptance rule.
+// order, per the core grid's own toggle acceptance rule.
 func assignSelected(selected map[int]bool) map[int][]int {
 	ids := make([]int, 0, len(selected))
 	for id := range selected {
@@ -1029,7 +981,7 @@ func assignSelected(selected map[int]bool) map[int][]int {
 }
 
 // copyPinsMap returns a shallow-safe copy of pins (each thread slice
-// copied), so the staged op never aliases the proposal's or the manual
+// copied), so the staged op never aliases the proposal's or the grid
 // selection's own maps.
 func copyPinsMap(pins map[int][]int) map[int][]int {
 	cp := make(map[int][]int, len(pins))

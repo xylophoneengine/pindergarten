@@ -299,7 +299,7 @@ func TestWriteScreenshots(t *testing.T) {
 
 	// Accept the proposal: the first of the two staged pending ops the
 	// rest of the frames (overview, cpumap, vms, pending) show.
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.wizard != nil {
 		t.Fatal("wizard still open after accepting the proposal")
 	}

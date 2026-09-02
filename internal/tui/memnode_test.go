@@ -83,7 +83,7 @@ func TestMemNodeUsesProjectedPins(t *testing.T) {
 	if a.wizard == nil {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
-	sendKeyType(a, tea.KeyEnter) // accept the proposal
+	sendKey(a, 'A') // accept the proposal
 	if a.wizard != nil {
 		t.Fatal("wizard still open after accepting the proposal")
 	}

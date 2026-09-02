@@ -188,21 +188,20 @@ Set memory node (after `n`):
 | digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node opens a yes/no confirm ("Bind memory across the GPU's node anyway?") before staging |
 | `esc` | cancel |
 
-Pin wizard (after `p`): a form (node, within, threads, memory node, a
-live preview) plus the manual grid as an alternative threads editor.
+Pin wizard (after `p`): a form (node, within, threads, memory node) whose
+live preview grid is editable in place -- toggle cores directly instead of
+typing into the threads field -- staged with `[A]pply` or dropped with
+`[C]ancel`.
 
-| Key | Screen | Action |
-|-----|--------|--------|
-| up/down / `j k` | form | move between the node/within/threads/memory node fields |
-| left/right | form | cycle the focused field's value, or move the caret within the threads field |
-| backspace | form, threads field | delete the character before the caret |
-| `a` | form | re-fill the threads field from the current proposal |
-| `m` | form | open the manual grid, an alternative threads editor |
-| `enter` | form | stage, once the threads field is valid; a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
-| `esc` | form / manual | cancel back out |
-| `h`/`l`/`j`/`k`, up/down | manual | move the cursor across the node's cores |
-| `space` | manual | toggle the thread pair under the cursor |
-| `enter` | manual | write the selection into the form's threads field and return to it |
+| Key | Action |
+|-----|--------|
+| up/down / `j k` | move between the node/within/threads/memory node/core-grid fields; wraps between the grid's top/bottom row and the neighboring field |
+| left/right / `h l` | cycle the focused field's value, move the caret within the threads field, or move the core-grid cursor |
+| backspace | (threads field) delete the character before the caret |
+| `space` | (core grid) toggle the cursor's core into/out of the threads field |
+| `a` | re-fill the threads field from the current proposal |
+| `A` | stage the current form (or click `[A]pply`); a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
+| `C` / `esc` | cancel back out (or click `[C]ancel`) |
 
 Apply review and drift (after `a`, while applying):
 

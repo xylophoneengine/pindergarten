@@ -182,7 +182,7 @@ func TestUnsupportedVMRefusesPinAndStrip(t *testing.T) {
 	}
 }
 
-func TestWizardAcceptStagesPin(t *testing.T) {
+func TestWizardApplyStagesPin(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
@@ -198,7 +198,7 @@ func TestWizardAcceptStagesPin(t *testing.T) {
 	wantPins := a.wizard.proposal.Pins
 	wantNode := a.wizard.proposal.Node
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 
 	if a.wizard != nil {
 		t.Fatal("wizard still open after accepting the proposal")
@@ -250,14 +250,13 @@ func TestWizardEscCancels(t *testing.T) {
 	}
 }
 
-// TestWizardManualRoundTrip drives the manual grid as an alternative
-// threads-field editor: opening it starts with the form's current
-// threads pre-selected, an edit there (deselect core 0, select core 1
-// instead) writes back into threadsText as a cpulist on enter, and
-// returns to the form screen -- not staged outright, since any count is
-// accepted by the manual screen itself; the form's own validation is
-// what actually gates staging (see TestWizardFormInvalidThreadsBlocksEnter).
-func TestWizardManualRoundTrip(t *testing.T) {
+// TestWizardGridToggleEditsThreadsText covers space toggling the cursor's
+// core straight into the threads field (toggleCore's own all-selected/
+// any-unselected rule, unchanged from the old manual grid): the default
+// proposal starts with core 0 fully selected (threads 0,4); toggling it
+// off, moving to core 1, and toggling it on rewrites threadsText in
+// place, no separate accept step, and 'A' stages exactly that.
+func TestWizardGridToggleEditsThreadsText(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
@@ -271,32 +270,20 @@ func TestWizardManualRoundTrip(t *testing.T) {
 		t.Fatalf("proposal.Node = %d, want 0 (no other VMs, lower ID wins the tie)", a.wizard.proposal.Node)
 	}
 
-	sendKey(a, 'm')
-	if a.wizard.screen != manualScreen {
-		t.Fatal("'m' did not switch to the manual screen")
-	}
-	if len(a.wizard.selected) != 2 {
-		t.Fatalf("manual screen selected = %v, want the form's 2 current threads pre-selected", a.wizard.selected)
-	}
+	a.wizard.field = fieldGrid
+	a.wizard.cursor = 0
 
 	// Cursor starts at core 0 (threads 0,4); toggle it off, move to core 1
 	// (threads 1,5) and toggle it on -- still exactly 2 threads overall.
 	sendKeyType(a, tea.KeySpace)
 	sendKeyType(a, tea.KeyRight)
 	sendKeyType(a, tea.KeySpace)
-	sendKeyType(a, tea.KeyEnter)
 
-	if a.wizard == nil {
-		t.Fatal("wizard closed after accepting the manual selection, want it back on the form")
-	}
-	if a.wizard.screen != formScreen {
-		t.Fatal("enter on the manual screen did not return to the form")
-	}
 	if a.wizard.threadsText != "1,5" {
-		t.Fatalf("threadsText = %q, want %q (the manual selection, written back as a cpulist)", a.wizard.threadsText, "1,5")
+		t.Fatalf("threadsText = %q, want %q (the grid toggle written straight into the field)", a.wizard.threadsText, "1,5")
 	}
 
-	sendKeyType(a, tea.KeyEnter) // now stage from the form
+	sendKey(a, 'A') // stage from the form
 	if a.wizard != nil {
 		t.Fatal("wizard still open after staging from the form")
 	}
@@ -370,19 +357,18 @@ func openWizardCrossingGPU(t *testing.T) *App {
 	return a
 }
 
-// TestWizardGPUCrossEnterOpensConfirm covers tryStage's confirm path (the
-// fix for the old crossConfirmed "press enter again" softening): a valid
-// form that crosses the GPU node opens App's shared y/n confirm on the
-// first enter instead of staging outright -- nothing is queued yet, and
-// the wizard stays open underneath, untouched.
-func TestWizardGPUCrossEnterOpensConfirm(t *testing.T) {
+// TestWizardGPUCrossApplyOpensConfirm covers tryStage's confirm path: a
+// valid form that crosses the GPU node opens App's shared y/n confirm on
+// 'A' instead of staging outright -- nothing is queued yet, and the
+// wizard stays open underneath, untouched.
+func TestWizardGPUCrossApplyOpensConfirm(t *testing.T) {
 	a := openWizardCrossingGPU(t)
 	threadsBefore := a.wizard.threadsText
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 
 	if a.confirm == nil {
-		t.Fatal("no confirm opened on enter while crossing the GPU node")
+		t.Fatal("no confirm opened on A while crossing the GPU node")
 	}
 	if a.confirm.prompt != "Pin across the GPU's node anyway? [y/n]" {
 		t.Fatalf("confirm.prompt = %q, want the GPU-cross confirm text", a.confirm.prompt)
@@ -394,7 +380,7 @@ func TestWizardGPUCrossEnterOpensConfirm(t *testing.T) {
 		t.Fatalf("threadsText changed to %q while the confirm is open, want %q unchanged", a.wizard.threadsText, threadsBefore)
 	}
 	if a.queue.Len() != 0 {
-		t.Fatalf("queue.Len() = %d after the first enter, want 0 (not staged yet)", a.queue.Len())
+		t.Fatalf("queue.Len() = %d after the first A, want 0 (not staged yet)", a.queue.Len())
 	}
 }
 
@@ -404,7 +390,7 @@ func TestWizardGPUCrossEnterOpensConfirm(t *testing.T) {
 // wizard.
 func TestWizardGPUCrossYStages(t *testing.T) {
 	a := openWizardCrossingGPU(t)
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -436,7 +422,7 @@ func TestWizardGPUCrossYStages(t *testing.T) {
 func TestWizardGPUCrossNKeepsFormOpen(t *testing.T) {
 	a := openWizardCrossingGPU(t)
 	wantNode, wantThreads := a.wizard.node, a.wizard.threadsText
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -465,7 +451,7 @@ func TestWizardGPUCrossNKeepsFormOpen(t *testing.T) {
 func TestWizardGPUCrossEscKeepsFormOpen(t *testing.T) {
 	a := openWizardCrossingGPU(t)
 	wantNode, wantThreads := a.wizard.node, a.wizard.threadsText
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -514,7 +500,7 @@ func TestConfirmStacksOverWizardAt80x24(t *testing.T) {
 	a := openWizardCrossingGPU(t)
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -538,7 +524,7 @@ func TestConfirmOverWizardFitsBudgetAt80x16(t *testing.T) {
 	a := openWizardCrossingGPU(t)
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -563,7 +549,7 @@ func TestConfirmOverWizardFitsBudgetAt80x16(t *testing.T) {
 // must show the confirm's own y/n hint instead.
 func TestConfirmOverWizardKeyBarHintsYN(t *testing.T) {
 	a := openWizardCrossingGPU(t)
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.confirm == nil {
 		t.Fatal("confirm did not open")
 	}
@@ -681,9 +667,9 @@ func TestWizardFormWithinFilterRejectsHandTypedOutsideL3(t *testing.T) {
 		t.Fatalf("parseThreads() error = %q, want it to name the L3 #0 filter", errMsg)
 	}
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.wizard == nil {
-		t.Fatal("wizard closed on enter with an out-of-filter thread list, want it to stay open")
+		t.Fatal("wizard closed on A with an out-of-filter thread list, want it to stay open")
 	}
 	if a.queue.Len() != 0 {
 		t.Fatalf("queue.Len() = %d, want 0 (an out-of-filter list must not stage)", a.queue.Len())
@@ -723,10 +709,10 @@ func TestWizardFormOpensWithProposalDefaults(t *testing.T) {
 	}
 }
 
-// TestWizardFormInvalidThreadsBlocksEnter covers live validation: a
+// TestWizardFormInvalidThreadsBlocksApply covers live validation: a
 // threads field with the wrong count never stages, and the resulting
 // error message ("N threads given, need M") shows in the view.
-func TestWizardFormInvalidThreadsBlocksEnter(t *testing.T) {
+func TestWizardFormInvalidThreadsBlocksApply(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
@@ -740,9 +726,9 @@ func TestWizardFormInvalidThreadsBlocksEnter(t *testing.T) {
 	a.wizard.threadsText = "0"
 	a.wizard.threadsCaret = len(a.wizard.threadsText)
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.wizard == nil {
-		t.Fatal("wizard closed after enter with an invalid thread count, want it to stay open")
+		t.Fatal("wizard closed after A with an invalid thread count, want it to stay open")
 	}
 	if a.queue.Len() != 0 {
 		t.Fatalf("queue.Len() = %d, want 0 (an invalid list must not stage)", a.queue.Len())
@@ -774,7 +760,7 @@ func TestWizardFormLeaveMemoryLeavesMemNode(t *testing.T) {
 		t.Fatalf("memSel = %d, want -1 (leave)", a.wizard.memSel)
 	}
 
-	sendKeyType(a, tea.KeyEnter)
+	sendKey(a, 'A')
 	if a.wizard != nil {
 		t.Fatal("wizard still open after staging")
 	}
@@ -907,10 +893,12 @@ func TestWizardViewIsOnePanel(t *testing.T) {
 	}
 }
 
-// TestMouseClickTogglesWizardManualCore covers a click on the wizard's
-// manual screen node map: it must move the cursor to the clicked core and
-// toggle it, same as moving there with the arrow keys and pressing space.
-func TestMouseClickTogglesWizardManualCore(t *testing.T) {
+// TestMouseClickTogglesWizardGridCore covers a click on the wizard's own
+// preview grid: it must focus fieldGrid, move the cursor to the clicked
+// core, and toggle it, same as moving there with the arrow keys and
+// pressing space -- clickable regardless of which field was focused
+// beforehand (the default proposal starts on fieldNode).
+func TestMouseClickTogglesWizardGridCore(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
@@ -920,12 +908,8 @@ func TestMouseClickTogglesWizardManualCore(t *testing.T) {
 	if a.wizard == nil {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
-	sendKey(a, 'm')
-	if a.wizard.screen != manualScreen {
-		t.Fatal("'m' did not switch to the manual screen")
-	}
-	if len(a.wizard.selected) != 2 {
-		t.Fatalf("test setup: manual screen selected = %v, want the proposal's 2 default threads", a.wizard.selected)
+	if a.wizard.field == fieldGrid {
+		t.Fatal("test setup: wizard opened already focused on the grid, want fieldNode")
 	}
 
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
@@ -934,19 +918,24 @@ func TestMouseClickTogglesWizardManualCore(t *testing.T) {
 	h := findHit(t, a, "wizardcore", 0)
 	a.Update(press(h.x0, h.y0))
 
+	if a.wizard.field != fieldGrid {
+		t.Fatalf("field = %d, want fieldGrid after clicking a core cell", a.wizard.field)
+	}
 	if a.wizard.cursor != 0 {
 		t.Fatalf("wizard.cursor = %d, want 0 (moved to the clicked core)", a.wizard.cursor)
 	}
-	if len(a.wizard.selected) != 0 {
-		t.Fatalf("wizard.selected = %v, want empty (click toggled core 0 off, mirroring space)", a.wizard.selected)
+	ids, _ := a.wizard.parseThreads()
+	for _, id := range ids {
+		if id == 0 || id == 4 {
+			t.Fatalf("threadsText = %q, want core 0's threads (0,4) toggled off (click mirrors space)", a.wizard.threadsText)
+		}
 	}
 }
 
 // manyCoresTopo returns a single-node topology with n single-thread cores
-// (no SMT), so the manual screen's up/down has a real second partial row
-// to move into and clamp against -- a 2-core node (testTopo) can't
-// distinguish "moves correctly" from "never moves": both look identical
-// there.
+// (no SMT), so the grid's up/down has a real second partial row to move
+// into -- a 2-core node (testTopo) can't distinguish "moves correctly"
+// from "never moves": both look identical there.
 func manyCoresTopo(n int) *hostinfo.Topology {
 	threads := make(map[int]hostinfo.Thread, n)
 	cores := make([]hostinfo.Core, n)
@@ -960,46 +949,51 @@ func manyCoresTopo(n int) *hostinfo.Topology {
 	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
 }
 
-// TestWizardManualUpDownMovesAndClamps covers the manual screen's up/down
-// movement on a 96-core node, at two real dialog widths (80 and 120,
-// which render the grid at different cores-per-row -- 25 and 29
-// respectively, both capped by dialogMaxWidth): down/up must step by the
-// grid's own actual cores-per-row (computed the same way viewManual
-// renders it, coresPerRowForInner(dw-2)), landing in the *same column*
-// every time, not a fixed guess -- updateManual used to step by the
-// package-level coresPerRow (32), which only matched the rendered row
-// width by coincidence, so a real down/up drifted the cursor sideways off
-// its own visual column. Also covers clamping: enough downs must stop
-// advancing once no full row remains (not overflow past the last core),
-// and enough ups must retrace back to the starting column and stop there.
-func TestWizardManualUpDownMovesAndClamps(t *testing.T) {
+// wizardGridTestApp opens the pin wizard for a plain-vm against topo,
+// sized to sz, and focuses fieldGrid -- shared setup for the grid
+// movement tests below.
+func wizardGridTestApp(t *testing.T, topo *hostinfo.Topology, w, h int) *App {
+	t.Helper()
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(topo, doms, noNode), domsMap, nil
+	}
+	a := New(f, scan, t.TempDir(), "test")
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+	a.Update(tea.WindowSizeMsg{Width: w, Height: h})
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("%dx%d: wizard did not open", w, h)
+	}
+	a.wizard.field = fieldGrid
+	return a
+}
+
+// TestWizardGridUpDownMovesByPerRow covers fieldGrid's up/down movement on
+// a 96-core node, at two real dialog widths (80 and 120, which render the
+// grid at different cores-per-row -- 25 and 29 respectively, both capped
+// by dialogMaxWidth): down/up must step by the grid's own actual
+// cores-per-row (computed the same way view renders it,
+// coresPerRowForInner(dw-2)), landing in the *same column* every time,
+// not a fixed guess -- stopped just short of wrapping to the neighboring
+// field (see TestWizardGridUpDownWrapsToNeighborField for that edge).
+func TestWizardGridUpDownMovesByPerRow(t *testing.T) {
 	const totalCores = 96
 	topo := manyCoresTopo(totalCores)
 
 	for _, sz := range []struct{ w, h int }{{80, 24}, {120, 40}} {
-		f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
-		scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
-			doms, err := f.ListDomains()
-			if err != nil {
-				return nil, nil, err
-			}
-			domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
-			for _, d := range doms {
-				domsMap[d.Config.Name] = d.Config
-			}
-			return model.Build(topo, doms, noNode), domsMap, nil
-		}
-		a := New(f, scan, t.TempDir(), "test")
-		runScan(t, a)
-		enterEdit(a)
-		a.tab = tabVMs
-		a.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
-
-		sendKey(a, 'p')
-		sendKey(a, 'm')
-		if a.wizard == nil || a.wizard.screen != manualScreen {
-			t.Fatalf("%dx%d: manual screen did not open", sz.w, sz.h)
-		}
+		a := wizardGridTestApp(t, topo, sz.w, sz.h)
 
 		dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
 		perRow := coresPerRowForInner(dw - 2)
@@ -1017,27 +1011,199 @@ func TestWizardManualUpDownMovesAndClamps(t *testing.T) {
 		want := col
 		for want+perRow < totalCores {
 			want += perRow
-		}
-		presses := totalCores/perRow + 1 // enough to reach the clamp and then some
-		for i := 0; i < presses; i++ {
 			sendKeyType(a, tea.KeyDown)
-			if a.wizard.cursor%perRow != col {
-				t.Fatalf("%dx%d: cursor = %d after down, column drifted from %d (perRow %d)", sz.w, sz.h, a.wizard.cursor, col, perRow)
+			if a.wizard.field != fieldGrid {
+				t.Fatalf("%dx%d: field = %d after down, want fieldGrid to stay focused mid-grid", sz.w, sz.h, a.wizard.field)
 			}
-		}
-		if a.wizard.cursor != want {
-			t.Fatalf("%dx%d: cursor = %d, want %d (clamped at the last row, same column %d)", sz.w, sz.h, a.wizard.cursor, want, col)
+			if a.wizard.cursor != want {
+				t.Fatalf("%dx%d: cursor = %d after down, want %d (column drifted from %d, perRow %d)", sz.w, sz.h, a.wizard.cursor, want, col, perRow)
+			}
 		}
 
-		for i := 0; i < presses; i++ {
+		for want != col {
+			want -= perRow
 			sendKeyType(a, tea.KeyUp)
-			if a.wizard.cursor%perRow != col {
-				t.Fatalf("%dx%d: cursor = %d after up, column drifted from %d (perRow %d)", sz.w, sz.h, a.wizard.cursor, col, perRow)
+			if a.wizard.cursor != want {
+				t.Fatalf("%dx%d: cursor = %d after up, want %d (column drifted from %d, perRow %d)", sz.w, sz.h, a.wizard.cursor, want, col, perRow)
 			}
 		}
-		if a.wizard.cursor != col {
-			t.Fatalf("%dx%d: cursor = %d, want %d (clamped back at the top, same column)", sz.w, sz.h, a.wizard.cursor, col)
+	}
+}
+
+// TestWizardGridUpDownWrapsToNeighborField covers the grid's own edge
+// behavior: up on the top row focuses fieldMemNode, down on the bottom
+// row focuses fieldNode -- testTopo's node 0 has only 2 cores, which fit
+// in a single row at any realistic dialog width, so both edges are one
+// key away from the cursor's starting position.
+func TestWizardGridUpDownWrapsToNeighborField(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	if a.wizard.proposal.Node != 0 {
+		t.Fatalf("proposal.Node = %d, want 0 (no other VMs, lower ID wins the tie)", a.wizard.proposal.Node)
+	}
+
+	a.wizard.field = fieldGrid
+	a.wizard.cursor = 0
+	sendKeyType(a, tea.KeyUp)
+	if a.wizard.field != fieldMemNode {
+		t.Fatalf("field = %d after up on row 0, want fieldMemNode", a.wizard.field)
+	}
+
+	a.wizard.field = fieldGrid
+	a.wizard.cursor = 1 // node 0's last core
+	sendKeyType(a, tea.KeyDown)
+	if a.wizard.field != fieldNode {
+		t.Fatalf("field = %d after down on the last row, want fieldNode", a.wizard.field)
+	}
+}
+
+// TestWizardGridCursorStaysInWindow covers the preview's own scrolling: at
+// a cramped budget (80x16) with a 300-core node -- far more rows than any
+// budget shows -- moving the cursor to the very last core must scroll the
+// window to keep it visible: the rendered panel shows a reverse-video
+// cell (the cursor) and the returned hits still include that core.
+func TestWizardGridCursorStaysInWindow(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	const totalCores = 300
+	a := wizardGridTestApp(t, manyCoresTopo(totalCores), 80, 16)
+	a.wizard.cursor = totalCores - 1
+
+	dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+	_, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome)
+	view, hits := a.wizard.view(dw, budget)
+
+	if !strings.Contains(view, "\x1b[7m") {
+		t.Fatalf("view() has no reverse-video escape, want the cursor's cell rendered reverse-video")
+	}
+	found := false
+	for _, h := range hits {
+		if h.kind == "wizardcore" && h.index == a.wizard.cursor {
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatalf("hits = %+v, want a wizardcore hit for the cursor's core %d", hits, a.wizard.cursor)
+	}
+}
+
+// TestWizardEnterNeverStages covers the brief's headline fix: enter must
+// be a no-op on every field, never staging and never closing the wizard
+// -- the operator pressing it repeatedly (expecting to "enter" the
+// threads field, the old behavior it's replacing) must not queue a
+// half-finished pin.
+func TestWizardEnterNeverStages(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+
+	for f := wizardFormField(0); f < numFormFields; f++ {
+		a.wizard.field = f
+		sendKeyType(a, tea.KeyEnter)
+		if a.wizard == nil {
+			t.Fatalf("field %d: wizard closed on enter, want it to stay open", f)
+		}
+		if a.queue.Len() != 0 {
+			t.Fatalf("field %d: queue.Len() = %d after enter, want 0 (enter must never stage)", f, a.queue.Len())
+		}
+	}
+}
+
+// TestWizardCCancels mirrors TestWizardEscCancels for the uppercase 'C'
+// key.
+func TestWizardCCancels(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+
+	sendKey(a, 'C')
+
+	if a.wizard != nil {
+		t.Fatal("wizard still open after C")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after C, want 0", a.queue.Len())
+	}
+	if !strings.Contains(a.status, "cancelled") {
+		t.Fatalf("status = %q, want cancelled", a.status)
+	}
+}
+
+// TestWizardApplyButtonStages covers clicking the [A]pply button: same
+// path as pressing 'A'.
+func TestWizardApplyButtonStages(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "wizardbtn", 0)
+	a.Update(press(h.x0, h.y0))
+
+	if a.wizard != nil {
+		t.Fatal("wizard still open after clicking [A]pply")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d after clicking [A]pply, want 1", a.queue.Len())
+	}
+}
+
+// TestWizardCancelButtonCancels covers clicking the [C]ancel button: same
+// path as pressing 'C'.
+func TestWizardCancelButtonCancels(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View() // record hits
+
+	h := findHit(t, a, "wizardbtn", 1)
+	a.Update(press(h.x0, h.y0))
+
+	if a.wizard != nil {
+		t.Fatal("wizard still open after clicking [C]ancel")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after clicking [C]ancel, want 0", a.queue.Len())
+	}
+	if !strings.Contains(a.status, "cancelled") {
+		t.Fatalf("status = %q, want cancelled", a.status)
 	}
 }
 
@@ -1161,26 +1327,26 @@ func TestWizardViewRendersWarning(t *testing.T) {
 	}
 }
 
-// TestWizardManualViewShowsSelectedCount covers the manual screen's
-// "selected N/M" line.
-func TestWizardManualViewShowsSelectedCount(t *testing.T) {
+// TestWizardStatusBarHintShowsApplyCancel covers the status bar's own key
+// hint while the wizard is open: it must advertise [A] apply / [C] cancel,
+// not the old enter-to-stage wording.
+func TestWizardStatusBarHintShowsApplyCancel(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
 	a.tab = tabVMs
 
 	sendKey(a, 'p')
-	sendKey(a, 'm')
-	if a.wizard == nil || a.wizard.screen != manualScreen {
-		t.Fatal("manual screen did not open")
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
 	}
 
-	view, _ := a.wizard.view(200, 40)
-	if !strings.Contains(view, "selected 2/2") {
-		t.Fatalf("wizard.view() = %q, want the running selected-count line", view)
+	view := a.View()
+	if !strings.Contains(view, "[A] apply") {
+		t.Fatalf("View() = %q, want the [A] apply hint in the status bar", view)
 	}
-	if !strings.Contains(a.View(), "[h/l/j/k/up/down] move") {
-		t.Fatalf("View() = %q, want the manual-screen key hint in the status bar", a.View())
+	if !strings.Contains(view, "[C] cancel") {
+		t.Fatalf("View() = %q, want the [C] cancel hint in the status bar", view)
 	}
 }
 
