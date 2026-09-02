@@ -21,23 +21,25 @@ jobs:
             setup: |
               dnf -y install dnf-plugins-core
               dnf config-manager --set-enabled crb
-              dnf -y install gcc git make tar gzip libvirt-devel
+              dnf -y install gcc git make tar gzip pkgconf-pkg-config libvirt-devel
           - name: rocky10
             image: quay.io/rockylinux/rockylinux:10
             setup: |
               dnf -y install dnf-plugins-core
               dnf config-manager --set-enabled crb
-              dnf -y install gcc git make tar gzip libvirt-devel
+              dnf -y install gcc git make tar gzip pkgconf-pkg-config libvirt-devel
           - name: ubuntu26.04
             image: ubuntu:26.04
             setup: |
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                ca-certificates gcc git make libvirt-dev
+                ca-certificates gcc git make pkg-config libvirt-dev
     steps:
       - name: install build dependencies
         run: ${{ matrix.setup }}
       - uses: actions/checkout@v4
+      - name: trust the checkout (container uid differs from the runner's)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/setup-go@v5
         with:
           go-version: stable
