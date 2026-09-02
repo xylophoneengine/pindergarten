@@ -423,10 +423,9 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 }
 
 // vmUsingDevice returns the name of the VM whose passthrough device list
-// references addr, or "" if none does. Shared by Topology's GPU boxes
-// (renderTopoGPUBox, which only needs the bool "is there one") and
-// gpuLinesOnNode (which needs the name itself, for the "vm: <name>"
-// suffix).
+// references addr, or "" if none does. Shared by Topology's own GPU line
+// (renderTopoGPULine, in topology.go) and gpuLinesOnNode here, both of
+// which need the name itself, for the "vm: <name>" suffix.
 func vmUsingDevice(s *model.Snapshot, addr string) string {
 	for _, v := range s.VMs {
 		for _, d := range v.Devices {

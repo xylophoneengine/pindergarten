@@ -39,6 +39,27 @@ func lineWith(t *testing.T, out, sub string) string {
 	return ""
 }
 
+// buildTopologyTab is a test-only helper (no production caller --
+// renderTopologyTab composes its own machine box directly, windowed to a
+// budget): it renders the full, unwindowed (every row, no scroll applied)
+// topology drawing at width w: machine > socket > node > L3 domain, each
+// level skipped entirely when the topology has no data for it (no sockets
+// at all -- a hand-built fixture, most likely -- puts nodes directly under
+// the machine box; no L3 domains puts a node's cores directly in its own
+// box, see renderTopoNodeBox), plus one line per GPU attached under its
+// node (or under "unknown locality" when hostinfo couldn't place it).
+// Boxes lay out left to right inside their parent, wrapping to a new row
+// once the parent's own width budget is exhausted (wrapBoxesInto); a final
+// truncateLines pass guarantees no line exceeds w even so (boxes only ever
+// shrink-wrap their own content, never grow past what's asked of them, so
+// this is a safety net, not the primary mechanism).
+func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
+	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
+	mw := machineBoxWidth(inner, w)
+	block := panelInner(topologyMachineTitle(s), inner, mw, 0)
+	return truncateLines(block, w), offsetHits(hits, 1, 1)
+}
+
 // realHostTopo lives in views_test.go (1 socket, 1 node, two 6-core SMT2
 // L3 domains, two display GPUs -- AMD amdgpu and NVIDIA); reused here
 // unchanged.
@@ -483,6 +504,118 @@ func TestTopologyLongGPUNameTruncates(t *testing.T) {
 		if lw := lipgloss.Width(l); lw > 80 {
 			t.Fatalf("line %d width = %d, want <= 80 (no wrapped border fragment): %q", i, lw, l)
 		}
+	}
+}
+
+// bigNoSMTTopo builds a synthetic 128-core, 1-node, no-SMT topology (1
+// thread per core, all 128 cores sharing one L3 domain) -- sysfs core ids
+// run 0-127, reaching 3 digits at the high end, at cellW=2 (no SMT).
+// Regression fixture for finding 1: renderTopoCoreGrid's ruler row used to
+// be able to write a 3-digit label past its own availWidth, and the box
+// builders (renderTopoL3Box/renderTopoNodeBox) handed that over-wide body
+// straight to panelInner, whose lipgloss Width().Render() word-wraps
+// (rather than clips) it -- producing an orphan ruler line that shifted
+// every row below it, and every recorded hit's y0, down by one. The single
+// L3 domain (rather than none) is what puts the ruler row's own available
+// width at exactly the parity that overflows at both 80 and 120 columns,
+// through renderTopoL3Box's extra border level.
+func bigNoSMTTopo() *hostinfo.Topology {
+	threads := map[int]hostinfo.Thread{}
+	var cores []hostinfo.Core
+	var nodeThreads, l3Threads []int
+	for id := 0; id < 128; id++ {
+		threads[id] = hostinfo.Thread{ID: id, Core: id, Socket: 0, Node: 0, Sibling: -1, L3: 0}
+		cores = append(cores, hostinfo.Core{Socket: 0, ID: id, Node: 0, L3: 0, Threads: []int{id}})
+		nodeThreads = append(nodeThreads, id)
+		l3Threads = append(l3Threads, id)
+	}
+	return &hostinfo.Topology{
+		Nodes:     []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 64 * 1024 * 1024, MemFreeKiB: 32 * 1024 * 1024}},
+		Cores:     cores,
+		Threads:   threads,
+		L3Domains: []hostinfo.L3Domain{{ID: 0, Node: 0, Socket: 0, Threads: l3Threads}},
+	}
+}
+
+// TestTopologyNoSMT128CoreRulerNoOverflow is the regression test for
+// finding 1, rendered through the real App.View() (so panelInner's own
+// word-wrap is actually exercised, not just renderTopoCoreGrid in
+// isolation) at both 80x30 and 120x30: no rendered line may exceed the
+// terminal width, and every recorded "topocore" hit must still land on an
+// actual glyph rune, not a ruler digit shifted down by an orphan wrapped
+// row.
+func TestTopologyNoSMT128CoreRulerNoOverflow(t *testing.T) {
+	for _, w := range []int{80, 120} {
+		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
+			a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+			a.snap = &model.Snapshot{Topo: bigNoSMTTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+			a.doms = map[string]*libvirtio.DomainConfig{}
+			a.tab = tabTopology
+			a.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+			view := a.View() // record hits
+
+			lines := strings.Split(view, "\n")
+			for i, l := range lines {
+				if lw := lipgloss.Width(l); lw > w {
+					t.Fatalf("line %d width = %d, want <= %d: %q", i, lw, w, l)
+				}
+			}
+
+			found := false
+			for _, h := range a.hits {
+				if h.kind != "topocore" {
+					continue
+				}
+				found = true
+				if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+					t.Fatalf("hit %+v at width %d lands on %q, want a glyph character", h, w, r)
+				}
+			}
+			if !found {
+				t.Fatalf("no topocore hit recorded at width %d", w)
+			}
+		})
+	}
+}
+
+// fourDigitIDTopo builds a tiny 1-node, no-SMT topology whose 6 cores carry
+// 4-digit sysfs ids (1000-1005) -- used to pin down rulerStride's own
+// escalation to stride 3 (finding 2): a label needs maxLen+1 columns (the
+// digits plus a separating space), and stride 2 only gives it 2*cellW -- at
+// cellW=2 a 4-digit id needs 5 columns but stride 2 only gives 4, so
+// adjacent labels used to collide into one unbroken run of digits
+// ("10001002...") instead of staying separated.
+func fourDigitIDTopo() *hostinfo.Topology {
+	threads := map[int]hostinfo.Thread{}
+	var cores []hostinfo.Core
+	var nodeThreads []int
+	for i := 0; i < 6; i++ {
+		id := 1000 + i
+		threads[i] = hostinfo.Thread{ID: i, Core: id, Socket: 0, Node: 0, Sibling: -1, L3: -1}
+		cores = append(cores, hostinfo.Core{Socket: 0, ID: id, Node: 0, L3: -1, Threads: []int{i}})
+		nodeThreads = append(nodeThreads, i)
+	}
+	return &hostinfo.Topology{
+		Nodes:   []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 1024, MemFreeKiB: 512}},
+		Cores:   cores,
+		Threads: threads,
+	}
+}
+
+// TestTopologyRulerStrideEscalatesForWideLabels covers finding 2: 4-digit
+// core ids at cellW=2 (no SMT) must escalate the ruler's default stride
+// (every 2nd cell) to every 3rd, so labels stay separated by at least one
+// space instead of running together.
+func TestTopologyRulerStrideEscalatesForWideLabels(t *testing.T) {
+	s := &model.Snapshot{Topo: fourDigitIDTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, _ := buildTopologyTab(s, 80)
+
+	rulerLine := lineWith(t, out, "1000")
+	if strings.Contains(rulerLine, "10001001") || strings.Contains(rulerLine, "10001002") {
+		t.Fatalf("ruler line = %q, want 4-digit labels separated by at least one space, not run together", rulerLine)
+	}
+	if !strings.Contains(rulerLine, "1000  1003") {
+		t.Fatalf("ruler line = %q, want labels at stride 3 (ids 1000 and 1003) separated by a gap", rulerLine)
 	}
 }
 

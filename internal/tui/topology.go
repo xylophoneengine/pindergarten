@@ -108,7 +108,7 @@ func rulerStride(cores []hostinfo.Core, cellW int) int {
 			maxLen = l
 		}
 	}
-	if maxLen > 2*cellW {
+	if maxLen+1 > 2*cellW {
 		return 3
 	}
 	return 2
@@ -171,10 +171,14 @@ func renderTopoCoreGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int, av
 				continue
 			}
 			x := col * cellW
+			idStr := strconv.Itoa(c.ID)
+			if x+len(idStr) > availWidth {
+				break // label would spill past the glyph row it labels
+			}
 			for ruler.Len() < x {
 				ruler.WriteString(" ")
 			}
-			ruler.WriteString(strconv.Itoa(c.ID))
+			ruler.WriteString(idStr)
 		}
 
 		var glyph strings.Builder
@@ -219,33 +223,25 @@ func renderTopoL3Box(s *model.Snapshot, l3 hostinfo.L3Domain, maxWidth int) boxC
 	if w > maxWidth {
 		w = maxWidth
 	}
+	// Safety net: renderTopoCoreGrid's own ruler row is bounded to its
+	// availWidth, but truncate here too so a too-wide body can never reach
+	// panelInner's lipgloss Width().Render(), which word-wraps (not clips)
+	// -- an orphan wrapped row would shift every line below it, and every
+	// hit's y0 along with it.
+	body = truncateLines(body, w-2)
 	block := panelInner(fmt.Sprintf("L3 #%d", l3.ID), body, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
-}
-
-// gpuUsingVM returns the name of the first VM whose passthrough device
-// list references addr, or "" if none does -- used to pick renderTopoGPULine's
-// "vm: <name>" vs "host (<driver>)" status.
-func gpuUsingVM(s *model.Snapshot, addr string) string {
-	for _, v := range s.VMs {
-		for _, d := range v.Devices {
-			if d.Addr == addr {
-				return v.Name
-			}
-		}
-	}
-	return ""
 }
 
 // renderTopoGPULine renders one display-class PCI device as a single line
 // (no box, per the brief): "gpu <addr, domain prefix dropped>  <vendor/
 // device name>  host (<driver>)", or "...  vm: <name>" once some VM
-// actually passes it through (gpuUsingVM) -- the caller truncates it to
-// the node's own inner width.
+// actually passes it through (vmUsingDevice, shared with gpuLinesOnNode in
+// views.go) -- the caller truncates it to the node's own inner width.
 func renderTopoGPULine(s *model.Snapshot, dev hostinfo.PCIDevice) string {
 	addr := strings.TrimPrefix(dev.Addr, "0000:")
 	status := "host (" + pciDriverOrNone(dev.Driver) + ")"
-	if vm := gpuUsingVM(s, dev.Addr); vm != "" {
+	if vm := vmUsingDevice(s, dev.Addr); vm != "" {
 		status = "vm: " + vm
 	}
 	return fmt.Sprintf("gpu %s  %s  %s", addr, pciDisplayName(dev), status)
@@ -309,6 +305,9 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int) boxC
 	if w > maxWidth {
 		w = maxWidth
 	}
+	// Safety net: see renderTopoL3Box's own comment -- a too-wide body must
+	// never reach panelInner's word-wrapping Render() call.
+	body = truncateLines(body, w-2)
 	block := panelInner(title, body, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
 }
@@ -361,26 +360,6 @@ func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int) 
 	}
 	block := panelInner(title, inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
-}
-
-// buildTopologyTab renders the full, unwindowed (every row, no scroll
-// applied) topology drawing at width w: machine > socket > node > L3
-// domain, each level skipped entirely when the topology has no data for
-// it (no sockets at all -- a hand-built fixture, most likely -- puts
-// nodes directly under the machine box; no L3 domains puts a node's cores
-// directly in its own box, see renderTopoNodeBox), plus one line per GPU
-// attached under its node (or under "unknown locality" when hostinfo
-// couldn't place it). Boxes lay out left to right inside their parent,
-// wrapping to a new row once the parent's own width budget is exhausted
-// (wrapBoxesInto); a final truncateLines pass guarantees no line exceeds
-// w even so (boxes only ever shrink-wrap their own content, never grow
-// past what's asked of them, so this is a safety net, not the primary
-// mechanism).
-func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
-	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
-	mw := machineBoxWidth(inner, w)
-	block := panelInner(topologyMachineTitle(s), inner, mw, 0)
-	return truncateLines(block, w), offsetHits(hits, 1, 1)
 }
 
 // topologyChildren builds the machine box's top-level children: one box
