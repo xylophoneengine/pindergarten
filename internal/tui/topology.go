@@ -173,7 +173,7 @@ func renderTopoCoreGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int, av
 			x := col * cellW
 			idStr := strconv.Itoa(c.ID)
 			if x+len(idStr) > availWidth {
-				break // label would spill past the glyph row it labels
+				continue // label would spill past the glyph row it labels -- a later, shorter one (ids need not be ascending) may still fit
 			}
 			for ruler.Len() < x {
 				ruler.WriteString(" ")

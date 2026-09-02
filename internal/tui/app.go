@@ -819,6 +819,23 @@ func (a *App) renderFull() string {
 	// dialog is open -- a click outside it does nothing -- since only the
 	// dialog's own hits (if any), offset by the overlay's placement, are
 	// meaningful then.
+	//
+	// A GPU-cross confirm opened from the wizard or mem-node picker (see
+	// wizard.go's handleWizardKey / memnode.go's pickMemNode) leaves that
+	// popup open underneath it -- so it must stay visible, stacked under
+	// the confirm, rather than vanishing while the confirm is up. That
+	// needs its own overlay call before renderDialog's (which only ever
+	// composites one panel): render and center the wizard/picker panel
+	// first, then let the normal path below overlay the (small) confirm
+	// panel on top of it. Its hits are dropped (not even computed) rather
+	// than composited -- the confirm swallows every click/key itself (see
+	// handleMouse/handleKey), so they'd never be reachable anyway.
+	if a.confirm != nil {
+		if under, ok := a.renderConfirmUnder(w, budget); ok {
+			x, y := centerXY(lipgloss.Width(under), lineCount(under), w, budget)
+			body = overlay(body, under, x, y)
+		}
+	}
 	if dialog, dHits, ok := a.renderDialog(w, budget); ok {
 		x, y := centerXY(lipgloss.Width(dialog), lineCount(dialog), w, budget)
 		body = overlay(body, dialog, x, y)
@@ -884,6 +901,29 @@ func (a *App) renderChrome() (tabs, header, statusLine, keyBar string, lines int
 	return
 }
 
+// renderConfirmUnder renders the wizard or mem-node picker panel that a
+// GPU-cross confirm (see renderFull) sits on top of, so that popup stays
+// visible stacked underneath instead of disappearing while the confirm is
+// open. ok is false when neither is open, or when the panel alone would
+// already overflow budget (an extremely short terminal) -- the confirm
+// itself is small and always fits on its own, so falling back to it alone
+// (today's pre-fix behaviour, i.e. no stacking) is simplest.
+func (a *App) renderConfirmUnder(w, budget int) (panel string, ok bool) {
+	dw := dialogWidth(w, dialogMaxWidth)
+	switch {
+	case a.wizard != nil:
+		panel, _ = a.wizard.view(dw, budget)
+	case a.memPicker != nil:
+		panel, _ = a.memPicker.view(dw, budget)
+	default:
+		return "", false
+	}
+	if lineCount(panel) > budget {
+		return "", false
+	}
+	return panel, true
+}
+
 // renderDialog renders whichever modal (confirm, wizard, mem-node picker,
 // apply flow) is currently open as a single self-contained panel, tight
 // to its own content -- no centering baked in, any hits 0-based relative
@@ -904,6 +944,10 @@ func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
 		dw := dialogWidth(w, dialogMaxWidth)
 		return helpPanel(dw, budget, a.helpScroll), nil, true
 	case a.confirm != nil:
+		// The wizard/mem-node-picker panel it may be stacked on top of (see
+		// renderConfirmUnder) is composited by renderFull separately,
+		// before this one -- this only ever returns the confirm's own
+		// panel.
 		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
 		dw := dialogWidth(w, maxLineWidth(body))
 		panel, _ = panelWrapH("Confirm", body, dw, budget, false)
@@ -1204,21 +1248,26 @@ func flowTitle(screen flowScreen) string {
 // renderStatusBar renders the bottom key bar: "N pending ops" followed by
 // "[key] label" hints (bold key, dim label) for whatever's clickable/keyable
 // right now. While a wizard/mem-node-picker/apply-flow screen is open, its
-// own (unstyled) hint line replaces the default set. A confirm has no case
-// of its own here (unlike renderDialog's, which does put it first): its own
-// "[y]es  [n]/esc cancel" hint already lives inside the confirm panel
-// itself, so this falls through to whichever of the cases below still
-// matches while a confirm is open on top of it (a wizard/mem-node-picker
-// GPU-cross confirm keeps showing that screen's own hint; a plain confirm
-// with nothing open underneath falls all the way through to the default
-// set -- several tests pin the key bar's usual quit/rescan/edit hints
-// staying visible under that kind of confirm).
+// own (unstyled) hint line replaces the default set. A plain confirm (the
+// quit/edit-mode/discard-all ones, with nothing open underneath) has no
+// case of its own here: its own "[y]es  [n]/esc cancel" hint already lives
+// inside the confirm panel itself (see renderDialog), so this falls through
+// to the default set below -- several tests pin the key bar's usual quit/
+// rescan/edit hints staying visible under that kind of confirm. A confirm
+// stacked on top of the wizard or mem-node picker (the GPU-cross confirm --
+// see renderConfirmUnder) is different: without a case of its own, this
+// would fall through to that screen's own hint below it, none of which do
+// anything while the confirm is capturing all key input, so it gets one
+// (matching the apply flow's own confirm screen's hint format, "[y]es
+// [n]/esc cancel", for consistency -- see applyFlow.statusBarHint).
 func (a *App) renderStatusBar() string {
 	pending := pluralize(a.queue.Len(), "pending op")
 
 	switch {
 	case a.help:
 		return statusBarStyle.Render(pending + "  [up/down] scroll  any other key: close")
+	case a.confirm != nil && (a.wizard != nil || a.memPicker != nil):
+		return statusBarStyle.Render(pending + "  [y]es  [n]/esc cancel")
 	case a.wizard != nil:
 		return statusBarStyle.Render(pending + "  " + a.wizard.statusBarHint())
 	case a.memPicker != nil:

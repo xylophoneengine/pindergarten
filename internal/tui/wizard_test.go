@@ -502,6 +502,81 @@ func TestWizardGPUCrossWarningShownOnce(t *testing.T) {
 	}
 }
 
+// TestConfirmStacksOverWizardAt80x24 covers the fix for renderDialog's
+// switch putting a.confirm ahead of a.wizard/a.memPicker with no case that
+// keeps the wizard visible underneath: opening the GPU-cross confirm used
+// to make the whole wizard popup vanish rather than stay stacked beneath
+// it. At 80x24 -- comfortably enough for both, the confirm is 5 lines and
+// the wizard 12 against a 21-line body budget (see renderConfirmUnder) --
+// the rendered view must show both the wizard's own form (its title) and
+// the confirm's own prompt.
+func TestConfirmStacksOverWizardAt80x24(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	view := a.View()
+	if !strings.Contains(view, "pin vm2") {
+		t.Fatalf("View() = %q, want the wizard's own title still visible stacked under the confirm", view)
+	}
+	if !strings.Contains(view, "Pin across the GPU's node anyway? [y/n]") {
+		t.Fatalf("View() = %q, want the confirm's own prompt visible", view)
+	}
+}
+
+// TestConfirmOverWizardFitsBudgetAt80x16 covers the same stacking fix at
+// the smallest terminal View ever renders at without going into the
+// too-small screen (80x16): whichever of renderConfirmUnder's two outcomes
+// applies (the wizard fits stacked under the confirm, or -- the fallback --
+// only the confirm shows), the whole view must still fit exactly within
+// budget: 16 lines total, no line wider than 80.
+func TestConfirmOverWizardFitsBudgetAt80x16(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != 16 {
+		t.Fatalf("View() has %d lines, want exactly 16: %q", len(lines), view)
+	}
+	for i, l := range lines {
+		if lw := lipgloss.Width(l); lw > 80 {
+			t.Fatalf("line %d width = %d, want <= 80: %q", i, lw, l)
+		}
+	}
+}
+
+// TestConfirmOverWizardKeyBarHintsYN covers the fix for renderStatusBar
+// having no a.confirm case of its own: while the wizard's GPU-cross confirm
+// is open on top of it, the key bar used to keep advertising the wizard's
+// own keys (e.g. "[a] autofill"), none of which do anything while the
+// confirm is capturing all key input, and never mentioned y/n at all. It
+// must show the confirm's own y/n hint instead.
+func TestConfirmOverWizardKeyBarHintsYN(t *testing.T) {
+	a := openWizardCrossingGPU(t)
+	sendKeyType(a, tea.KeyEnter)
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	hint := a.renderStatusBar()
+	if !strings.Contains(hint, "[y]") {
+		t.Fatalf("renderStatusBar() = %q, want a \"[y]\" hint while the confirm is open", hint)
+	}
+	if strings.Contains(hint, "[a] autofill") {
+		t.Fatalf("renderStatusBar() = %q, want the wizard's own (inert) hints gone while the confirm is open", hint)
+	}
+}
+
 // fourVCPUWizardXML is a plain 4-vcpu VM with no pins/devices, sized to
 // fit inside realHostTopo's L3 #0 domain (12 threads) for
 // TestWizardFormWithinFilterRestrictsThreads.

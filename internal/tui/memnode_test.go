@@ -277,6 +277,29 @@ func TestMemNodeGPUCrossOpensConfirm(t *testing.T) {
 	}
 }
 
+// TestConfirmStacksOverMemPickerAt80x24 mirrors
+// TestConfirmStacksOverWizardAt80x24 for the mem-node picker: opening the
+// GPU-cross confirm on top of it must not make the picker vanish
+// underneath (see renderConfirmUnder) -- at 80x24 the rendered view must
+// show both the picker's own title and the confirm's own prompt.
+func TestConfirmStacksOverMemPickerAt80x24(t *testing.T) {
+	a := openMemPickerCrossingGPU(t)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	sendKey(a, '0')
+	if a.confirm == nil {
+		t.Fatal("confirm did not open")
+	}
+
+	view := a.View()
+	if !strings.Contains(view, "set memory node for vm2") {
+		t.Fatalf("View() = %q, want the picker's own title still visible stacked under the confirm", view)
+	}
+	if !strings.Contains(view, "Bind memory across the GPU's node anyway? [y/n]") {
+		t.Fatalf("View() = %q, want the confirm's own prompt visible", view)
+	}
+}
+
 // TestMemNodeGPUCrossYStages covers the confirm's "y": it stages exactly
 // the picked node (0, not the GPU's node 1) with the Summary's "crosses
 // GPU node" suffix, closing both the confirm and the picker.
