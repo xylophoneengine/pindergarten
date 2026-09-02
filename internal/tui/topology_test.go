@@ -276,6 +276,23 @@ func TestTopologyFillsWithBorderNotBlankRows(t *testing.T) {
 	}
 }
 
+// TestTopologyLegendShowsReservedOnlyWhenSet covers renderTopologyTab's own
+// "reserved (-reserve N)" legend line: absent when Snapshot.Reserved is
+// empty (the default, reserve off), present once it's set.
+func TestTopologyLegendShowsReservedOnlyWhenSet(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, _ := renderTopologyTab(s, 120, 60, 0)
+	if strings.Contains(body, "reserved") {
+		t.Fatalf("renderTopologyTab() = %q, want no \"reserved\" legend line when Reserved is empty", body)
+	}
+
+	s.Reserved = map[int]bool{0: true, 4: true} // node 0's core {0,4}
+	body, _ = renderTopologyTab(s, 120, 60, 0)
+	if !strings.Contains(body, "reserved (-reserve 1)") {
+		t.Fatalf("renderTopologyTab() = %q, want a \"reserved (-reserve 1)\" legend line", body)
+	}
+}
+
 // bigTwoNodeTopo builds a synthetic 2-node, 200-core topology (1 thread
 // per core, no SMT, no L3 domains, no sockets) -- large enough that the
 // glyph grid must wrap several times within each node's own box at any

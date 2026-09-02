@@ -377,6 +377,62 @@ func TestSetPinningEmptyPinsPreservesCputune(t *testing.T) {
 	}
 }
 
+// TestSetPinningEmptyPinsPreservesEmulatorPinByteIdentical covers
+// TestSetPinningEmptyPinsPreservesCputune's own "existing cputune" case
+// but with an emulatorpin present too: a memory-node-only op (empty pins,
+// nil emulator, memNode set) must leave <cputune> -- emulatorpin included
+// -- byte-identical to a true no-op call (nil pins, nil emulator, memNode
+// -1); comparing against SetPinning's own re-serialization of the
+// untouched element, not the original source text, since etree
+// normalizes attribute quoting (' to ") on every write regardless of
+// whether an element was actually touched.
+func TestSetPinningEmptyPinsPreservesEmulatorPinByteIdentical(t *testing.T) {
+	const withEmulatorXML = `<domain type='kvm'>
+  <name>emu-vm</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b06</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <vcpu>2</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='4'/>
+    <vcpupin vcpu='1' cpuset='5'/>
+    <emulatorpin cpuset='4-5'/>
+  </cputune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+	baseline, err := SetPinning(withEmulatorXML, nil, -1, nil)
+	if err != nil {
+		t.Fatalf("SetPinning (baseline no-op): %v", err)
+	}
+	before := cputuneBlock(t, baseline)
+
+	out, err := SetPinning(withEmulatorXML, map[int][]int{}, 0, nil)
+	if err != nil {
+		t.Fatalf("SetPinning: %v", err)
+	}
+	after := cputuneBlock(t, out)
+
+	if after != before {
+		t.Errorf("<cputune> = %q, want byte-identical to %q (untouched by a memory-node-only op)", after, before)
+	}
+}
+
+// cputuneBlock extracts the <cputune>...</cputune> substring from xml,
+// failing the test if it isn't present.
+func cputuneBlock(t *testing.T, xml string) string {
+	t.Helper()
+	start := strings.Index(xml, "<cputune>")
+	if start < 0 {
+		t.Fatalf("xml = %q, want a <cputune> element", xml)
+	}
+	end := strings.Index(xml, "</cputune>")
+	if end < 0 {
+		t.Fatalf("xml = %q, want a </cputune> close tag", xml)
+	}
+	return xml[start : end+len("</cputune>")]
+}
+
 func TestStripPinning(t *testing.T) {
 	out, err := StripPinning(gpuVMXML)
 	if err != nil {

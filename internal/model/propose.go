@@ -14,7 +14,6 @@ type Proposal struct {
 	Node      int
 	Pins      map[int][]int // 1:1 vcpu -> single thread
 	MemNode   int
-	Emulator  []int    // default: the same threads Pins assigns (assignedThreads(Pins))
 	Rationale []string // plain-language sentences, why this node/threads
 	Warnings  []string // e.g. not enough free full cores, sharing threads
 }
@@ -137,7 +136,6 @@ func proposeOnNode(s *Snapshot, vm *VM, node int, allowed []int, rationale []str
 		Node:      node,
 		Pins:      pins,
 		MemNode:   node,
-		Emulator:  assignedThreads(pins),
 		Rationale: rationale,
 		Warnings:  warnings,
 	}, nil
@@ -269,8 +267,11 @@ func ReservedCoreCount(s *Snapshot, node int) int {
 	return count
 }
 
-// ReservedThreadsOnNode returns node's reserved thread ids (ascending --
-// hostinfo.Node.Threads is already sorted), or nil if none are reserved.
+// ReservedThreadsOnNode returns node's reserved thread ids, sorted
+// ascending, or nil if none are reserved. Sorted explicitly (sort.Ints)
+// rather than relied on from n.Threads' own order: that's sorted for any
+// real hostinfo.Read topology, but nothing here guarantees it for every
+// caller-built one.
 func ReservedThreadsOnNode(s *Snapshot, node int) []int {
 	for _, n := range s.Topo.Nodes {
 		if n.ID != node {
@@ -282,6 +283,7 @@ func ReservedThreadsOnNode(s *Snapshot, node int) []int {
 				ids = append(ids, t)
 			}
 		}
+		sort.Ints(ids)
 		return ids
 	}
 	return nil

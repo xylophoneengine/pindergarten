@@ -356,7 +356,7 @@ func (w *wizard) emulatorFieldValue() string {
 		return fmt.Sprintf("[ ] on reserved cores (none reserved on node %d)", w.node)
 	}
 	if w.emulator {
-		return fmt.Sprintf("[x] on reserved cores (threads %s)", hostinfo.FormatCPUList(reserved))
+		return fmt.Sprintf("[x] on reserved cores (threads %s)", formatCPURanges(reserved))
 	}
 	return "[ ] on reserved cores (own vcpus)"
 }
@@ -703,8 +703,9 @@ func (w *wizard) currentWarnings(ids []int) []string {
 	return warnings
 }
 
-// summaryLine renders the preview's one-line summary, e.g. "12 vcpus ->
-// node 1 threads 0-5,12-17; memory -> node 1 (strict)".
+// summaryLine renders the preview's summary as one raw string, e.g. "12
+// vcpus -> node 1 threads 0-5,12-17; memory -> node 1 (strict)" -- view
+// wraps it to the dialog's inner width when it doesn't fit on one line.
 func (w *wizard) summaryLine(ids []int) string {
 	threads := w.threadsText
 	if len(ids) > 0 {
@@ -765,7 +766,7 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 
 	const applyLabel, cancelLabel = "[A]pply", "[C]ancel"
 	var tail []string
-	tail = append(tail, w.summaryLine(ids))
+	tail = append(tail, strings.Split(lipgloss.NewStyle().Width(inner).Render(w.summaryLine(ids)), "\n")...)
 	for _, wm := range w.currentWarnings(ids) {
 		tail = append(tail, warningStyle.Render(wm))
 	}

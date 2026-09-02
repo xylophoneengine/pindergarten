@@ -64,6 +64,32 @@ const gpuVMXMLNoPins = `<domain type='kvm'>
   </devices>
 </domain>`
 
+// gpuVMXMLWithEmulator is gpuVMXML with an emulatorpin added to its
+// cputune, for TestRunRestoreVerifyEmulatorMismatch.
+const gpuVMXMLWithEmulator = `<domain type='kvm'>
+  <name>gpu-vm-01</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b01</uuid>
+  <memory unit='KiB'>16777216</memory>
+  <vcpu placement='static'>4</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='4'/>
+    <vcpupin vcpu='1' cpuset='68'/>
+    <emulatorpin cpuset='4,68'/>
+  </cputune>
+  <numatune>
+    <memory mode='strict' nodeset='1'/>
+  </numatune>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices>
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x0000' bus='0x81' slot='0x00' function='0x0'/>
+      </source>
+    </hostdev>
+    <disk type='file' device='disk'><target dev='vda'/></disk>
+  </devices>
+</domain>`
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -427,6 +453,41 @@ func TestRunVerifyEmulatorMismatch(t *testing.T) {
 		EmulatorPin: []int{4, 68},
 		StagedHash:  model.HashXML(gpuVMXML),
 		Summary:     "gpu-vm-01: pin emulator",
+	}
+
+	results := Run(hv, dir, "test-version", []model.PendingOp{op})
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Err == nil {
+		t.Fatal("Err = nil, want emulatorpin mismatch error")
+	}
+	if !strings.Contains(r.Err.Error(), "emulatorpin") {
+		t.Errorf("Err = %v, want mention of emulatorpin", r.Err)
+	}
+	if r.Applied {
+		t.Error("Applied = true, want false on verify mismatch")
+	}
+}
+
+// TestRunRestoreVerifyEmulatorMismatch covers verify's OpRestore case
+// comparing EmulatorPin against the backup's own parsed EmulatorPin (the
+// fix -- it used to check only VCPUPins and MemNodes): restoring
+// gpuVMXMLWithEmulator must fail verify when the post-Define live XML
+// (verifyMismatchHV's fixed gpuVMXML, no emulatorpin at all) doesn't match
+// it, even though vcpupin/numatune both still agree.
+func TestRunRestoreVerifyEmulatorMismatch(t *testing.T) {
+	fake := &libvirtio.Fake{XML: map[string]string{"gpu-vm-01": gpuVMXMLWithEmulator}}
+	hv := &verifyMismatchHV{Fake: fake}
+	dir := t.TempDir()
+
+	op := model.PendingOp{
+		Kind:       model.OpRestore,
+		VM:         "gpu-vm-01",
+		BackupXML:  gpuVMXMLWithEmulator,
+		StagedHash: model.HashXML(gpuVMXMLWithEmulator),
+		Summary:    "gpu-vm-01: restore backup",
 	}
 
 	results := Run(hv, dir, "test-version", []model.PendingOp{op})

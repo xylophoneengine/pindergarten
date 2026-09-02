@@ -498,19 +498,23 @@ func reservedCoreCount(s *model.Snapshot) int {
 }
 
 // cpuMapLegend is the CPU Map block's bottom legend line, shown once below
-// every node's panel rather than repeated per panel. withL3 (the
-// topology actually has L3 domain data -- see cpuMapNodeGrid) adds the
-// "| L3 boundary" entry naming the separator cpuMapNodeGrid draws between
-// adjacent L3 domains' cells. A "| reserved (-reserve N)" entry is added
-// only when reserve is actually on (reservedCoreCount(s) > 0), so the
-// default (off) legend is unchanged.
+// every node's panel rather than repeated per panel. A "| reserved
+// (-reserve N)" entry is added only when reserve is actually on
+// (reservedCoreCount(s) > 0), so the default (off) legend is unchanged.
+// withL3 (the topology actually has L3 domain data -- see cpuMapNodeGrid)
+// adds the "| L3 boundary" entry naming the separator cpuMapNodeGrid draws
+// between adjacent L3 domains' cells, LAST: at width 80 the reserved
+// entry's own "(-reserve N)" token is long enough that word-wrapping it
+// ahead of "| L3 boundary" instead pushes the wrap point mid-token
+// ("(-" / "reserve N)"); trailing it after "| L3 boundary" instead lands
+// the wrap on a plain word boundary.
 func cpuMapLegend(s *model.Snapshot, withL3 bool) string {
 	legend := "\u25cf pinned  \u25cb free  \u25d0 shared  (" + pendingGlyphStyle.Render("yellow") + " = pending)"
-	if withL3 {
-		legend += "  | L3 boundary"
-	}
 	if n := reservedCoreCount(s); n > 0 {
 		legend += fmt.Sprintf("  | reserved (-reserve %d)", n)
+	}
+	if withL3 {
+		legend += "  | L3 boundary"
 	}
 	return legend
 }

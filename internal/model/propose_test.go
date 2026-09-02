@@ -303,6 +303,25 @@ func TestFullyFreeCoreCountIgnoresReserved(t *testing.T) {
 	}
 }
 
+// TestReservedThreadsOnNodeSortsResult covers ReservedThreadsOnNode against
+// a fixture whose Node.Threads is deliberately NOT already sorted
+// (interleaved: {5, 0, 4, 1} rather than testTopo's own {0, 1, 4, 5}) --
+// the doc comment promises a sorted result, but nothing enforces that on
+// the caller's own topology, so ReservedThreadsOnNode must sort its output
+// itself rather than trust n.Threads' order.
+func TestReservedThreadsOnNodeSortsResult(t *testing.T) {
+	topo := &hostinfo.Topology{
+		Nodes: []hostinfo.Node{{ID: 0, Threads: []int{5, 0, 4, 1}}},
+	}
+	snap := &Snapshot{Topo: topo, Reserved: map[int]bool{5: true, 0: true}}
+
+	got := ReservedThreadsOnNode(snap, 0)
+	want := []int{0, 5}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ReservedThreadsOnNode() = %v, want %v (sorted ascending)", got, want)
+	}
+}
+
 // TestProposeWithinReservedNodeInsufficientCapacity covers both the
 // capacity check and the fallback pool: reserving every thread on node0
 // must make ProposeWithin refuse it as too small, never silently reuse a
@@ -311,20 +330,6 @@ func TestProposeWithinReservedNodeInsufficientCapacity(t *testing.T) {
 	snap := buildSnap(t, nil, twoVCPUXML).WithReserved(map[int]bool{0: true, 4: true, 1: true, 5: true})
 	if _, err := ProposeWithin(snap, "two-vcpu", 0, nil); err == nil {
 		t.Error("ProposeWithin succeeded on a fully-reserved node, want a capacity error")
-	}
-}
-
-// TestProposalEmulatorMatchesAssignedThreads covers Proposal.Emulator's
-// default: the same threads Pins itself assigns.
-func TestProposalEmulatorMatchesAssignedThreads(t *testing.T) {
-	snap := buildSnap(t, nil, fourVCPUXML)
-	got, err := Propose(snap, "four-vcpu")
-	if err != nil {
-		t.Fatalf("Propose: %v", err)
-	}
-	want := assignedThreads(got.Pins)
-	if !reflect.DeepEqual(got.Emulator, want) {
-		t.Errorf("Emulator = %v, want %v (assigned vCPU threads)", got.Emulator, want)
 	}
 }
 

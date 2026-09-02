@@ -189,6 +189,9 @@ func verify(h libvirtio.Hypervisor, op model.PendingOp) error {
 		if !reflect.DeepEqual(normalizeNodes(cfg.MemNodes), normalizeNodes(wantCfg.MemNodes)) {
 			return fmt.Errorf("memnodes mismatch: got %v want %v", cfg.MemNodes, wantCfg.MemNodes)
 		}
+		if !reflect.DeepEqual(normalizeNodes(cfg.EmulatorPin), normalizeNodes(wantCfg.EmulatorPin)) {
+			return fmt.Errorf("emulatorpin mismatch: got %v want %v", cfg.EmulatorPin, wantCfg.EmulatorPin)
+		}
 	}
 	return nil
 }

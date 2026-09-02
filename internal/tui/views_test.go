@@ -417,6 +417,21 @@ func TestCPUMapLegendShowsReserved(t *testing.T) {
 	}
 }
 
+// TestCPUMapLegendReservedWrapsCleanlyAt80 covers the fix for
+// cpuMapLegend's "reserved (-reserve N)" entry wrapping mid-token
+// ("(-" / "reserve N)") at width 80 when it came before "| L3 boundary":
+// moved after it instead, no wrapped legend line may end with the broken
+// "(-" fragment.
+func TestCPUMapLegendReservedWrapsCleanlyAt80(t *testing.T) {
+	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, Reserved: map[int]bool{0: true, 4: true}}
+	legend := lipgloss.NewStyle().Width(80).Render(cpuMapLegend(s, true))
+	for _, l := range strings.Split(legend, "\n") {
+		if strings.HasSuffix(strings.TrimRight(l, " "), "(-") {
+			t.Fatalf("legend line = %q, want no line ending with a mid-token \"(-\"", l)
+		}
+	}
+}
+
 func TestCPUMapDetail(t *testing.T) {
 	s := snapFromXML(t, map[string]string{"pinned-vm": pinnedNode0XML})
 	// core 0 (node 0, socket 0, id 0) has threads 0 and 4; thread 0 is

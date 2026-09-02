@@ -334,6 +334,71 @@ func TestWizardEmulatorCheckboxReservedCores(t *testing.T) {
 	}
 }
 
+// TestWizardCycleNodeUnchecksEmulatorWithoutReserve covers cycleNode's own
+// safety rule: switching onto a node with no reserved threads at all must
+// uncheck an already-checked emulator box, since there's nothing left for
+// it to pin to there.
+func TestWizardCycleNodeUnchecksEmulatorWithoutReserve(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	a.snap.Reserved = map[int]bool{0: true, 4: true} // node 0's core {0,4} reserved; node 1 has none
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+
+	a.wizard.node = 0
+	a.wizard.emulator = true
+
+	a.wizard.cycleNode(1) // node 0 -> node 1
+	if a.wizard.node != 1 {
+		t.Fatalf("wizard.node = %d, want 1", a.wizard.node)
+	}
+	if a.wizard.emulator {
+		t.Fatal("emulator = true after cycling onto a node with no reserve, want false (unchecked)")
+	}
+}
+
+// TestReservedWarningStillStages covers reservedWarning's non-blocking
+// nature: a hand-typed thread list that includes a reserved thread must
+// still surface the warning, but 'A' stages it anyway rather than
+// refusing.
+func TestReservedWarningStillStages(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	a.snap.Reserved = map[int]bool{0: true, 4: true} // node 0's core {0,4} reserved
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+
+	a.wizard.node = 0
+	a.wizard.threadsText = "0,1" // thread 0 is reserved, thread 1 isn't
+	a.wizard.threadsCaret = len(a.wizard.threadsText)
+
+	ids, errMsg := a.wizard.parseThreads()
+	if errMsg != "" {
+		t.Fatalf("parseThreads() = %q, want a valid thread list", errMsg)
+	}
+	if warn := a.wizard.reservedWarning(ids); warn == "" {
+		t.Fatal("reservedWarning() = \"\", want a warning naming the reserved thread")
+	}
+
+	sendKey(a, 'A')
+	if a.wizard != nil {
+		t.Fatal("wizard still open after 'A', want it to stage despite the reserved-thread warning")
+	}
+	if len(a.queue.Ops) != 1 {
+		t.Fatalf("len(a.queue.Ops) = %d, want 1 (staged)", len(a.queue.Ops))
+	}
+}
+
 func TestWizardEscCancels(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
@@ -1472,6 +1537,40 @@ func TestWizardViewRendersWarning(t *testing.T) {
 	prefix := a.wizard.proposal.Warnings[0][:30]
 	if !strings.Contains(view, prefix) {
 		t.Fatalf("wizard.view() = %q, want the Warning sentence (prefix %q)", view, prefix)
+	}
+}
+
+// TestWizardSummaryLineWrapsWithoutCuttingEmulatorPhrase covers the fix for
+// the summary line overflowing the dialog and getting hard-truncated
+// ("emulator -> own th.."): a 12-vcpu thread list spread over
+// non-adjacent threads (formatCPURanges can't compress it into ranges)
+// pushes the whole summary line well past 80 columns on its own; it must
+// word-wrap instead of being cut, so "emulator -> own threads" still
+// appears in full.
+func TestWizardSummaryLineWrapsWithoutCuttingEmulatorPhrase(t *testing.T) {
+	const n = 24
+	threads := make(map[int]hostinfo.Thread, n)
+	var cores []hostinfo.Core
+	var nodeThreads []int
+	for i := 0; i < n; i++ {
+		threads[i] = hostinfo.Thread{ID: i, Core: i, Socket: 0, Node: 0, Sibling: -1}
+		cores = append(cores, hostinfo.Core{Socket: 0, ID: i, Node: 0, Threads: []int{i}})
+		nodeThreads = append(nodeThreads, i)
+	}
+	topo := &hostinfo.Topology{
+		Nodes:   []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 1000}},
+		Cores:   cores,
+		Threads: threads,
+	}
+	base := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+
+	w := &wizard{vm: "plain-vm", base: base, vcpus: 12, node: 0, within: -1, memSel: -2}
+	w.threadsText = "0,2,4,6,8,10,12,14,16,18,20,22"
+	w.threadsCaret = len(w.threadsText)
+
+	out, _ := w.view(80, 60)
+	if !strings.Contains(out, "emulator -> own threads") {
+		t.Fatalf("wizard.view() = %q, want the summary's \"emulator -> own threads\" phrase to survive wrapping in full", out)
 	}
 }
 
