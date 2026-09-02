@@ -53,7 +53,7 @@ func main() {
 				cfgs[d.Config.Name] = d.Config
 			}
 		}
-		snap := model.Build(topo, doms, func(addr string) int { return hostinfo.PCINumaNode(sysfs, addr) })
+		snap := model.Build(topo, doms, func(addr string) int { return hostinfo.PCINumaNodeIn(topo, sysfs, addr) })
 		return snap, cfgs, nil
 	}
 
