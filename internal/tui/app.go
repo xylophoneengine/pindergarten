@@ -22,10 +22,27 @@ type ScanFn func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error)
 // numTabs is len(tabNames), fixed as a const so it can size tabRanges.
 const numTabs = 6
 
-// tabNames are the tabs, in order. The active one renders as a filled
-// accent pill (see renderTabs/tabActiveStyle); tests check which is
-// active via a.tab / activeTabName, not by grepping a text marker.
-var tabNames = [numTabs]string{"Overview", "CPU Map", "VMs", "Pending", "Backups", "Topology"}
+// Tab indices, in on-screen order -- named so a.tab comparisons/switches
+// read by intent instead of a bare number that silently rots the moment
+// tabNames/the digit-key order changes underneath it (as happened when
+// Topology moved from last to second: every literal "5" meaning Topology,
+// and every literal "1" meaning CPU Map, had to be found and updated by
+// hand). Digit keys ('1'-'6' in handleKey) still map positionally off
+// tabNames itself, so they need no changes here at all.
+const (
+	tabOverview = iota
+	tabTopology
+	tabCPUMap
+	tabVMs
+	tabPending
+	tabBackups
+)
+
+// tabNames are the tabs, in order (see the tab* constants above). The
+// active one renders as a filled accent pill (see renderTabs/
+// tabActiveStyle); tests check which is active via a.tab / activeTabName,
+// not by grepping a text marker.
+var tabNames = [numTabs]string{"Overview", "Topology", "CPU Map", "VMs", "Pending", "Backups"}
 
 // confirm is a pending yes/no prompt. While set, Update handles only
 // y/n/esc; yes runs the confirmed action and returns its Cmd.
@@ -265,7 +282,7 @@ func (a *App) scrollWheel(delta int) {
 	if a.wizard != nil || a.memPicker != nil {
 		return
 	}
-	if a.tab == 4 && a.diffView != "" {
+	if a.tab == tabBackups && a.diffView != "" {
 		a.diffScroll += delta
 		a.clampDiffScroll()
 		return
@@ -279,22 +296,22 @@ func (a *App) scrollWheel(delta int) {
 // scrollWheel).
 func (a *App) scrollActive(delta int) {
 	switch a.tab {
-	case 0:
+	case tabOverview:
 		a.overviewScroll += delta
 		a.clampOverviewScroll()
-	case 1:
+	case tabCPUMap:
 		a.moveCursor(delta * coresPerRow)
-	case 2:
+	case tabVMs:
 		a.moveVMSel(delta)
-	case 3:
+	case tabPending:
 		a.movePendingSel(delta)
-	case 4:
+	case tabBackups:
 		kt := tea.KeyDown
 		if delta < 0 {
 			kt = tea.KeyUp
 		}
 		a.handleBackupsKey(tea.KeyMsg{Type: kt}, &a.backupsSel, a.backupsCount())
-	case 5:
+	case tabTopology:
 		a.topologyScroll += delta
 		a.clampTopologyScroll()
 	}
@@ -317,7 +334,7 @@ func (a *App) handleBodyClick(msg tea.MouseMsg) {
 			case "topocore":
 				// A click on the Topology tab's core box jumps to the
 				// same core on the CPU Map tab, per the brief.
-				a.tab = 1
+				a.tab = tabCPUMap
 				a.cursor = h.index
 			}
 			return
@@ -363,7 +380,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.flow != nil {
 		return a.handleFlowKey(msg)
 	}
-	if a.tab == 4 && a.diffView != "" {
+	if a.tab == tabBackups && a.diffView != "" {
 		// up/down/j/k scroll a long diff (it can be hundreds of lines);
 		// any other key dismisses it, before any other handling (tab-switch
 		// digits included) can see it -- otherwise a stale diff reappears
@@ -416,52 +433,52 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = ""
 		}
 		return a, nil
-	case a.tab == 0 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+	case a.tab == tabOverview && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.overviewScroll--
 		a.clampOverviewScroll()
 		return a, nil
-	case a.tab == 0 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+	case a.tab == tabOverview && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.overviewScroll++
 		a.clampOverviewScroll()
 		return a, nil
-	case a.tab == 1 && (msg.Type == tea.KeyLeft || isRune(msg, 'h')):
+	case a.tab == tabCPUMap && (msg.Type == tea.KeyLeft || isRune(msg, 'h')):
 		a.moveCursor(-1)
 		return a, nil
-	case a.tab == 1 && (msg.Type == tea.KeyRight || isRune(msg, 'l')):
+	case a.tab == tabCPUMap && (msg.Type == tea.KeyRight || isRune(msg, 'l')):
 		a.moveCursor(1)
 		return a, nil
-	case a.tab == 1 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+	case a.tab == tabCPUMap && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.moveCursor(-coresPerRow)
 		return a, nil
-	case a.tab == 1 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+	case a.tab == tabCPUMap && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.moveCursor(coresPerRow)
 		return a, nil
-	case a.tab == 2 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+	case a.tab == tabVMs && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.moveVMSel(-1)
 		return a, nil
-	case a.tab == 2 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+	case a.tab == tabVMs && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.moveVMSel(1)
 		return a, nil
-	case a.tab == 2 && isRune(msg, 'p'):
+	case a.tab == tabVMs && isRune(msg, 'p'):
 		return a.openWizard()
-	case a.tab == 2 && isRune(msg, 's'):
+	case a.tab == tabVMs && isRune(msg, 's'):
 		return a.stageStrip()
-	case a.tab == 2 && isRune(msg, 'n'):
+	case a.tab == tabVMs && isRune(msg, 'n'):
 		return a.openMemNodePicker()
-	case a.tab == 3 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+	case a.tab == tabPending && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.movePendingSel(-1)
 		return a, nil
-	case a.tab == 3 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+	case a.tab == tabPending && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.movePendingSel(1)
 		return a, nil
-	case a.tab == 3 && isRune(msg, 'x'):
+	case a.tab == tabPending && isRune(msg, 'x'):
 		return a.removeSelectedPendingOp()
-	case a.tab == 3 && isRune(msg, 'd'):
+	case a.tab == tabPending && isRune(msg, 'd'):
 		return a.discardAllPending()
-	case a.tab == 4 && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown || isRune(msg, 'j') || isRune(msg, 'k')):
+	case a.tab == tabBackups && (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown || isRune(msg, 'j') || isRune(msg, 'k')):
 		a.handleBackupsKey(msg, &a.backupsSel, a.backupsCount())
 		return a, nil
-	case a.tab == 4 && msg.Type == tea.KeyEnter:
+	case a.tab == tabBackups && msg.Type == tea.KeyEnter:
 		if diff, err := a.backupsDiff(a.backupsSel); err != nil {
 			a.status = err.Error()
 		} else {
@@ -469,18 +486,18 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.diffScroll = 0
 		}
 		return a, nil
-	case a.tab == 4 && isRune(msg, 'R'):
+	case a.tab == tabBackups && isRune(msg, 'R'):
 		a.status = a.stageRestore(a.backupsSel)
 		return a, nil
-	case a.tab == 5 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+	case a.tab == tabTopology && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.topologyScroll--
 		a.clampTopologyScroll()
 		return a, nil
-	case a.tab == 5 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+	case a.tab == tabTopology && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
 		a.topologyScroll++
 		a.clampTopologyScroll()
 		return a, nil
-	case a.tab == 5 && isRune(msg, 'z'):
+	case a.tab == tabTopology && isRune(msg, 'z'):
 		a.topoZoom = (a.topoZoom + 1) % 3 // auto -> detailed -> compact -> auto
 		a.clampTopologyScroll()
 		return a, nil
@@ -1109,20 +1126,20 @@ func (a *App) renderBody(budget int) (string, []hit) {
 
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
 	switch a.tab {
-	case 0:
+	case tabOverview:
 		return renderOverviewTab(projected, w, budget, a.overviewScroll), nil
-	case 1:
+	case tabCPUMap:
 		return renderCPUMapTab(projected, a.cursor, w, budget)
-	case 2:
+	case tabVMs:
 		return renderVMsTab(projected, a.vmSel, w, budget)
-	case 3:
+	case tabPending:
 		return renderPendingTab(a.queue, a.pendingSel, w, budget)
-	case 4:
+	case tabBackups:
 		if a.diffView != "" {
 			return a.renderDiffView(w, budget), nil
 		}
 		return a.renderBackupsTab(a.backupsSel, w, budget)
-	case 5:
+	case tabTopology:
 		return renderTopologyTab(projected, w, budget, a.topologyScroll, a.topoZoom)
 	}
 	return "", nil
@@ -1219,29 +1236,29 @@ func (a *App) renderStatusBar() string {
 	tail := []keyHint{{"r", "rescan"}, {"e", "edit"}, {"q", "quit"}}
 
 	var context []keyHint
-	if a.tab == 0 && !a.overviewSideBySide() {
+	if a.tab == tabOverview && !a.overviewSideBySide() {
 		context = append(context, keyHint{"up/down", "scroll"})
 	}
-	if a.tab == 1 {
+	if a.tab == tabCPUMap {
 		context = append(context, keyHint{"arrows/hjkl", "move"})
 	}
-	if a.tab == 5 {
+	if a.tab == tabTopology {
 		context = append(context, keyHint{"up/down", "scroll"}, keyHint{"z", "zoom"})
 	}
-	if a.editMode && a.tab == 3 {
+	if a.editMode && a.tab == tabPending {
 		context = append(context, keyHint{"x", "remove"})
 	}
 	if a.editMode && a.queue.Len() > 0 {
 		context = append(context, keyHint{"a", "apply"})
 	}
-	if a.editMode && a.tab == 3 && a.queue.Len() > 0 {
+	if a.editMode && a.tab == tabPending && a.queue.Len() > 0 {
 		// 'd' (discard all) is only routed on the Pending tab.
 		context = append(context, keyHint{"d", "discard"})
 	}
-	if a.editMode && a.tab == 2 {
+	if a.editMode && a.tab == tabVMs {
 		context = append(context, keyHint{"p", "pin"}, keyHint{"s", "strip"}, keyHint{"n", "mem-node"})
 	}
-	if a.tab == 4 {
+	if a.tab == tabBackups {
 		switch {
 		case a.diffView != "":
 			// Dismissing the diff isn't gated by edit mode either.

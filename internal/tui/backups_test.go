@@ -215,7 +215,7 @@ func TestMouseClickSelectsBackupRow(t *testing.T) {
 	if _, err := backup.Save(a.backupDir, "vm1", "strip pins", "test", vm1XML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 

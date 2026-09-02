@@ -136,7 +136,7 @@ func TestEditUnlockConfirm(t *testing.T) {
 func TestConfirmFitsHeightBudget(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(5), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 
 	sendKey(a, 'e')
@@ -201,7 +201,7 @@ func TestConfirmWithWrappedStatusKeepsKeyBarAndYes(t *testing.T) {
 func TestConfirmAtHeight8KeepsYesHint(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(5), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
 
 	sendKey(a, 'e')
@@ -244,9 +244,13 @@ func activeTabName(a *App) string {
 func TestTabSwitch(t *testing.T) {
 	a := testApp(t, false)
 
+	sendKey(a, '2')
+	if got := activeTabName(a); got != "Topology" {
+		t.Fatalf("active tab after '2' = %q, want Topology", got)
+	}
 	sendKey(a, '3')
-	if got := activeTabName(a); got != "VMs" {
-		t.Fatalf("active tab after '3' = %q, want VMs", got)
+	if got := activeTabName(a); got != "CPU Map" {
+		t.Fatalf("active tab after '3' = %q, want CPU Map", got)
 	}
 }
 
@@ -259,16 +263,16 @@ func TestTabSwitch(t *testing.T) {
 // and arrow-key handling could plausibly shadow them.
 func TestTabSwitchKeysWorkFromEveryTab(t *testing.T) {
 	a := testApp(t, false)
-	a.tab = 1 // CPU Map
+	a.tab = tabCPUMap
 
 	sendKeyType(a, tea.KeyTab)
 	if got := activeTabName(a); got != "VMs" {
 		t.Fatalf("active tab after Tab from CPU Map = %q, want VMs", got)
 	}
 
-	sendKey(a, '5')
+	sendKey(a, '6')
 	if got := activeTabName(a); got != "Backups" {
-		t.Fatalf("active tab after '5' = %q, want Backups", got)
+		t.Fatalf("active tab after '6' = %q, want Backups", got)
 	}
 
 	sendKeyType(a, tea.KeyShiftTab)
@@ -307,7 +311,7 @@ func TestKeyBarStaysOneRowAtNarrowWidths(t *testing.T) {
 	runScan(t, a)
 	enterEdit(a)
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
 
 	keyBar := a.renderStatusBar()
@@ -444,7 +448,7 @@ func TestMouseClickSwitchesTab(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	_ = a.View() // record tabRanges
 
-	rng := a.tabRanges[2] // VMs
+	rng := a.tabRanges[tabVMs]
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 
 	if got := activeTabName(a); got != "VMs" {
@@ -473,7 +477,7 @@ func TestStatusClearsOnTabSwitch(t *testing.T) {
 	}
 
 	a.status = "leftover"
-	rng := a.tabRanges[0] // Overview: a.tab is currently 3 (Pending) after the switches above
+	rng := a.tabRanges[tabOverview] // a.tab is currently tabVMs after the switches above
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	if a.status != "" {
 		t.Fatalf("status = %q after a mouse tab click, want cleared", a.status)
@@ -488,7 +492,7 @@ func TestMouseIgnoredWhileWizardOpen(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	_ = a.View() // record tabRanges
 
@@ -497,11 +501,11 @@ func TestMouseIgnoredWhileWizardOpen(t *testing.T) {
 		t.Fatalf("status = %q, wizard did not open", a.status)
 	}
 
-	rng := a.tabRanges[0] // Overview
+	rng := a.tabRanges[tabOverview]
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 
-	if a.tab != 2 {
-		t.Fatalf("a.tab = %d, want unchanged 2 (mouse must be ignored while the wizard is open)", a.tab)
+	if a.tab != tabVMs {
+		t.Fatalf("a.tab = %d, want unchanged %d (mouse must be ignored while the wizard is open)", a.tab, tabVMs)
 	}
 	if a.wizard == nil {
 		t.Fatal("wizard closed by a mouse click, want it to stay open")
@@ -612,7 +616,7 @@ func TestStatusBarApplyDiscardVisibility(t *testing.T) {
 		t.Fatalf("View() on a non-Pending tab = %q, want no discard hint ('d' is only routed on the Pending tab)", view)
 	}
 
-	a.tab = 3
+	a.tab = tabPending
 	view = a.View()
 	if !strings.Contains(view, "[d] discard") {
 		t.Fatalf("View() on the Pending tab with a pending op = %q, want the discard hint", view)
@@ -698,7 +702,7 @@ func manyNodesTopo(n int) *hostinfo.Topology {
 // clampHeight's last-resort truncation).
 func TestOverviewHeightBudgetKeepsKeyBarVisible(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodesTopo(8), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabOverview}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	view := a.View()
@@ -720,7 +724,7 @@ func TestOverviewHeightBudgetKeepsKeyBarVisible(t *testing.T) {
 // (checked first, since node 0's panel is built first).
 func TestCPUMapClickDoesNotCrossPanelBoundary(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(2, 40), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabCPUMap}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	_ = a.View() // record hits
 
@@ -740,7 +744,7 @@ func TestCPUMapClickDoesNotCrossPanelBoundary(t *testing.T) {
 // surviving.
 func TestCPUMapStackedNodesHeightBudgetKeepsKeyBarVisible(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(4, 200), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabCPUMap}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	view := a.View()
@@ -761,7 +765,7 @@ func TestCPUMapStackedNodesHeightBudgetKeepsKeyBarVisible(t *testing.T) {
 // just the first few), with a hit recorded for it.
 func TestCPUMapNodePanelsWindowAroundCursor(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(8, 1), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1, cursor: 7}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabCPUMap, cursor: 7}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	view := a.View()
@@ -778,7 +782,7 @@ func TestCPUMapNodePanelsWindowAroundCursor(t *testing.T) {
 // exceeds the whole budget -- must still leave the key bar visible.
 func TestCPUMapFirstNodePanelClampedToBudget(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodeManyCoresTopo(4, 200), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabCPUMap}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 
 	view := a.View()
@@ -795,7 +799,7 @@ func TestCPUMapFirstNodePanelClampedToBudget(t *testing.T) {
 // ToBudget's Overview-tab counterpart.
 func TestOverviewFirstCardClampedToBudget(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodesTopo(4), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabOverview}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 6})
 
 	view := a.View()
@@ -814,7 +818,7 @@ func TestOverviewFirstCardClampedToBudget(t *testing.T) {
 // every node becomes reachable.
 func TestOverviewScrollRevealsHiddenNodes(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodesTopo(8), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabOverview}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	view := a.View()
@@ -842,7 +846,7 @@ func TestOverviewScrollRevealsHiddenNodes(t *testing.T) {
 // footer out of an already-complete view.
 func TestOverviewScrollStaysAtZeroWhenEverythingFits(t *testing.T) {
 	s := &model.Snapshot{Topo: manyNodesTopo(2), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 0}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabOverview}
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 
 	sendKeyType(a, tea.KeyDown)
@@ -878,7 +882,7 @@ func TestConfirmDialogWrapsPromptBeforeClipping(t *testing.T) {
 // must not be left to overflow it.
 func TestViewWrapsWideCPUMapToWidth(t *testing.T) {
 	s := &model.Snapshot{Topo: wideCoreTopo(20), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
+	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: tabCPUMap}
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 
 	for i, line := range strings.Split(a.renderFull(), "\n") {
@@ -925,7 +929,7 @@ func press(x, y int) tea.MouseMsg {
 func TestMouseClickSelectsVMRow(t *testing.T) {
 	a, _ := pendingFakeAppMulti(t, map[string]string{"vm1": vm1XML, "vm2": vm2XML})
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 
@@ -941,7 +945,7 @@ func TestMouseClickSelectsVMRow(t *testing.T) {
 func TestMouseClickSelectsCPUMapCore(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 1
+	a.tab = tabCPUMap
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 
@@ -957,7 +961,7 @@ func TestMouseClickSelectsCPUMapCore(t *testing.T) {
 func TestMouseWheelMovesVMSel(t *testing.T) {
 	a, _ := pendingFakeAppMulti(t, map[string]string{"vm1": vm1XML, "vm2": vm2XML})
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View()
 
@@ -979,7 +983,7 @@ func TestMouseIgnoredDuringApplyFlow(t *testing.T) {
 	runScan(t, a)
 	enterEdit(a)
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
-	a.tab = 3
+	a.tab = tabPending
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	_ = a.View()
 
@@ -988,10 +992,10 @@ func TestMouseIgnoredDuringApplyFlow(t *testing.T) {
 		t.Fatal("apply flow did not open")
 	}
 
-	rng := a.tabRanges[0]
+	rng := a.tabRanges[tabOverview]
 	a.Update(tea.MouseMsg{X: rng[0], Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
-	if a.tab != 3 {
-		t.Fatalf("a.tab = %d, want unchanged 3 (mouse must be ignored while the apply flow is open)", a.tab)
+	if a.tab != tabPending {
+		t.Fatalf("a.tab = %d, want unchanged %d (mouse must be ignored while the apply flow is open)", a.tab, tabPending)
 	}
 	if a.flow == nil {
 		t.Fatal("flow closed by a mouse click, want it to stay open")
@@ -1005,7 +1009,7 @@ func TestMouseIgnoredDuringApplyFlow(t *testing.T) {
 func TestVMsTableFitsNarrowWidth(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
 	view := a.renderFull()
@@ -1027,7 +1031,7 @@ func TestVMsTableFitsNarrowWidth(t *testing.T) {
 func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 
 	lines := strings.Split(a.View(), "\n")
@@ -1047,7 +1051,7 @@ func TestVMsTabTwoColumnAtWideWidth(t *testing.T) {
 func TestVMsTabStacksJustBelowThreshold(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 119, Height: 24})
 
 	view := a.View()
@@ -1098,7 +1102,7 @@ func manyVMXMLs(n int) map[string]string {
 func TestVMsBodyFillsHeightBudget(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(5), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	view := a.View()
@@ -1143,7 +1147,7 @@ func rowOf(t *testing.T, view, marker string) int {
 func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(40), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = 0
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
@@ -1185,7 +1189,7 @@ func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
 func TestOverlayPreservesBodyRightOfDialog(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(5), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 175, Height: 22})
 
 	without := strings.Split(a.View(), "\n")
@@ -1255,7 +1259,7 @@ func TestDiffViewBottomBorderSurvives(t *testing.T) {
 	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	sendKeyType(a, tea.KeyEnter)
 	if a.diffView == "" {
@@ -1293,7 +1297,7 @@ func TestDiffViewBottomBorderSurvives(t *testing.T) {
 func TestVMsHeightBudgetKeepsSelectionVisibleAndClickable(t *testing.T) {
 	a := wizardTestApp(t, manyVMXMLs(40), noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = 39
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -1322,7 +1326,7 @@ func TestBackupsDiffHeightBudgetAndWheelScroll(t *testing.T) {
 	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	sendKeyType(a, tea.KeyEnter)
@@ -1356,7 +1360,7 @@ func TestBackupsDiffScrollClampsAtInputTime(t *testing.T) {
 	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	sendKeyType(a, tea.KeyEnter)
 	if a.diffView == "" {
@@ -1390,7 +1394,7 @@ func TestBackupsDiffScrollClampsAtInputTime(t *testing.T) {
 func TestMouseClickInDetailPanelDoesNotChangeSelection(t *testing.T) {
 	a, _ := pendingFakeAppMulti(t, map[string]string{"plain-vm": plainVMXML, "vm1": vm1XML})
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = 0
 	a.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	_ = a.View() // record hits
@@ -1439,17 +1443,17 @@ func TestSmokeRenderFixRound1(t *testing.T) {
 	enterEdit(a)
 	a.vmSel = 39
 
-	a.tab = 0
+	a.tab = tabOverview
 	t.Logf("=== Overview (width 120, height 24) ===\n%s", a.View())
 
-	a.tab = 2
+	a.tab = tabVMs
 	t.Logf("=== VMs, 40 VMs, vmSel=39 (width 120, height 24) ===\n%s", a.View())
 
 	bigXML := plainVMXML + "\n" + strings.Repeat("  <!-- padding line -->\n", 300)
 	if _, err := backup.Save(a.backupDir, "vm00", "pin", "test", bigXML); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 	sendKeyType(a, tea.KeyEnter)
 	if a.diffView == "" {
 		t.Fatal("diff view did not open")

@@ -12,7 +12,7 @@ import (
 func TestMemNodeRefusedReadOnly(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 
@@ -31,7 +31,7 @@ func TestMemNodeStagesOp(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 	if a.memPicker == nil {
@@ -77,7 +77,7 @@ func TestMemNodeUsesProjectedPins(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -133,7 +133,7 @@ func TestMouseClickPicksMemNode(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 	if a.memPicker == nil {
@@ -163,7 +163,7 @@ func TestMemNodeInvalidDigitStagesNothing(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 	if a.memPicker == nil {
@@ -186,7 +186,7 @@ func TestMemNodeKeepsExistingPins(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	wantPins := a.snap.VM("pinned-vm").Pins
 
@@ -219,7 +219,7 @@ func TestMemNodeEscCancels(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 	if a.memPicker == nil {
@@ -242,7 +242,7 @@ func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'n')
 	if a.memPicker == nil {

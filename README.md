@@ -105,7 +105,7 @@ is on; browsing and rescanning always work in read-only mode.
 | Key | Where | Action |
 |-----|-------|--------|
 | `?` / `F1` | anywhere | show/hide the help overlay listing every key binding |
-| `1`-`6` | anywhere | jump to tab: Overview, CPU Map, VMs, Pending, Backups, Topology |
+| `1`-`6` | anywhere | jump to tab: Overview, Topology, CPU Map, VMs, Pending, Backups |
 | `Tab` / `Shift+Tab` | anywhere | next / previous tab |
 | mouse click | tab bar | jump to that tab |
 | arrows / `h j k l` | CPU Map | move the selected core |

@@ -387,7 +387,7 @@ func TestCPUMapSharedDetail(t *testing.T) {
 func TestCursorMoves(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 1
+	a.tab = tabCPUMap
 
 	_, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
 	view := a.View()
@@ -433,13 +433,13 @@ func TestCursorClampAndOtherTabsInert(t *testing.T) {
 	runScan(t, a)
 
 	// Cursor keys are inert outside the CPU Map tab.
-	a.tab = 0
+	a.tab = tabOverview
 	_, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
 	if a.cursor != 0 {
 		t.Fatalf("cursor = %d on Overview tab after right arrow, want 0 (inert)", a.cursor)
 	}
 
-	a.tab = 1
+	a.tab = tabCPUMap
 	_, _ = a.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	if a.cursor != 0 {
 		t.Fatalf("cursor = %d after left arrow at 0, want clamped to 0", a.cursor)

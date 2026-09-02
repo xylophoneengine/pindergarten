@@ -384,7 +384,7 @@ func TestDiscardAllPending(t *testing.T) {
 	runScan(t, a)
 	enterEdit(a)
 	stagePlainVMPin(a)
-	a.tab = 3
+	a.tab = tabPending
 
 	sendKey(a, 'd')
 	if a.confirm == nil {
@@ -445,7 +445,7 @@ func TestMouseClickSelectsPendingRow(t *testing.T) {
 		Kind: model.OpPin, VM: "vm1", Pins: map[int][]int{0: {2}, 1: {3}}, MemNode: 1,
 		StagedHash: model.HashXML(vm1XML), StagedXML: vm1XML, Summary: "vm1: pin",
 	})
-	a.tab = 3
+	a.tab = tabPending
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 
@@ -459,7 +459,7 @@ func TestMouseClickSelectsPendingRow(t *testing.T) {
 func TestPendingTabEmptyState(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
-	a.tab = 3
+	a.tab = tabPending
 	if !strings.Contains(a.View(), "no pending operations") {
 		t.Fatalf("View() = %q, want the empty-state text", a.View())
 	}
@@ -470,7 +470,7 @@ func TestRemovePendingOp(t *testing.T) {
 	runScan(t, a)
 	enterEdit(a)
 	stagePlainVMPin(a)
-	a.tab = 3
+	a.tab = tabPending
 
 	sendKey(a, 'x')
 	if a.queue.Len() != 0 {
@@ -480,7 +480,7 @@ func TestRemovePendingOp(t *testing.T) {
 	b := testApp(t, false)
 	runScan(t, b)
 	stagePlainVMPin(b) // added directly, bypassing the staging gate, to test 'x's own refusal
-	b.tab = 3
+	b.tab = tabPending
 
 	sendKey(b, 'x')
 	if b.queue.Len() != 1 {
@@ -533,7 +533,7 @@ func TestBackupsTabRoutes(t *testing.T) {
 		"test", "<domain><name>plain-vm</name><old/></domain>"); err != nil {
 		t.Fatalf("backup.Save: %v", err)
 	}
-	a.tab = 4
+	a.tab = tabBackups
 
 	sendKeyType(a, tea.KeyEnter)
 	if a.diffView == "" {

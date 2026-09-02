@@ -213,7 +213,7 @@ func TestTopologyClickJumpsToCPUMapCursor(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	a.snap = &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
 	a.doms = map[string]*libvirtio.DomainConfig{}
-	a.tab = 5
+	a.tab = tabTopology
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 	_ = a.View() // record hits
 
@@ -231,8 +231,8 @@ func TestTopologyClickJumpsToCPUMapCursor(t *testing.T) {
 	}
 
 	a.Update(press(h.x0, h.y0))
-	if a.tab != 1 {
-		t.Fatalf("tab = %d after clicking a core box, want 1 (CPU Map)", a.tab)
+	if a.tab != tabCPUMap {
+		t.Fatalf("tab = %d after clicking a core box, want %d (CPU Map)", a.tab, tabCPUMap)
 	}
 	if a.cursor != h.index {
 		t.Fatalf("cursor = %d after clicking a core box, want %d", a.cursor, h.index)
@@ -348,7 +348,7 @@ func TestTopologyZoomCycles(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	a.snap = &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
 	a.doms = map[string]*libvirtio.DomainConfig{}
-	a.tab = 5
+	a.tab = tabTopology
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	if a.topoZoom != topoZoomAuto {

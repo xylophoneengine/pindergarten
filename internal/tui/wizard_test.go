@@ -105,7 +105,7 @@ func vmIndex(t *testing.T, a *App, name string) int {
 func TestVMsTabShowsFlags(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	view := a.View()
 	if !strings.Contains(view, "[!]") {
@@ -120,7 +120,7 @@ func TestStripStagesOp(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = vmIndex(t, a, "pinned-vm")
 
 	sendKey(a, 's')
@@ -147,7 +147,7 @@ func TestStripStagesOp(t *testing.T) {
 func TestStripRefusedReadOnly(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 's')
 
@@ -163,7 +163,7 @@ func TestUnsupportedVMRefusesPinAndStrip(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"broken-vm": brokenXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 's')
 	if a.queue.Len() != 0 {
@@ -186,7 +186,7 @@ func TestWizardAcceptStagesPin(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -230,7 +230,7 @@ func TestWizardEscCancels(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -258,7 +258,7 @@ func TestWizardManualCount(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -321,7 +321,7 @@ func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -378,7 +378,7 @@ func TestWizardManualEscResetsNode(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	sendKey(a, 'm')
@@ -410,7 +410,7 @@ func TestWizardDialogIsCenteredAndWidthCapped(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 	a.Update(tea.WindowSizeMsg{Width: 300, Height: 40})
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -444,7 +444,7 @@ func TestWizardViewIsOnePanel(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -470,7 +470,7 @@ func TestMouseClickTogglesWizardManualCore(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -539,7 +539,7 @@ func TestWizardManualUpDownMovesAndClamps(t *testing.T) {
 	a := New(f, scan, t.TempDir(), "test")
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	sendKey(a, 'm')
@@ -584,7 +584,7 @@ func TestSecondWizardSeesPending(t *testing.T) {
 		Summary: "vm1: pin",
 	})
 
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = vmIndex(t, a, "vm2")
 	sendKey(a, 'p')
 
@@ -613,7 +613,7 @@ func TestRepinIncludesOwnPins(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -635,7 +635,7 @@ func TestWizardProposalShowsOwnPinsAsFree(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -654,7 +654,7 @@ func TestWizardViewRendersRationale(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -692,7 +692,7 @@ func TestWizardViewRendersWarning(t *testing.T) {
 		Summary: "vm1: pin",
 	})
 
-	a.tab = 2
+	a.tab = tabVMs
 	a.vmSel = vmIndex(t, a, "vm2")
 	sendKey(a, 'p')
 
@@ -719,7 +719,7 @@ func TestWizardManualViewShowsSelectedCount(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	sendKey(a, 'm')
@@ -748,7 +748,7 @@ func TestWizardProposalHighlightsProposedThreads(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 	if a.wizard == nil {
@@ -766,7 +766,7 @@ func TestWizardProposalHighlightsProposedThreads(t *testing.T) {
 func TestPinRefusedReadOnly(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
-	a.tab = 2
+	a.tab = tabVMs
 
 	sendKey(a, 'p')
 

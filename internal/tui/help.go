@@ -28,7 +28,7 @@ type helpEntry struct {
 // the set of unique keys, not row count.
 var helpKeys = []helpEntry{
 	{"Global", "? / F1", "show/hide this help"},
-	{"Global", "1-6", "jump to tab: Overview, CPU Map, VMs, Pending, Backups, Topology"},
+	{"Global", "1-6", "jump to tab: Overview, Topology, CPU Map, VMs, Pending, Backups"},
 	{"Global", "Tab / Shift+Tab", "next / previous tab"},
 	{"Global", "mouse click", "tab bar: jump to that tab"},
 	{"Global", "e", "toggle edit mode (confirmed)"},
