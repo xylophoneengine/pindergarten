@@ -567,9 +567,10 @@ func (a *App) clampOverviewScroll() {
 	}
 
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	cardWidths, _ := equalSplit(effectiveWidth(a.width), len(projected.Topo.Nodes), sideCardMinWidth)
 	heights := make([]int, len(projected.Topo.Nodes))
 	for i, node := range projected.Topo.Nodes {
-		heights[i] = lineCount(overviewNodeCard(projected, node)) + 2 // borders
+		heights[i] = lineCount(overviewNodeCard(projected, node, cardWidths[i])) + 2 // borders
 	}
 	_, _, _, _, chrome := a.renderChrome()
 	_, cardsBudget, _ := overviewCardsLayout(projected, effectiveWidth(a.width), a.bodyBudget(chrome))

@@ -88,11 +88,12 @@ func nodeThreadStats(s *model.Snapshot, node hostinfo.Node) (pinned, pending, to
 // its used/total and, when overcommitted, a red OVER marker right next to
 // the percentage -- MemTotalKiB == 0 shows "total unknown" instead of a
 // meaningless 0%), a threads bar (pinned solid, pending a second color),
-// one line per GPU on the node (gpuLinesOnNode) and a "vms:" list. The
-// node's own id is the panel's title, not a line here, and free/pinned-
-// count figures already visible in the bars aren't repeated in a
-// separate summary line.
-func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
+// one line per GPU on the node (gpuLinesOnNode, word-wrapped to width --
+// its own total render width, matching what the caller will pass to
+// panelH -- rather than truncated) and a "vms:" list. The node's own id
+// is the panel's title, not a line here, and free/pinned-count figures
+// already visible in the bars aren't repeated in a separate summary line.
+func overviewNodeCard(s *model.Snapshot, node hostinfo.Node, width int) string {
 	bound := s.BoundMemKiB[node.ID]
 
 	var b strings.Builder
@@ -121,7 +122,7 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 	}
 	b.WriteString("\n")
 
-	for _, line := range gpuLinesOnNode(s, node.ID) {
+	for _, line := range gpuLinesOnNode(s, node.ID, width) {
 		b.WriteString(line + "\n")
 	}
 	if vms := vmsOnNode(s, node.ID); vms != "" {
@@ -131,15 +132,17 @@ func overviewNodeCard(s *model.Snapshot, node hostinfo.Node) string {
 }
 
 // overviewCardNaturalHeight estimates node's card height (memory/free/
-// threads lines, one per gpuLinesOnNode entry, +1 for a present vms:
-// line, +2 borders) without actually rendering the card -- cheap enough
-// to call once per node just to seed splitStackedBudget's primary/
-// secondary split, mirroring how renderVMsTab/renderCPUMapTab estimate
-// their own primary panel's natural size from a formula rather than a
-// full render.
-func overviewCardNaturalHeight(s *model.Snapshot, node hostinfo.Node) int {
+// threads lines, however many physical lines gpuLinesOnNode's entries
+// wrap to at width, +1 for a present vms: line, +2 borders) without
+// actually rendering the card -- cheap enough to call once per node just
+// to seed splitStackedBudget's primary/secondary split, mirroring how
+// renderVMsTab/renderCPUMapTab estimate their own primary panel's
+// natural size from a formula rather than a full render.
+func overviewCardNaturalHeight(s *model.Snapshot, node hostinfo.Node, width int) int {
 	h := 5 // memory + free + threads lines, plus 2 borders
-	h += len(gpuLinesOnNode(s, node.ID))
+	for _, line := range gpuLinesOnNode(s, node.ID, width) {
+		h += lineCount(line)
+	}
 	if vmsOnNode(s, node.ID) != "" {
 		h++
 	}
@@ -163,7 +166,7 @@ func renderOverviewCards(s *model.Snapshot, w, budget, scroll int) string {
 	bodies := make([]string, len(s.Topo.Nodes))
 	heights := make([]int, len(s.Topo.Nodes))
 	for i, node := range s.Topo.Nodes {
-		bodies[i] = overviewNodeCard(s, node)
+		bodies[i] = overviewNodeCard(s, node, cardWidths[i])
 		heights[i] = lineCount(bodies[i]) + 2 // borders
 	}
 
@@ -216,16 +219,75 @@ func nodeByID(nodes []hostinfo.Node, id int) *hostinfo.Node {
 	return nil
 }
 
+// vendorShortNames maps common PCI vendor IDs to a short, display-
+// friendly form: pci.ids' own vendor strings are full legal names
+// ("Advanced Micro Devices, Inc. [AMD/ATI]") that ate most of a GPU
+// line's width before the device name even started, forcing every
+// renderer that showed one to truncate it with ".." -- this is the fix,
+// at the source, for every one of them at once (shortenVendorName below
+// covers a vendor with no entry here).
+var vendorShortNames = map[string]string{
+	"1002": "AMD",
+	"10de": "NVIDIA",
+	"8086": "Intel",
+	"1a03": "ASPEED",
+	"102b": "Matrox",
+	"15ad": "VMware",
+	"1af4": "Red Hat",
+}
+
+// vendorNameSuffixes are corporate-suffix clutter shortenVendorName trims
+// off a pci.ids vendor string with no vendorShortNames entry.
+var vendorNameSuffixes = []string{", Inc.", " Corporation", " Co., Ltd."}
+
+// shortenVendorName strips a pci.ids vendor string's bracketed alias
+// ("... [AMD/ATI]") and any trailing corporate suffix, for a vendor ID
+// not already covered by vendorShortNames.
+func shortenVendorName(name string) string {
+	if i := strings.Index(name, " ["); i >= 0 {
+		name = name[:i]
+	}
+	for _, suffix := range vendorNameSuffixes {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	return strings.TrimSpace(name)
+}
+
 // pciDisplayName renders a PCI device's vendor/device name for the
-// hardware tree: "<VendorName> <DeviceName>" (either half omitted if
-// empty), falling back to the bare hex IDs ("<vendorID>:<deviceID>") when
-// neither name resolved (no pci.ids file, or an unknown vendor).
+// hardware tree: "<vendor> <DeviceName>" (either half omitted if empty),
+// falling back to the bare hex IDs ("<vendorID>:<deviceID>") when
+// neither resolved (no pci.ids file, or an unknown vendor). vendor is
+// vendorShortNames' entry for d.VendorID when there is one, else
+// d.VendorName run through shortenVendorName -- DeviceName is used
+// verbatim (pci.ids' own device names are usually short enough already,
+// and callers that word-wrap the result handle whatever length remains).
 func pciDisplayName(d hostinfo.PCIDevice) string {
-	name := strings.TrimSpace(d.VendorName + " " + d.DeviceName)
+	vendor, ok := vendorShortNames[d.VendorID]
+	if !ok {
+		vendor = shortenVendorName(d.VendorName)
+	}
+	name := strings.TrimSpace(vendor + " " + d.DeviceName)
 	if name == "" {
 		name = d.VendorID + ":" + d.DeviceID
 	}
 	return name
+}
+
+// wrapHanging word-wraps text to fit width, indenting every line after
+// the first by indent spaces -- so a paragraph the caller writes right
+// after its own fixed-width, un-wrapped prefix (e.g. "gpu 06:00.0  ")
+// still reads as one aligned block once it wraps, rather than every
+// continuation line restarting at column 0 under the prefix itself.
+func wrapHanging(text string, width, indent int) string {
+	contentW := width - indent
+	if contentW < 1 {
+		contentW = 1
+	}
+	lines := strings.Split(lipgloss.NewStyle().Width(contentW).Render(text), "\n")
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Repeat(" ", indent) + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // pciDriverOrNone renders a PCI device's bound driver, or "none" when it
@@ -248,11 +310,14 @@ func isDisplayDevice(class string) bool {
 // one block per socket ("socket N  <CPU model>"), each with its own NUMA
 // nodes ("  node N  <threads> threads  mem <total>"), each with its own
 // L3 domains ("    L3 #k  threads <cpulist>") and display-class PCI
-// devices ("    gpu <addr>  <vendor/device name>  (<driver>)"). Filled to
-// budget like every body panel (see panelH's fill option); topo.Sockets
-// empty (a topology hostinfo.Read never actually produces, but hand-built
-// fixtures elsewhere in this package sometimes do) just renders an empty
-// panel rather than erroring.
+// devices ("    gpu <addr>  <vendor/device name>  (<driver>)"), the name
+// and driver word-wrapped (wrapHanging) rather than truncated -- a panel
+// this narrow, with a long vendor/device name, used to lose the name and
+// the trailing "(<driver>)" behind panelH's own ".." line truncation.
+// Filled to budget like every body panel (see panelH's fill option);
+// topo.Sockets empty (a topology hostinfo.Read never actually produces,
+// but hand-built fixtures elsewhere in this package sometimes do) just
+// renders an empty panel rather than erroring.
 func renderOverviewHardware(s *model.Snapshot, w, budget int) string {
 	var b strings.Builder
 	for _, sock := range s.Topo.Sockets {
@@ -277,7 +342,9 @@ func renderOverviewHardware(s *model.Snapshot, w, budget int) string {
 				if dev.Node != nodeID || !isDisplayDevice(dev.Class) {
 					continue
 				}
-				fmt.Fprintf(&b, "    gpu %s  %s  (%s)\n", dev.Addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver))
+				prefix := fmt.Sprintf("    gpu %s  ", dev.Addr)
+				rest := fmt.Sprintf("%s  (%s)", pciDisplayName(dev), pciDriverOrNone(dev.Driver))
+				b.WriteString(prefix + wrapHanging(rest, w-2, len(prefix)) + "\n")
 			}
 		}
 	}
@@ -305,10 +372,10 @@ func overviewCardsLayout(s *model.Snapshot, w, budget int) (cardsW, cardsBudget,
 	if sideBySide {
 		return primaryW, budget, budget
 	}
-	_, cardsSideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
+	cardWidths, cardsSideBySide := equalSplit(w, len(s.Topo.Nodes), sideCardMinWidth)
 	natural := 0
-	for _, node := range s.Topo.Nodes {
-		h := overviewCardNaturalHeight(s, node)
+	for i, node := range s.Topo.Nodes {
+		h := overviewCardNaturalHeight(s, node, cardWidths[i])
 		if cardsSideBySide {
 			if h > natural {
 				natural = h
@@ -371,27 +438,34 @@ func vmUsingDevice(s *model.Snapshot, addr string) string {
 	return ""
 }
 
-// gpuLinesOnNode returns one line per display-class PCI device attached
+// gpuLinesOnNode returns one entry per display-class PCI device attached
 // to node (s.Topo.PCIDevices, not just the ones some VM happens to be
 // using -- the hardware panel already lists every GPU on the host; the
 // card used to list only passed-through ones, by bare address): "gpu
 // <addr>  <vendor/device name>  vm: <name>" when a VM is using it
 // (vmUsingDevice), or "gpu <addr>  <vendor/device name>  host (<driver>)"
-// when it's still host-driven. panelH already truncates any line that
-// doesn't fit the card's own width, so no truncation logic is needed
-// here.
-func gpuLinesOnNode(s *model.Snapshot, node int) []string {
+// when it's still host-driven -- word-wrapped (wrapHanging) to width
+// (the card's own total render width, matching what the caller passes
+// panelH) rather than left for panelH's own truncation to chop into
+// "..", which used to eat the name and the trailing vm:/host suffix on
+// anything but a very wide card. Each returned entry may itself be
+// multiple physical lines (join with "\n" already applied); the caller
+// writes each entry followed by its own newline.
+func gpuLinesOnNode(s *model.Snapshot, node, width int) []string {
 	var lines []string
 	for _, dev := range s.Topo.PCIDevices {
 		if dev.Node != node || !isDisplayDevice(dev.Class) {
 			continue
 		}
 		addr := strings.TrimPrefix(dev.Addr, "0000:")
+		prefix := fmt.Sprintf("gpu %s  ", addr)
+		var rest string
 		if vm := vmUsingDevice(s, dev.Addr); vm != "" {
-			lines = append(lines, fmt.Sprintf("gpu %s  %s  vm: %s", addr, pciDisplayName(dev), vm))
+			rest = fmt.Sprintf("%s  vm: %s", pciDisplayName(dev), vm)
 		} else {
-			lines = append(lines, fmt.Sprintf("gpu %s  %s  host (%s)", addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver)))
+			rest = fmt.Sprintf("%s  host (%s)", pciDisplayName(dev), pciDriverOrNone(dev.Driver))
 		}
+		lines = append(lines, prefix+wrapHanging(rest, width-2, len(prefix)))
 	}
 	return lines
 }

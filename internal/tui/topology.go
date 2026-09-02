@@ -281,27 +281,42 @@ func renderTopoNodeCoresCompact(s *model.Snapshot, node hostinfo.Node, maxWidth 
 }
 
 // renderTopoGPUBox renders one leaf box for a display-class PCI device:
-// title "gpu <addr, domain prefix dropped>  <vendor/device name>
-// (<driver>)", content a colored "in use"/"free" word (see
+// title just "gpu <addr, domain prefix dropped>" (always short enough to
+// fit, unlike the vendor/device name -- panelInner's title splicing is
+// one line only, so a title carrying the full name had nowhere to wrap
+// to and used to get truncated with ".." by the parent's own clamp
+// instead), body the name+driver word-wrapped to maxWidth (never
+// truncated -- the box grows an extra line or two for the wrapped tail
+// instead) followed by a colored "in use"/"free" word (see
 // vmUsingDevice, views.go -- also used by the Overview node card's own
 // GPU lines, which need the VM's name too, not just whether one exists)
 // -- ponytail: the box's title/border can't safely carry ANSI color of
 // its own (panelInner's title-splicing treats it as plain runes), so the
 // "colored by whether a VM passes it through" requirement is satisfied
-// via this content line instead; upgrade to a styled title if
+// via the body's status word instead; upgrade to a styled title if
 // panelInner ever grows ANSI-aware title splicing.
-func renderTopoGPUBox(s *model.Snapshot, dev hostinfo.PCIDevice) boxChild {
+func renderTopoGPUBox(s *model.Snapshot, dev hostinfo.PCIDevice, maxWidth int) boxChild {
 	addr := strings.TrimPrefix(dev.Addr, "0000:")
-	title := fmt.Sprintf("gpu %s  %s  (%s)", addr, pciDisplayName(dev), pciDriverOrNone(dev.Driver))
-	content := barEmptyStyle.Render("free")
+	title := fmt.Sprintf("gpu %s", addr)
+	status := barEmptyStyle.Render("free")
 	if vmUsingDevice(s, dev.Addr) != "" {
-		content = barFilledStyle.Render("in use")
+		status = barFilledStyle.Render("in use")
 	}
-	w := lipgloss.Width(content) + 2
+	rest := fmt.Sprintf("%s  (%s)", pciDisplayName(dev), pciDriverOrNone(dev.Driver))
+	contentW := maxWidth - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+	nameLines := strings.Split(lipgloss.NewStyle().Width(contentW).Render(rest), "\n")
+	body := strings.Join(nameLines, "\n") + "\n" + status
+	w := maxLineWidth(body) + 2
 	if minW := len(title) + 4; w < minW {
 		w = minW
 	}
-	block := panelInner(title, content, w, 0)
+	if w > maxWidth {
+		w = maxWidth
+	}
+	block := panelInner(title, body, w, 0)
 	return boxChild{block, nil}
 }
 
@@ -344,7 +359,7 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, comp
 		if dev.Node != node.ID || !isDisplayDevice(dev.Class) {
 			continue
 		}
-		children = append(children, renderTopoGPUBox(s, dev))
+		children = append(children, renderTopoGPUBox(s, dev, maxWidth-2))
 	}
 
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
@@ -363,7 +378,7 @@ func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, comp
 func renderTopoUnknownBox(s *model.Snapshot, devs []hostinfo.PCIDevice, maxWidth int) boxChild {
 	var children []boxChild
 	for _, dev := range devs {
-		children = append(children, renderTopoGPUBox(s, dev))
+		children = append(children, renderTopoGPUBox(s, dev, maxWidth-2))
 	}
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
 	inner, w := clampBoxWidth(inner, maxWidth)

@@ -139,6 +139,66 @@ func TestOverviewNodeCardListsAllGPUs(t *testing.T) {
 	}
 }
 
+// TestPCIDisplayNameShortensVendor covers the other half of the
+// truncation fix: a known vendor ID gets vendorShortNames' short form
+// regardless of what pci.ids itself spells out ("Advanced Micro
+// Devices, Inc. [AMD/ATI]" -> "AMD"), and an unknown vendor still has
+// its own bracketed alias/corporate suffix clutter stripped
+// (shortenVendorName) rather than shown verbatim.
+func TestPCIDisplayNameShortensVendor(t *testing.T) {
+	known := hostinfo.PCIDevice{VendorID: "1002", VendorName: "Advanced Micro Devices, Inc. [AMD/ATI]", DeviceID: "743f", DeviceName: "Navi 10"}
+	if got := pciDisplayName(known); got != "AMD Navi 10" {
+		t.Errorf("pciDisplayName(known vendor) = %q, want %q", got, "AMD Navi 10")
+	}
+	unknown := hostinfo.PCIDevice{VendorID: "abcd", VendorName: "Some Vendor Corporation [Alias]", DeviceID: "1234", DeviceName: "Widget"}
+	if got := pciDisplayName(unknown); got != "Some Vendor Widget" {
+		t.Errorf("pciDisplayName(unknown vendor) = %q, want %q", got, "Some Vendor Widget")
+	}
+}
+
+// TestGPULinesWrapInsteadOfTruncate covers the user-reported truncation
+// bug: a long device name (pci.ids' own vendor strings, e.g. "Advanced
+// Micro Devices, Inc. [AMD/ATI]", routinely run 70+ chars once the
+// device name is appended) used to get chopped by panelH's own ".."
+// line truncation, along with the trailing host/vm suffix entirely. At
+// a realistic card width (58), a 70-char device name must instead
+// word-wrap to 2+ lines, every continuation line indented under the
+// name (aligned past "gpu 06:00.0  "), the suffix still present
+// somewhere, and no ".." anywhere.
+func TestGPULinesWrapInsteadOfTruncate(t *testing.T) {
+	topo := testTopo()
+	longName := strings.Repeat("Navi 21 XTX Radeon RX 6900 XT ", 3) // 93 chars, well past 70
+	topo.PCIDevices = []hostinfo.PCIDevice{
+		{Addr: "0000:06:00.0", Class: "030000", VendorID: "1002", DeviceID: "abcd", VendorName: "AMD", DeviceName: longName, Driver: "amdgpu", Node: 0},
+	}
+	s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+
+	lines := gpuLinesOnNode(s, 0, 58)
+	if len(lines) != 1 {
+		t.Fatalf("gpuLinesOnNode() = %v, want exactly 1 entry", lines)
+	}
+	entry := lines[0]
+	if strings.Contains(entry, "..") {
+		t.Fatalf("gpuLinesOnNode() entry = %q, want no \"..\" truncation", entry)
+	}
+	if !strings.Contains(entry, "host (amdgpu)") {
+		t.Fatalf("gpuLinesOnNode() entry = %q, want the host suffix present", entry)
+	}
+	rows := strings.Split(entry, "\n")
+	if len(rows) < 2 {
+		t.Fatalf("gpuLinesOnNode() entry = %q, want it to wrap to >= 2 lines at width 58", entry)
+	}
+	indent := strings.Repeat(" ", len("gpu 06:00.0  "))
+	for i, r := range rows {
+		if lw := lipgloss.Width(r); lw > 58-2 {
+			t.Fatalf("gpuLinesOnNode() row %d = %q, width %d exceeds card inner width %d", i, r, lw, 58-2)
+		}
+		if i > 0 && !strings.HasPrefix(r, indent) {
+			t.Fatalf("gpuLinesOnNode() continuation row %d = %q, want it indented by %d spaces", i, r, len(indent))
+		}
+	}
+}
+
 // TestOverviewUnknownTotalMemory covers a node whose MemTotalKiB is 0 (not
 // reported by sysfs): the memory bar must say "total unknown" rather than
 // a meaningless "0%".

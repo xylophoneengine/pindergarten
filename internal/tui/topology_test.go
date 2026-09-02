@@ -90,6 +90,32 @@ func TestTopologyGPUInUseColoring(t *testing.T) {
 	}
 }
 
+// TestTopologyGPUBoxWrapsLongName covers the user-reported truncation
+// bug for the GPU box's own title: it used to carry the full "gpu <addr>
+// <name> (<driver>)" text, which the parent's own clampBoxWidth (from
+// the previous compact-round fix) truncated with ".." at any narrower
+// width -- panelInner's title splice is one line only, so a too-long
+// title had nowhere to wrap to. The title now carries just "gpu <addr>"
+// (always short), and the name/driver moved into the body, word-wrapped
+// instead of truncated -- the box grows an extra line rather than
+// losing text.
+func TestTopologyGPUBoxWrapsLongName(t *testing.T) {
+	topo := testTopo()
+	longName := strings.Repeat("Navi 21 XTX Radeon RX 6900 XT ", 3)
+	topo.PCIDevices = []hostinfo.PCIDevice{
+		{Addr: "0000:06:00.0", Class: "030000", VendorID: "1002", DeviceID: "abcd", VendorName: "AMD", DeviceName: longName, Driver: "amdgpu", Node: 0},
+	}
+	s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, _ := buildTopologyTab(s, 80)
+	if strings.Contains(out, "..") {
+		t.Fatalf("buildTopologyTab() = %q, want no \"..\" truncation of the GPU box's name", out)
+	}
+	mustIndex(t, out, "gpu 06:00.0")
+	mustIndex(t, out, "AMD")
+	mustIndex(t, out, "(amdgpu)")
+	mustIndex(t, out, "free")
+}
+
 // TestTopologyNestingTwoNodeTopo covers the level-skipping gate on
 // testTopo (2 nodes, no socket or L3 data at all): the drawing must nest
 // machine > node > core directly, with no "socket"/"L3 #" text anywhere.
