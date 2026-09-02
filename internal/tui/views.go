@@ -355,18 +355,41 @@ func renderOverviewTab(s *model.Snapshot, w, budget, scroll int) string {
 	return out
 }
 
-// gpusOnNode returns the comma-separated PCI addresses of devices, across
-// all VMs, whose Node matches node, or "" when there are none.
-func gpusOnNode(s *model.Snapshot, node int) string {
-	var addrs []string
-	for _, v := range s.VMs {
-		for _, d := range v.Devices {
-			if d.Node == node {
-				addrs = append(addrs, d.Addr)
-			}
+// pciDeviceByAddr returns the device in devices whose Addr matches addr,
+// or nil when there's no match.
+func pciDeviceByAddr(devices []hostinfo.PCIDevice, addr string) *hostinfo.PCIDevice {
+	for i := range devices {
+		if devices[i].Addr == addr {
+			return &devices[i]
 		}
 	}
-	return strings.Join(addrs, ", ")
+	return nil
+}
+
+// gpusOnNode returns one "gpu <addr>  <vendor/device name>  (<driver>)"
+// entry (see pciDisplayName/pciDriverOrNone, the same naming helpers the
+// hardware panel and Topology's own GPU boxes use) per PCI device, across
+// all VMs, whose Node matches node -- joined by "; " when there's more
+// than one -- or "" when there are none. A VM device with no match in
+// s.Topo.PCIDevices (a hand-built fixture missing PCIDevices data, most
+// likely) falls back to its bare address alone, same as before this
+// point named GPUs by address only.
+func gpusOnNode(s *model.Snapshot, node int) string {
+	var parts []string
+	for _, v := range s.VMs {
+		for _, d := range v.Devices {
+			if d.Node != node {
+				continue
+			}
+			dev := pciDeviceByAddr(s.Topo.PCIDevices, d.Addr)
+			if dev == nil {
+				parts = append(parts, d.Addr)
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("gpu %s  %s  (%s)", dev.Addr, pciDisplayName(*dev), pciDriverOrNone(dev.Driver)))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // vmsOnNode returns the comma-separated names of VMs whose MemNodes include

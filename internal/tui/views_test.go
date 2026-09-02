@@ -87,6 +87,31 @@ func TestOverviewNodeCardsHaveBars(t *testing.T) {
 	}
 }
 
+// TestOverviewNodeCardNamesGPU covers point 4 of the topology-compact
+// brief: the Overview tab's node card used to list a passed-through GPU
+// by bare PCI address only ("gpus: 0000:09:00.0"); it must now name it
+// (pciDisplayName, reused from the hardware panel and Topology's own GPU
+// boxes), matched against s.Topo.PCIDevices by Addr. Checks
+// renderOverviewCards directly (not the whole renderOverviewTab), since
+// the secondary hardware panel already names every GPU on the host
+// regardless of this fix -- "GA102" appearing there wouldn't prove
+// anything about the card itself.
+func TestOverviewNodeCardNamesGPU(t *testing.T) {
+	s := &model.Snapshot{
+		Topo:        realHostTopo(),
+		Use:         map[int]model.ThreadUse{},
+		BoundMemKiB: map[int]uint64{},
+		VMs: []model.VM{{
+			Name:    "gpu-vm",
+			Devices: []model.Device{{Addr: "0000:09:00.0", Node: 0}},
+		}},
+	}
+	out := renderOverviewCards(s, 100, 24, 0)
+	if !strings.Contains(out, "GA102") {
+		t.Fatalf("renderOverviewCards() = %q, want the nvidia GPU's device name (GA102) in node 0's card", out)
+	}
+}
+
 // TestOverviewUnknownTotalMemory covers a node whose MemTotalKiB is 0 (not
 // reported by sysfs): the memory bar must say "total unknown" rather than
 // a meaningless "0%".
