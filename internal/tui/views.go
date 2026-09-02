@@ -12,16 +12,6 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
-// coresPerRow is the wizard's manual-grid cursor step width for up/down
-// (updateManual, in wizard.go). It's deliberately not what any grid
-// actually renders at any more -- both the CPU Map tab and the wizard's
-// own grids now wrap at a cores-per-row derived from their panel's actual
-// width (cpuMapCoresPerRow / coresPerRowForInner) so a row never needs
-// truncating -- but the manual screen's own row-stepping keeps this fixed
-// step so it stays a small, self-contained change (see
-// cpumap-rows-brief.md); nothing else in this package uses it.
-const coresPerRow = 32
-
 // fmtKiB formats a KiB quantity as a human size with one decimal place and
 // a K/M/G/T suffix, e.g. 196485734 -> "187.4G".
 func fmtKiB(kib uint64) string {
@@ -616,6 +606,7 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string, perRow
 	if perRow < 1 {
 		perRow = 1
 	}
+	rowWidth := perRow*3 - 1 // a full row's own cell-line width; see the label bound below
 
 	cores := nodeCores(s, node)
 	var rows, labels []string
@@ -645,10 +636,19 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string, perRow
 			x++
 		}
 		if core.L3 != prevL3 {
-			for labelLine.Len() < x {
-				labelLine.WriteString(" ")
+			// The "|" boundary separator above always marks the domain
+			// change; the label itself is skipped (not truncated) when it
+			// would spill past the row's own width -- same rule
+			// renderTopoCoreGrid's ruler row uses for an id that doesn't
+			// fit -- rather than letting panelH's own truncateLines cut it
+			// short with "..".
+			label := fmt.Sprintf("L3 #%d", core.L3)
+			if x+len(label) <= rowWidth {
+				for labelLine.Len() < x {
+					labelLine.WriteString(" ")
+				}
+				labelLine.WriteString(label)
 			}
-			fmt.Fprintf(&labelLine, "L3 #%d", core.L3)
 			prevL3 = core.L3
 		}
 		hits = append(hits, hit{y0: 2*rowIdx + 1, y1: 2*rowIdx + 2, x0: x, x1: x + 2, kind: kind, index: i})
@@ -668,6 +668,57 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string, perRow
 		b.WriteString(row)
 	}
 	return b.String(), hits
+}
+
+// windowNodeGridRows slices grid (cpuMapNodeGrid/renderNodeMap's output
+// for one node) down to at most rowBudget content lines, windowed around
+// the row holding cursorRow (a grid row index, not a core index) the same
+// way scrollWindow keeps a fixed-size row visible, pinned to the trailing
+// edge once it doesn't all fit. Each "row" is 2 physical lines under L3
+// grouping (a label line above its cell line) or 1 otherwise (withL3).
+// hits are windowed to match: dropped if their own row fell outside the
+// window, else shifted up by the same offset. Used by renderCPUMapTab
+// only for a node panel whose own clamped height is shorter than its full
+// grid -- fitStackedWindow only promises the cursor's *node* stays among
+// the shown panels, not that its *row* survives panelH's own top-down
+// content clip once that panel's own height was itself clamped.
+func windowNodeGridRows(grid string, hits []hit, withL3 bool, cursorRow, rowBudget int) (string, []hit) {
+	linesPerRow := 1
+	if withL3 {
+		linesPerRow = 2
+	}
+	lines := strings.Split(grid, "\n")
+	numRows := len(lines) / linesPerRow
+	rowsVisible := rowBudget / linesPerRow
+	if rowsVisible < 1 {
+		rowsVisible = 1
+	}
+
+	rowChunks := make([][]string, numRows)
+	for r := 0; r < numRows; r++ {
+		rowChunks[r] = lines[r*linesPerRow : (r+1)*linesPerRow]
+	}
+	window, offset, _ := scrollWindow(rowChunks, rowsVisible, cursorRow)
+
+	var b strings.Builder
+	for i, chunk := range window {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(strings.Join(chunk, "\n"))
+	}
+
+	firstLine, lastLine := offset*linesPerRow, (offset+len(window))*linesPerRow
+	out := make([]hit, 0, len(hits))
+	for _, h := range hits {
+		if h.y0 < firstLine || h.y0 >= lastLine {
+			continue
+		}
+		h.y0 -= firstLine
+		h.y1 -= firstLine
+		out = append(out, h)
+	}
+	return b.String(), out
 }
 
 // renderCPUMapTab renders the CPU Map tab: one full-width bordered panel
@@ -736,7 +787,8 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		i := start + k
 		node := s.Topo.Nodes[i]
 		idx := globalCoreIndices(s, node.ID)
-		grid, gridHits := cpuMapNodeGrid(s, node.ID, localCoreIndex(idx, cursor), "core", perRow)
+		localCursor := localCoreIndex(idx, cursor)
+		grid, gridHits := cpuMapNodeGrid(s, node.ID, localCursor, "core", perRow)
 		for j := range gridHits {
 			gridHits[j].index = idx[gridHits[j].index]
 		}
@@ -748,6 +800,20 @@ func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
 		h := nodeHeights[i]
 		if h > remaining {
 			h = remaining
+		}
+		if h < nodeHeights[i] {
+			// fitStackedWindow only promises the cursor's *node* is among
+			// the shown panels, not that its *row* survives panelH's own
+			// top-down content clip once that panel's height was itself
+			// clamped above -- window the grid's own rows (label+cell
+			// pairs under L3 grouping) around the cursor's row first, so
+			// its hit is never scrolled out of the panel the detail
+			// panel is describing.
+			cursorRow := 0
+			if localCursor >= 0 {
+				cursorRow = localCursor / perRow
+			}
+			grid, gridHits = windowNodeGridRows(grid, gridHits, withL3, cursorRow, h-2)
 		}
 		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, w, h, true)
 		panels[k] = p

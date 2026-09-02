@@ -94,10 +94,14 @@ func newWizard(vm string, proposal *model.Proposal, vcpus int, stagedHash, stage
 // instead open a y/n confirm with that prompt: a "yes" answer stages op
 // verbatim and closes the wizard itself (see App.handleWizardKey) -- this
 // is how a GPU-node-crossing stage is confirmed, replacing the old
-// press-enter-twice softening with App's shared confirm dialog.
-func (w *wizard) update(msg tea.KeyMsg) (done bool, op *model.PendingOp, confirmPrompt string) {
+// press-enter-twice softening with App's shared confirm dialog. perRow is
+// the manual grid's own cores-per-row (only used by updateManual's j/k --
+// see updateManual), computed by the caller the same way viewManual
+// renders it (coresPerRowForInner(dw-2)) so a row of cursor movement
+// always matches a row on screen.
+func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.PendingOp, confirmPrompt string) {
 	if w.screen == manualScreen {
-		return w.updateManual(msg)
+		return w.updateManual(msg, perRow)
 	}
 	return w.updateForm(msg)
 }
@@ -505,9 +509,16 @@ func (w *wizard) buildOp(ids []int) model.PendingOp {
 // cpulist, via formatCPURanges) and returns to the form -- any count is
 // accepted here; the form's own live validation reports a count
 // mismatch, same as if the operator had typed it by hand. esc returns
-// to the form without touching threadsText.
-func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
+// to the form without touching threadsText. perRow (see update) is the
+// same cores-per-row viewManual just rendered at -- up/down must step by
+// it, not a fixed guess, or the cursor drifts off its own visual column
+// (it used to step by the package-level coresPerRow constant, which only
+// ever matched the actual rendered row width by coincidence).
+func (w *wizard) updateManual(msg tea.KeyMsg, perRow int) (bool, *model.PendingOp, string) {
 	cores := nodeCores(w.base, w.node)
+	if perRow < 1 {
+		perRow = 1
+	}
 
 	switch {
 	case msg.Type == tea.KeyLeft, isRune(msg, 'h'):
@@ -521,13 +532,13 @@ func (w *wizard) updateManual(msg tea.KeyMsg) (bool, *model.PendingOp, string) {
 		}
 		return false, nil, ""
 	case msg.Type == tea.KeyUp, isRune(msg, 'k'):
-		if w.cursor-coresPerRow >= 0 {
-			w.cursor -= coresPerRow
+		if w.cursor-perRow >= 0 {
+			w.cursor -= perRow
 		}
 		return false, nil, ""
 	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
-		if w.cursor+coresPerRow < len(cores) {
-			w.cursor += coresPerRow
+		if w.cursor+perRow < len(cores) {
+			w.cursor += perRow
 		}
 		return false, nil, ""
 	case msg.Type == tea.KeySpace:
@@ -843,9 +854,14 @@ func (a *App) openWizard() (tea.Model, tea.Cmd) {
 // dialog on top of it instead: "y" stages op verbatim and closes the
 // wizard; "n"/esc (handled by App.handleConfirmKey, routed there ahead of
 // the wizard -- see App.handleKey) just dismiss the confirm, leaving the
-// form/manual screen exactly as the operator left it.
+// form/manual screen exactly as the operator left it. The manual grid's
+// cores-per-row is computed here, the same way (dialogWidth then
+// coresPerRowForInner) renderDialog will render it, and handed to
+// wizard.update so its own up/down stepping always matches what's on
+// screen -- see the wizard.update/updateManual doc comments.
 func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	done, op, prompt := a.wizard.update(msg)
+	dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+	done, op, prompt := a.wizard.update(msg, coresPerRowForInner(dw-2))
 	if prompt != "" {
 		staged := *op
 		a.confirm = &confirm{

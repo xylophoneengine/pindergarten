@@ -690,6 +690,65 @@ func TestCPUMapRealHostSingleRowShortDetail(t *testing.T) {
 	}
 }
 
+// TestCPUMapL3LabelNeverOverflowsRow covers an Opus review finding on
+// d98b211: an "L3 #k" label written at its domain's own starting column
+// had no bound against the row's own width, so a domain starting near
+// the right edge spilled the label past the glyph row it labeled --
+// panelH's own truncateLines then stamped ".." on the label row (cutting
+// it short, same class of bug as the original truncation report). Two
+// repro cases from the review: the 2x96-core/8-L3-per-node EPYC fixture
+// at width 112, and a 128-core no-SMT/4-L3 fixture at width 100 (a no-SMT
+// core's narrower 1-glyph cell makes the overflow easier to hit).
+func TestCPUMapL3LabelNeverOverflowsRow(t *testing.T) {
+	cases := []struct {
+		name string
+		topo *hostinfo.Topology
+		w    int
+	}{
+		{"epyc-2x96-8L3", epycHostTopo(), 112},
+		{"noSMT-128-4L3", noSMTL3Topo(128, 4), 100},
+	}
+	for _, tc := range cases {
+		s := &model.Snapshot{Topo: tc.topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+		out, _ := renderCPUMapTab(s, 0, tc.w, 60)
+		if strings.Contains(out, "..") {
+			t.Fatalf("%s at width %d: renderCPUMapTab() = %q, want no \"..\" truncation artifact", tc.name, tc.w, out)
+		}
+	}
+}
+
+// TestCPUMapCursorRowWindowedWithinClampedNodePanel covers another Opus
+// review finding on d98b211: fitStackedWindow only promises the cursor's
+// own *node* stays among the shown panels, not that its *row* survives
+// panelH's top-down content clip once that panel's own height was itself
+// clamped (the single-node-exceeds-nodeAreaBudget case) -- so the
+// cursor's row (and its hit) could scroll out of view while the core
+// detail panel still described it. Cursor pinned to the node's last core
+// (the row most likely to be clipped) on the 96-core EPYC fixture, at the
+// two width/height combinations from the review.
+func TestCPUMapCursorRowWindowedWithinClampedNodePanel(t *testing.T) {
+	s := &model.Snapshot{Topo: epycHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	const cursor = 95 // node 0's last core
+
+	for _, tc := range []struct{ w, budget int }{{80, 16}, {100, 18}} {
+		out, hits := renderCPUMapTab(s, cursor, tc.w, tc.budget)
+		lines := strings.Split(out, "\n")
+
+		found := false
+		for _, h := range hits {
+			if h.kind == "core" && h.index == cursor {
+				found = true
+				if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+					t.Fatalf("%dx%d: hit %+v lands on %q, want a glyph character", tc.w, tc.budget, h, r)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%dx%d: no \"core\" hit recorded for the cursor's own core (%d) -- its row scrolled out of the clamped node panel", tc.w, tc.budget, cursor)
+		}
+	}
+}
+
 func TestCursorClampAndOtherTabsInert(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)

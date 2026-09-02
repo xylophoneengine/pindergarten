@@ -728,6 +728,38 @@ func epycHostTopo() *hostinfo.Topology {
 	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads, L3Domains: l3Domains}
 }
 
+// noSMTL3Topo builds a single-node, no-SMT topology with coreCount
+// single-thread cores split evenly across l3Count L3 domains -- used
+// (128 cores, 4 domains) to cover the Opus review's "L3 #k" label
+// overflow finding: unlike epycHostTopo's SMT2 cores (2 glyph columns
+// each), a no-SMT core's 1-glyph cell leaves less room per column, so an
+// L3 domain starting near a row's right edge is more likely to have its
+// label spill past the row -- cpuMapNodeGrid must skip (not truncate)
+// that label rather than let panelH's own truncateLines stamp ".." on
+// the label row.
+func noSMTL3Topo(coreCount, l3Count int) *hostinfo.Topology {
+	coresPerL3 := coreCount / l3Count
+	threads := make(map[int]hostinfo.Thread, coreCount)
+	cores := make([]hostinfo.Core, coreCount)
+	nodeThreads := make([]int, coreCount)
+	var l3Domains []hostinfo.L3Domain
+	for i := 0; i < coreCount; i++ {
+		l3 := i / coresPerL3
+		threads[i] = hostinfo.Thread{ID: i, Core: i, Socket: 0, Node: 0, Sibling: -1, L3: l3}
+		cores[i] = hostinfo.Core{Socket: 0, ID: i, Node: 0, L3: l3, Threads: []int{i}}
+		nodeThreads[i] = i
+	}
+	for k := 0; k < l3Count; k++ {
+		var l3Threads []int
+		for i := k * coresPerL3; i < (k+1)*coresPerL3; i++ {
+			l3Threads = append(l3Threads, i)
+		}
+		l3Domains = append(l3Domains, hostinfo.L3Domain{ID: k, Node: 0, Socket: 0, Threads: l3Threads})
+	}
+	nodes := []hostinfo.Node{{ID: 0, Threads: nodeThreads, MemTotalKiB: 64 * 1024 * 1024}}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads, L3Domains: l3Domains}
+}
+
 // manyNodesTopo builds a topology with n NUMA nodes, one thread each (no
 // cores -- the Overview tab doesn't touch Topo.Cores).
 func manyNodesTopo(n int) *hostinfo.Topology {

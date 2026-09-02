@@ -942,16 +942,16 @@ func TestMouseClickTogglesWizardManualCore(t *testing.T) {
 	}
 }
 
-// manyCoresTopo returns a single-node topology with 40 single-thread
-// cores (no SMT), so the manual screen's up/down (by coresPerRow == 32)
-// has a real second partial row to move into and clamp against -- a
-// 2-core node (testTopo) can't distinguish "moves correctly" from "never
-// moves": both look identical there.
-func manyCoresTopo() *hostinfo.Topology {
-	threads := make(map[int]hostinfo.Thread, 40)
-	cores := make([]hostinfo.Core, 40)
-	nodeThreads := make([]int, 40)
-	for i := 0; i < 40; i++ {
+// manyCoresTopo returns a single-node topology with n single-thread cores
+// (no SMT), so the manual screen's up/down has a real second partial row
+// to move into and clamp against -- a 2-core node (testTopo) can't
+// distinguish "moves correctly" from "never moves": both look identical
+// there.
+func manyCoresTopo(n int) *hostinfo.Topology {
+	threads := make(map[int]hostinfo.Thread, n)
+	cores := make([]hostinfo.Core, n)
+	nodeThreads := make([]int, n)
+	for i := 0; i < n; i++ {
 		threads[i] = hostinfo.Thread{ID: i, Core: i, Socket: 0, Node: 0, Sibling: -1}
 		cores[i] = hostinfo.Core{Socket: 0, ID: i, Node: 0, Threads: []int{i}}
 		nodeThreads[i] = i
@@ -961,53 +961,83 @@ func manyCoresTopo() *hostinfo.Topology {
 }
 
 // TestWizardManualUpDownMovesAndClamps covers the manual screen's up/down
-// movement (added alongside h/l, moving by coresPerRow like the CPU Map):
-// on manyCoresTopo's 40 single-thread cores, down must actually advance
-// the cursor a full row, a second down (no full row left) must clamp
-// instead of overflowing, and up must retrace back to 0 and then clamp
-// there too.
+// movement on a 96-core node, at two real dialog widths (80 and 120,
+// which render the grid at different cores-per-row -- 25 and 29
+// respectively, both capped by dialogMaxWidth): down/up must step by the
+// grid's own actual cores-per-row (computed the same way viewManual
+// renders it, coresPerRowForInner(dw-2)), landing in the *same column*
+// every time, not a fixed guess -- updateManual used to step by the
+// package-level coresPerRow (32), which only matched the rendered row
+// width by coincidence, so a real down/up drifted the cursor sideways off
+// its own visual column. Also covers clamping: enough downs must stop
+// advancing once no full row remains (not overflow past the last core),
+// and enough ups must retrace back to the starting column and stop there.
 func TestWizardManualUpDownMovesAndClamps(t *testing.T) {
-	topo := manyCoresTopo()
-	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
-	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
-		doms, err := f.ListDomains()
-		if err != nil {
-			return nil, nil, err
+	const totalCores = 96
+	topo := manyCoresTopo(totalCores)
+
+	for _, sz := range []struct{ w, h int }{{80, 24}, {120, 40}} {
+		f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
+		scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+			doms, err := f.ListDomains()
+			if err != nil {
+				return nil, nil, err
+			}
+			domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+			for _, d := range doms {
+				domsMap[d.Config.Name] = d.Config
+			}
+			return model.Build(topo, doms, noNode), domsMap, nil
 		}
-		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
-		for _, d := range doms {
-			domsMap[d.Config.Name] = d.Config
+		a := New(f, scan, t.TempDir(), "test")
+		runScan(t, a)
+		enterEdit(a)
+		a.tab = tabVMs
+		a.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+
+		sendKey(a, 'p')
+		sendKey(a, 'm')
+		if a.wizard == nil || a.wizard.screen != manualScreen {
+			t.Fatalf("%dx%d: manual screen did not open", sz.w, sz.h)
 		}
-		return model.Build(topo, doms, noNode), domsMap, nil
-	}
-	a := New(f, scan, t.TempDir(), "test")
-	runScan(t, a)
-	enterEdit(a)
-	a.tab = tabVMs
 
-	sendKey(a, 'p')
-	sendKey(a, 'm')
-	if a.wizard == nil || a.wizard.screen != manualScreen {
-		t.Fatal("manual screen did not open")
-	}
+		dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+		perRow := coresPerRowForInner(dw - 2)
 
-	sendKeyType(a, tea.KeyDown)
-	if a.wizard.cursor != coresPerRow {
-		t.Fatalf("cursor = %d, want %d after down (one full row)", a.wizard.cursor, coresPerRow)
-	}
+		// Move off column 0 first: column 0 can't distinguish "moved down a
+		// row" from "drifted columns", both start and stay at 0.
+		const col = 3
+		for i := 0; i < col; i++ {
+			sendKeyType(a, tea.KeyRight)
+		}
+		if a.wizard.cursor != col {
+			t.Fatalf("%dx%d: cursor = %d after %d rights, want %d", sz.w, sz.h, a.wizard.cursor, col, col)
+		}
 
-	sendKeyType(a, tea.KeyDown) // no full second row left (40 cores total): must clamp
-	if a.wizard.cursor != coresPerRow {
-		t.Fatalf("cursor = %d, want unchanged %d (clamped: no full row remains)", a.wizard.cursor, coresPerRow)
-	}
+		want := col
+		for want+perRow < totalCores {
+			want += perRow
+		}
+		presses := totalCores/perRow + 1 // enough to reach the clamp and then some
+		for i := 0; i < presses; i++ {
+			sendKeyType(a, tea.KeyDown)
+			if a.wizard.cursor%perRow != col {
+				t.Fatalf("%dx%d: cursor = %d after down, column drifted from %d (perRow %d)", sz.w, sz.h, a.wizard.cursor, col, perRow)
+			}
+		}
+		if a.wizard.cursor != want {
+			t.Fatalf("%dx%d: cursor = %d, want %d (clamped at the last row, same column %d)", sz.w, sz.h, a.wizard.cursor, want, col)
+		}
 
-	sendKeyType(a, tea.KeyUp)
-	if a.wizard.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 after up", a.wizard.cursor)
-	}
-	sendKeyType(a, tea.KeyUp)
-	if a.wizard.cursor != 0 {
-		t.Fatalf("cursor = %d, want 0 (clamped at the top)", a.wizard.cursor)
+		for i := 0; i < presses; i++ {
+			sendKeyType(a, tea.KeyUp)
+			if a.wizard.cursor%perRow != col {
+				t.Fatalf("%dx%d: cursor = %d after up, column drifted from %d (perRow %d)", sz.w, sz.h, a.wizard.cursor, col, perRow)
+			}
+		}
+		if a.wizard.cursor != col {
+			t.Fatalf("%dx%d: cursor = %d, want %d (clamped back at the top, same column)", sz.w, sz.h, a.wizard.cursor, col)
+		}
 	}
 }
 
