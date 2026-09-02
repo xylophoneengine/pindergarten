@@ -684,6 +684,50 @@ func manyNodeManyCoresTopo(numNodes, coresPerNode int) *hostinfo.Topology {
 	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
 }
 
+// epycHostTopo mirrors the real 2-node, 2x96-core SMT2 EPYC host the CPU
+// Map rows relayout (cpumap-rows-brief.md) was written against: 2 NUMA
+// nodes, 96 cores each (192 total; node 0 gets global core/thread indices
+// 0-95, node 1 gets 96-191), SMT2 (each core's sibling thread offset by
+// the total core count, so thread IDs 0-191 are primaries and 192-383 are
+// siblings), and 8 L3 domains per node (12 cores each) -- large and wide
+// enough that, at a real terminal width, the old fixed 32-cores-per-row
+// grid would truncate every node's rows with "..".
+func epycHostTopo() *hostinfo.Topology {
+	const numNodes, coresPerNode, l3PerNode = 2, 96, 8
+	const totalCores = numNodes * coresPerNode
+	const coresPerL3 = coresPerNode / l3PerNode
+
+	threads := make(map[int]hostinfo.Thread, totalCores*2)
+	var cores []hostinfo.Core
+	nodes := make([]hostinfo.Node, numNodes)
+	var l3Domains []hostinfo.L3Domain
+
+	for n := 0; n < numNodes; n++ {
+		var nodeThreads []int
+		for i := 0; i < coresPerNode; i++ {
+			primary := n*coresPerNode + i
+			sibling := primary + totalCores
+			l3 := n*l3PerNode + i/coresPerL3
+			threads[primary] = hostinfo.Thread{ID: primary, Core: i, Socket: n, Node: n, Sibling: sibling, L3: l3}
+			threads[sibling] = hostinfo.Thread{ID: sibling, Core: i, Socket: n, Node: n, Sibling: primary, L3: l3}
+			cores = append(cores, hostinfo.Core{Socket: n, ID: i, Node: n, L3: l3, Threads: []int{primary, sibling}})
+			nodeThreads = append(nodeThreads, primary, sibling)
+		}
+		nodes[n] = hostinfo.Node{ID: n, Threads: nodeThreads, MemTotalKiB: 128 * 1024 * 1024, MemFreeKiB: 64 * 1024 * 1024}
+	}
+	for n := 0; n < numNodes; n++ {
+		for k := 0; k < l3PerNode; k++ {
+			var l3Threads []int
+			for i := k * coresPerL3; i < (k+1)*coresPerL3; i++ {
+				primary := n*coresPerNode + i
+				l3Threads = append(l3Threads, primary, primary+totalCores)
+			}
+			l3Domains = append(l3Domains, hostinfo.L3Domain{ID: n*l3PerNode + k, Node: n, Socket: n, Threads: l3Threads})
+		}
+	}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads, L3Domains: l3Domains}
+}
+
 // manyNodesTopo builds a topology with n NUMA nodes, one thread each (no
 // cores -- the Overview tab doesn't touch Topo.Cores).
 func manyNodesTopo(n int) *hostinfo.Topology {

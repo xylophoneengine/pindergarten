@@ -12,6 +12,14 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
+// coresPerRow is the wizard's manual-grid cursor step width for up/down
+// (updateManual, in wizard.go). It's deliberately not what any grid
+// actually renders at any more -- both the CPU Map tab and the wizard's
+// own grids now wrap at a cores-per-row derived from their panel's actual
+// width (cpuMapCoresPerRow / coresPerRowForInner) so a row never needs
+// truncating -- but the manual screen's own row-stepping keeps this fixed
+// step so it stays a small, self-contained change (see
+// cpumap-rows-brief.md); nothing else in this package uses it.
 const coresPerRow = 32
 
 // fmtKiB formats a KiB quantity as a human size with one decimal place and
@@ -498,9 +506,37 @@ func cpuMapLegend(withL3 bool) string {
 	return legend
 }
 
-// cpuNodeMinWidth is the minimum per-panel width (CPU Map's per-node
-// panels) below which they stack instead of sitting side by side.
-const cpuNodeMinWidth = 20
+// cpuMapDetailMaxHeight is the tallest the CPU Map tab's "core detail"
+// panel ever gets (content + 2 borders): its content is always a few
+// lines (core/socket/node/threads, an optional L3 line, one line per
+// thread), so there's never a reason to let it grow past a small cap even
+// on a very tall terminal -- see cpumap-rows-brief.
+const cpuMapDetailMaxHeight = 8
+
+// coresPerRowForInner returns how many 3-column core cells (2 glyphs plus
+// a 1-column separator, the trailing cell's separator omitted) fit within
+// an already border-stripped inner width -- floor((inner+1)/3), floored
+// at 1 so even a pathologically narrow panel still wraps one core per row
+// rather than dividing by zero or going negative. Shared by the CPU Map
+// tab (via cpuMapCoresPerRow) and the wizard's manual/preview grids
+// (wizard.go), which each derive it from their own panel's inner width.
+func coresPerRowForInner(inner int) int {
+	perRow := (inner + 1) / 3
+	if perRow < 1 {
+		perRow = 1
+	}
+	return perRow
+}
+
+// cpuMapCoresPerRow returns the CPU Map tab's cores-per-row for a node
+// panel of total (bordered) width w -- coresPerRowForInner applied to the
+// panel's own inner width (w-2). Shared by renderCPUMapTab (the grid
+// itself) and App.moveCursor/scrollActive (so j/k and the mouse wheel
+// move by one visual row, matching what's actually on screen) so they can
+// never disagree.
+func cpuMapCoresPerRow(w int) int {
+	return coresPerRowForInner(w - 2)
+}
 
 // globalCoreIndices returns, for node's cores in nodeCores(s, node) order,
 // their index in the unrestricted s.Topo.Cores -- so a local (per-node)
@@ -539,33 +575,17 @@ func nodeIndexOf(nodes []hostinfo.Node, id int) int {
 	return -1
 }
 
-// cpuMapHitXLimit returns the x-limit to clip a node panel's core hits
-// against: innerWidth, minus 2 more (the ".." truncation marker's width)
-// when the grid's natural row width actually exceeds innerWidth (i.e. a
-// row really did get truncated) -- so a hit never lands on the marker
-// instead of a real cell. A grid that fits within innerWidth as-is needs
-// no such adjustment, or its own rightmost cells would lose their hits for
-// no reason.
-func cpuMapHitXLimit(cores, innerWidth int) int {
-	rowCores := cores
-	if rowCores > coresPerRow {
-		rowCores = coresPerRow
-	}
-	naturalWidth := rowCores*3 - 1
-	if naturalWidth > innerWidth {
-		return innerWidth - 2
-	}
-	return innerWidth
-}
-
 // cpuMapNodeGridRows returns how many physical lines cpuMapNodeGrid's
-// grid spans for a node with this many cores: the same row count
-// renderNodeMap's plain grid would need (coresPerRow per row), doubled
-// once L3 grouping is active (a label line above every row of cells) --
-// shared with renderCPUMapTab's own per-node height estimate so it never
+// grid spans for a node with this many cores at perRow cores per row: the
+// same row count renderNodeMap's plain grid would need, doubled once L3
+// grouping is active (a label line above every row of cells) -- shared
+// with renderCPUMapTab's own per-node height estimate so it never
 // disagrees with what cpuMapNodeGrid actually renders.
-func cpuMapNodeGridRows(cores int, withL3 bool) int {
-	rows := (cores + coresPerRow - 1) / coresPerRow
+func cpuMapNodeGridRows(cores, perRow int, withL3 bool) int {
+	if perRow < 1 {
+		perRow = 1
+	}
+	rows := (cores + perRow - 1) / perRow
 	if rows < 1 {
 		rows = 1
 	}
@@ -575,20 +595,26 @@ func cpuMapNodeGridRows(cores int, withL3 bool) int {
 	return rows
 }
 
-// cpuMapNodeGrid renders node's cores as a grid, exactly like
-// renderNodeMap (shared with the wizard, left untouched), except that --
-// once the topology actually has L3 domain data (s.Topo.L3Domains
-// non-empty; a fixture that never sets it leaves every core's L3 at the
-// same default and would otherwise look like one giant, spurious "L3 #0"
-// domain) -- it also groups cores by L3 domain: a "L3 #k" label line
-// above each row wherever a domain starts, and the normal single-space
-// separator between cores replaced with "|" at a domain boundary. Column
-// positions (and so hit x-ranges) are exactly the same either way -- only
-// the separator glyph and an extra label line above a row of cells
-// differ -- so cursor/hit semantics are unchanged.
-func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string) (string, []hit) {
+// cpuMapNodeGrid renders node's cores as a grid at perRow cores per row,
+// exactly like renderNodeMap (shared with the wizard, left untouched),
+// except that -- once the topology actually has L3 domain data
+// (s.Topo.L3Domains non-empty; a fixture that never sets it leaves every
+// core's L3 at the same default and would otherwise look like one giant,
+// spurious "L3 #0" domain) -- it also groups cores by L3 domain: a "L3
+// #k" label line above each row wherever a domain starts, and the normal
+// single-space separator between cores replaced with "|" at a domain
+// boundary. Column positions (and so hit x-ranges) are exactly the same
+// either way -- only the separator glyph and an extra label line above a
+// row of cells differ -- so cursor/hit semantics are unchanged. perRow is
+// caller-derived (cpuMapCoresPerRow) from the node panel's own width, so
+// a row never needs horizontal truncation: it always wraps into another
+// row instead.
+func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string, perRow int) (string, []hit) {
 	if len(s.Topo.L3Domains) == 0 {
-		return renderNodeMap(s, node, nil, cursor, kind)
+		return renderNodeMap(s, node, nil, cursor, kind, perRow)
+	}
+	if perRow < 1 {
+		perRow = 1
 	}
 
 	cores := nodeCores(s, node)
@@ -604,7 +630,7 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string) (strin
 		labelLine.Reset()
 	}
 	for i, core := range cores {
-		if col == coresPerRow {
+		if col == perRow {
 			flushRow()
 			rowIdx++
 			col, x = 0, 0
@@ -644,131 +670,102 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string) (strin
 	return b.String(), hits
 }
 
-// renderCPUMapTab renders the CPU Map tab: one bordered panel per NUMA
-// node (side by side when each would get at least cpuNodeMinWidth
-// columns, else stacked, windowed around the cursor's own node -- like
-// scrollWindow's "keep visible" rule, but over variously-sized panels --
-// so moving the cursor onto a node whose panel isn't currently shown
-// still brings it into view) holding that node's cell grid, a legend line
-// shown once below them all, and a detail panel for the cursor's core
-// (below the node panels, or beside them when wide). Each node panel's
-// height is clamped to whatever budget is actually left as they're laid
-// out, so even one taller than the whole budget can't overflow it.
+// renderCPUMapTab renders the CPU Map tab: one full-width bordered panel
+// per NUMA node, stacked as rows (never side by side -- a node's own grid
+// wants all the width it can get, see cpumap-rows-brief), each at its own
+// natural content height (grid rows, doubled under L3 grouping, plus 2
+// borders) rather than stretched to fill; a frozen full-width "core
+// detail" panel for the cursor's core; and a legend line, in that order
+// top to bottom -- the legend is always the body's last line, and the
+// detail panel is always shown (capped at cpuMapDetailMaxHeight, never
+// starved to nothing the way other tabs' secondary panels can be). When
+// the node rows don't all fit what's left after the detail panel and
+// legend, they're windowed around the cursor's own node (fitStackedWindow,
+// the same "keep visible" rule scrollWindow uses for fixed-size rows) --
+// the detail panel and legend still always render. Any budget left over
+// once the shown node rows are laid out at their natural height becomes
+// blank space between the last node row and the detail panel (padLinesTo)
+// rather than stretching a node panel to fill it.
 func renderCPUMapTab(s *model.Snapshot, cursor, w, budget int) (string, []hit) {
-	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
-	nodePanelWidths, nodeSideBySide := equalSplit(primaryW, len(s.Topo.Nodes), cpuNodeMinWidth)
-
 	withL3 := len(s.Topo.L3Domains) > 0
+	perRow := cpuMapCoresPerRow(w)
+
 	nodeHeights := make([]int, len(s.Topo.Nodes))
-	naturalNodeLines := 0
 	for i, node := range s.Topo.Nodes {
-		nodeHeights[i] = cpuMapNodeGridRows(len(nodeCores(s, node.ID)), withL3) + 2
-		if nodeSideBySide {
-			if nodeHeights[i] > naturalNodeLines {
-				naturalNodeLines = nodeHeights[i]
-			}
-		} else {
-			naturalNodeLines += nodeHeights[i]
-		}
+		nodeHeights[i] = cpuMapNodeGridRows(len(nodeCores(s, node.ID)), perRow, withL3) + 2
 	}
 
-	primaryBudget, secondaryBudget := budget, budget
-	if !sideBySide {
-		primaryBudget, secondaryBudget = splitStackedBudget(budget, naturalNodeLines+1)
+	legend := lipgloss.NewStyle().Width(w).Render(cpuMapLegend(withL3))
+	legendLines := lineCount(legend)
+
+	// The detail panel's budget is reserved before the node area's, and
+	// floored at 3 (panelWrapH's own minimum) rather than ever dropped --
+	// unlike the VMs/Overview tabs' secondary panels, the CPU Map's detail
+	// panel is a fixed, small fixture the operator always wants visible
+	// alongside the cursor.
+	detailBody := cpuMapDetail(s, cursor)
+	detailBudget := lineCount(detailBody) + 2
+	if detailBudget > cpuMapDetailMaxHeight {
+		detailBudget = cpuMapDetailMaxHeight
+	}
+	if max := budget - legendLines - 3; detailBudget > max { // leave the node area at least 3 lines
+		detailBudget = max
+	}
+	if detailBudget < 3 {
+		detailBudget = 3
 	}
 
-	// legend is built up front (not just at concatenation time below) so
-	// its actual line count -- 2 once word-wrapped at widths where the L3
-	// entry doesn't fit on one line, not always 1 -- can be reserved out of
-	// primaryBudget here. Reserving a flat 1 let the legend's second line
-	// (holding "boundary") get silently dropped by the caller's final
-	// clipLinesTo once mapBlock came out one line taller than primaryBudget.
-	legend := lipgloss.NewStyle().Width(primaryW).Render(cpuMapLegend(withL3))
-	nodeAreaBudget := primaryBudget - lineCount(legend)
+	nodeAreaBudget := budget - legendLines - detailBudget
 	if nodeAreaBudget < 3 {
 		nodeAreaBudget = 3
 	}
 
-	// When the node panels stack among themselves too (nodeSideBySide
-	// false), show as many full ones as fit nodeAreaBudget -- windowed
-	// around the cursor's own node, so it's always among them -- rather
-	// than giving every one that whole budget independently, then split
-	// nodeAreaBudget evenly across just those shown (splitStackedFill) so
-	// they stretch to fill it exactly instead of leaving blank space below
-	// the last one.
-	start, numNodePanels := 0, len(s.Topo.Nodes)
-	if !nodeSideBySide {
-		cursorNode := -1
-		if cursor >= 0 && cursor < len(s.Topo.Cores) {
-			cursorNode = nodeIndexOf(s.Topo.Nodes, s.Topo.Cores[cursor].Node)
-		}
-		if cursorNode < 0 {
-			cursorNode = 0
-		}
-		start, numNodePanels = fitStackedWindow(nodeHeights, nodeAreaBudget, cursorNode)
+	cursorNode := -1
+	if cursor >= 0 && cursor < len(s.Topo.Cores) {
+		cursorNode = nodeIndexOf(s.Topo.Nodes, s.Topo.Cores[cursor].Node)
 	}
-	fillHeights := splitStackedFill(nodeAreaBudget, numNodePanels)
+	if cursorNode < 0 {
+		cursorNode = 0
+	}
+	start, count := fitStackedWindow(nodeHeights, nodeAreaBudget, cursorNode)
 
-	panels := make([]string, numNodePanels)
+	panels := make([]string, count)
 	var hits []hit
-	cumX, cumY := 0, 0
-	for k := 0; k < numNodePanels; k++ {
+	cumY, remaining := 0, nodeAreaBudget
+	for k := 0; k < count; k++ {
 		i := start + k
 		node := s.Topo.Nodes[i]
 		idx := globalCoreIndices(s, node.ID)
-		grid, gridHits := cpuMapNodeGrid(s, node.ID, localCoreIndex(idx, cursor), "core")
+		grid, gridHits := cpuMapNodeGrid(s, node.ID, localCoreIndex(idx, cursor), "core", perRow)
 		for j := range gridHits {
 			gridHits[j].index = idx[gridHits[j].index]
 		}
-		h := nodeAreaBudget
-		if !nodeSideBySide {
-			h = fillHeights[k]
+		// h is the panel's own natural height, clamped to whatever's
+		// still left -- only actually bites when a single node (the one
+		// under the cursor, fitStackedWindow always keeps it) is taller
+		// on its own than the whole node area; otherwise h == the
+		// natural height fitStackedWindow already sized the window to.
+		h := nodeHeights[i]
+		if h > remaining {
+			h = remaining
 		}
-		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, nodePanelWidths[i], h, true)
+		p, kept := panelH(fmt.Sprintf("node %d", node.ID), grid, w, h, true)
 		panels[k] = p
+		remaining -= lineCount(p)
 
-		wLimit := cpuMapHitXLimit(len(nodeCores(s, node.ID)), nodePanelWidths[i]-2)
-		gridHits = offsetHits(clipHitsToWindow(gridHits, kept, wLimit), 1, 1) // border
-		if nodeSideBySide {
-			hits = append(hits, offsetHits(gridHits, 0, cumX)...)
-			cumX += nodePanelWidths[i] + 1 // +1 for joinPanels' 1-column gap
-		} else {
-			hits = append(hits, offsetHits(gridHits, cumY, 0)...)
-			cumY += lineCount(p)
-		}
+		gridHits = offsetHits(clipHitsToWindow(gridHits, kept, 0), 1, 1) // border
+		hits = append(hits, offsetHits(gridHits, cumY, 0)...)
+		cumY += lineCount(p)
 	}
-	// The legend is a free-standing line below the bordered node panels,
-	// not itself inside a border -- word-wrapped to primaryW (two lines
-	// if it doesn't fit one) so it can never be the widest line in
-	// mapBlock and stretch the whole primary block wider than primaryW
-	// (lipgloss.JoinHorizontal, used both here for a side-by-side node
-	// layout and by the caller to join the primary/secondary panels,
-	// pads every line of a block to its own widest line -- a too-wide
-	// legend silently widened the whole CPU Map tab by one column at
-	// width 120-121, clipping the detail panel's own right border into
-	// ".." once the final assembled view got truncated back down to the
-	// terminal's actual width). truncateLines is a last-resort safety net
-	// in case wrapping still left something wider (a single unbreakable
-	// token longer than primaryW, say). legend itself was already built
-	// above, before nodeAreaBudget, so its real line count could be
-	// reserved out of the budget rather than assumed to always be 1.
-	mapBlock := truncateLines(joinPanels(panels, nodeSideBySide)+"\n"+legend, primaryW)
+	mapBlock := padLinesTo(strings.Join(panels, "\n"), nodeAreaBudget)
 
-	var detailPanel string
-	if secondaryBudget > 0 {
-		detailPanel, _ = panelWrapH("core detail", cpuMapDetail(s, cursor), secondaryW, secondaryBudget, true)
-	}
+	detailPanel, _ := panelWrapH("core detail", detailBody, w, detailBudget, true)
 
-	if sideBySide {
-		if detailPanel == "" {
-			return mapBlock, hits
-		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, mapBlock, " ", detailPanel), hits
-	}
-	if detailPanel == "" {
-		return mapBlock, hits
-	}
-	return mapBlock + "\n" + detailPanel, hits
+	// truncateLines is a last-resort safety net: every piece above is
+	// already clamped to w on its own (panelH/panelWrapH/lipgloss's own
+	// Width), but a single unbreakable token wider than w in the legend
+	// or detail prose could still widen a line past it.
+	return truncateLines(mapBlock+"\n"+detailPanel+"\n"+legend, w), hits
 }
 
 // glyphChar returns thread t's plain (unstyled) glyph: pinned (solid), free,

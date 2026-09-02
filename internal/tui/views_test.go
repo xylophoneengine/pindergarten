@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -513,6 +514,180 @@ func TestCPUMapNoSMTCoreDoesNotPanic(t *testing.T) {
 		t.Fatalf("renderCPUMapTab() = %q, want a node 0 heading", out)
 	}
 	_ = cpuMapDetail(s, 0)
+}
+
+// firstLineContaining returns the index of the first line in lines that
+// contains sub, or -1 if none does.
+func firstLineContaining(lines []string, sub string) int {
+	for i, l := range lines {
+		if strings.Contains(l, sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestCPUMapEpycHostNoTruncationExactLayout covers the CPU Map rows
+// relayout (cpumap-rows-brief.md) at the real host's own size, 200x70: no
+// line anywhere is truncated with ".." (the old fixed 32-cores-per-row
+// grid did this constantly on this fixture, since a node panel narrower
+// than 96*3-1 columns had to cut every row short), every one of the
+// fixture's 192 cores gets exactly one "core" hit landing on an actual
+// glyph rune (never a border, label, or separator), the "core detail"
+// panel's title renders below both node panels, and the legend is the
+// body's last line.
+func TestCPUMapEpycHostNoTruncationExactLayout(t *testing.T) {
+	s := &model.Snapshot{Topo: epycHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	const w, budget = 200, 70
+	out, hits := renderCPUMapTab(s, 0, w, budget)
+	lines := strings.Split(out, "\n")
+
+	if len(lines) != budget {
+		t.Fatalf("renderCPUMapTab() has %d lines, want exactly %d (budget)", len(lines), budget)
+	}
+	for i, l := range lines {
+		if lw := lipgloss.Width(l); lw > w {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, lw, w, l)
+		}
+	}
+	if strings.Contains(out, "..") {
+		t.Fatalf("renderCPUMapTab() = %q, want no \"..\" truncation artifact", out)
+	}
+
+	seen := map[int]bool{}
+	for _, h := range hits {
+		if h.kind != "core" {
+			t.Fatalf("unexpected hit kind %q (hits should only be \"core\")", h.kind)
+		}
+		if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+			t.Fatalf("hit %+v lands on %q, want a glyph character", h, r)
+		}
+		if seen[h.index] {
+			t.Fatalf("duplicate hit for core index %d", h.index)
+		}
+		seen[h.index] = true
+	}
+	if len(hits) != 192 {
+		t.Fatalf("got %d core hits, want exactly 192", len(hits))
+	}
+	for i := 0; i < 192; i++ {
+		if !seen[i] {
+			t.Fatalf("no hit recorded for core index %d", i)
+		}
+	}
+
+	node0Row := firstLineContaining(lines, "node 0")
+	node1Row := firstLineContaining(lines, "node 1")
+	detailRow := firstLineContaining(lines, "core detail")
+	if node0Row < 0 || node1Row < 0 || detailRow < 0 {
+		t.Fatalf("want \"node 0\", \"node 1\", and \"core detail\" panel titles all present (rows %d/%d/%d)", node0Row, node1Row, detailRow)
+	}
+	if detailRow <= node0Row || detailRow <= node1Row {
+		t.Fatalf("detail panel title at row %d, want it below both node panels (node 0 at %d, node 1 at %d)", detailRow, node0Row, node1Row)
+	}
+	if last := ansi.Strip(lines[len(lines)-1]); !strings.Contains(last, "pinned") || !strings.Contains(last, "L3 boundary") {
+		t.Fatalf("last body line = %q, want it to be the legend (with \"pinned\" and \"L3 boundary\")", last)
+	}
+}
+
+// TestCPUMapEpycHostSmallerTerminalsFitBudget covers the same epycHostTopo
+// fixture at two smaller real terminal sizes: 120x40 (both node panels
+// still fit) and 80x24 (tight enough that fitStackedWindow must window
+// the node rows down to just the cursor's own node). Both must still fill
+// their height budget exactly, never exceed their width, and keep both
+// the cursor's node panel and the detail panel visible.
+func TestCPUMapEpycHostSmallerTerminalsFitBudget(t *testing.T) {
+	s := &model.Snapshot{Topo: epycHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	cursor := 191 // last core: node 1
+
+	for _, tc := range []struct{ w, budget int }{{120, 40}, {80, 24}} {
+		out, hits := renderCPUMapTab(s, cursor, tc.w, tc.budget)
+		lines := strings.Split(out, "\n")
+
+		if len(lines) != tc.budget {
+			t.Fatalf("%dx%d: renderCPUMapTab() has %d lines, want exactly %d (budget)", tc.w, tc.budget, len(lines), tc.budget)
+		}
+		for i, l := range lines {
+			if lw := lipgloss.Width(l); lw > tc.w {
+				t.Fatalf("%dx%d: line %d width = %d, want <= %d: %q", tc.w, tc.budget, i, lw, tc.w, l)
+			}
+		}
+		if strings.Contains(out, "..") {
+			t.Fatalf("%dx%d: renderCPUMapTab() = %q, want no \"..\" truncation artifact", tc.w, tc.budget, out)
+		}
+		if !strings.Contains(out, "node 1") {
+			t.Fatalf("%dx%d: renderCPUMapTab() = %q, want node 1's panel visible (cursor is on one of its cores)", tc.w, tc.budget, out)
+		}
+		if !strings.Contains(out, "core detail") {
+			t.Fatalf("%dx%d: renderCPUMapTab() = %q, want the core detail panel visible", tc.w, tc.budget, out)
+		}
+		found := false
+		for _, h := range hits {
+			if h.index == cursor {
+				found = true
+				if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+					t.Fatalf("%dx%d: hit %+v lands on %q, want a glyph character", tc.w, tc.budget, h, r)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%dx%d: no hit recorded for the cursor's own core (%d)", tc.w, tc.budget, cursor)
+		}
+	}
+}
+
+// TestCPUMapRealHostSingleRowShortDetail covers the smaller real-host
+// fixture (realHostTopo: 1 node, 12 SMT2 cores, 2 L3 domains) at 100x30:
+// its whole 12-core grid comfortably fits one wrapped row (a single "L3
+// #0"/"L3 #1" label pair, not several), and the detail panel stays a
+// short, fixed-height fixture rather than stretching to fill the leftover
+// budget.
+func TestCPUMapRealHostSingleRowShortDetail(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	const w, budget = 100, 30
+	out, hits := renderCPUMapTab(s, 0, w, budget)
+	lines := strings.Split(out, "\n")
+
+	if len(lines) != budget {
+		t.Fatalf("renderCPUMapTab() has %d lines, want exactly %d (budget)", len(lines), budget)
+	}
+	for i, l := range lines {
+		if lw := lipgloss.Width(l); lw > w {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, lw, w, l)
+		}
+	}
+	if strings.Contains(out, "..") {
+		t.Fatalf("renderCPUMapTab() = %q, want no \"..\" truncation artifact", out)
+	}
+	if len(hits) != 12 {
+		t.Fatalf("got %d core hits, want exactly 12 (one per core, one grid row)", len(hits))
+	}
+	detailRow := firstLineContaining(lines, "core detail")
+	if detailRow < 0 {
+		t.Fatal("want a \"core detail\" panel title present")
+	}
+	// Check only the grid (everything above the detail panel's own title,
+	// which separately shows the cursor core's own "L3 #0" line) for a
+	// single label pair -- proof the 12-core grid wrapped to one row, not
+	// several.
+	grid := strings.Join(lines[:detailRow], "\n")
+	if got := strings.Count(grid, "L3 #0"); got != 1 {
+		t.Fatalf("grid has \"L3 #0\" %d times, want exactly 1 (a single wrapped row, not several): %q", got, grid)
+	}
+	if got := strings.Count(grid, "L3 #1"); got != 1 {
+		t.Fatalf("grid has \"L3 #1\" %d times, want exactly 1 (a single wrapped row, not several): %q", got, grid)
+	}
+	if want := cpuMapNodeGridRows(12, cpuMapCoresPerRow(w), true) + 2; want > 8 {
+		t.Fatalf("node panel's own natural height = %d, this test's premise (a single row fitting the panel) no longer holds -- widen the fixture check", want)
+	}
+	// detail content is short (core/socket/node/threads, L3, 2 thread
+	// lines = 4 lines +2 borders): everything from its title to the end
+	// of the body is just the detail panel plus the one-line legend --
+	// it must not have stretched to fill the leftover budget below the
+	// single node row.
+	if tail := len(lines) - detailRow; tail > cpuMapDetailMaxHeight+1 {
+		t.Fatalf("%d lines from the detail panel's title to the end of the body, want <= %d (cpuMapDetailMaxHeight + the legend line): a stretched detail panel", tail, cpuMapDetailMaxHeight+1)
+	}
 }
 
 func TestCursorClampAndOtherTabsInert(t *testing.T) {

@@ -299,7 +299,7 @@ func (a *App) scrollActive(delta int) {
 		a.overviewScroll += delta
 		a.clampOverviewScroll()
 	case tabCPUMap:
-		a.moveCursor(delta * coresPerRow)
+		a.moveCursor(delta * cpuMapCoresPerRow(effectiveWidth(a.width)))
 	case tabVMs:
 		a.moveVMSel(delta)
 	case tabPending:
@@ -447,10 +447,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.moveCursor(1)
 		return a, nil
 	case a.tab == tabCPUMap && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
-		a.moveCursor(-coresPerRow)
+		a.moveCursor(-cpuMapCoresPerRow(effectiveWidth(a.width)))
 		return a, nil
 	case a.tab == tabCPUMap && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
-		a.moveCursor(coresPerRow)
+		a.moveCursor(cpuMapCoresPerRow(effectiveWidth(a.width)))
 		return a, nil
 	case a.tab == tabVMs && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
 		a.moveVMSel(-1)

@@ -715,14 +715,11 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 	if len(ids) > 0 {
 		highlight = threadSet(ids)
 	}
-	// truncateLines clamps the grid to inner *before* windowing: a wide
-	// node (200+ single-thread cores, 32/row, 95 columns) is wider than
-	// inner at most widths, and panelInner's own lipgloss Width(inner)
-	// call word-wraps a too-wide body instead of truncating it -- which
-	// would silently add extra visual lines beyond what kept/contentBudget
-	// below accounts for, overflowing the popup (the exact class of bug
-	// the topology package's clampBoxWidth fixes for its own boxes).
-	grid, _ := renderNodeMap(w.base, w.node, highlight, -1, "")
+	// perRow is derived from inner (the dialog's own content width), so
+	// the grid wraps to fit rather than needing truncateLines to cut a
+	// too-wide row short below -- kept as a safety net regardless (a
+	// single-line grid at inner+1 width from integer rounding, say).
+	grid, _ := renderNodeMap(w.base, w.node, highlight, -1, "", coresPerRowForInner(inner))
 	grid = truncateLines(grid, inner)
 	gridLines, _, total := windowWithFooter(strings.Split(grid, "\n"), previewBudget, 0)
 	preview := strings.Join(gridLines, "\n")
@@ -754,7 +751,11 @@ func (w *wizard) viewForm(dw, budget int) (string, []hit) {
 func (w *wizard) viewManual(dw, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d: manual", w.vm, w.vcpus, w.node)
 
-	grid, gridHits := renderNodeMap(w.base, w.node, w.selected, w.cursor, "wizardcore")
+	inner := dw - 2
+	if inner < 1 {
+		inner = 1
+	}
+	grid, gridHits := renderNodeMap(w.base, w.node, w.selected, w.cursor, "wizardcore", coresPerRowForInner(inner))
 	var info strings.Builder
 	fmt.Fprintf(&info, "selected %d/%d\n", len(w.selected), w.vcpus)
 	if warn := w.crossesGPUWarning(); warn != "" {
@@ -762,10 +763,6 @@ func (w *wizard) viewManual(dw, budget int) (string, []hit) {
 		info.WriteString("\n")
 	}
 
-	inner := dw - 2
-	if inner < 1 {
-		inner = 1
-	}
 	gridLines := strings.Split(truncateLines(grid, inner), "\n")
 	var infoLines []string
 	if infoText := strings.TrimRight(info.String(), "\n"); infoText != "" {
@@ -912,24 +909,27 @@ func nodeCores(s *model.Snapshot, node int) []hostinfo.Core {
 	return cores
 }
 
-// renderNodeMap renders node's cores as a grid of two-glyph cells (also
-// used, restricted to one node at a time, for the CPU Map tab's per-node
-// panels -- see renderCPUMapTab): threads in highlight render in the
-// wizard highlight style, the core at cursor (a nodeCores index, -1 for
-// none) renders reverse-video instead. Alongside the string it returns one
-// hit of the given kind per cell (kind "" records no hits at all -- the
-// wizard form's own preview isn't clickable), 0-based relative to the
-// grid's own top-left corner (x0 = the cell's column * 3), indexed by its
-// position in nodeCores(s, node) -- the CPU Map tab, whose cursor is a
-// *global* s.Topo.Cores index, translates that back via
+// renderNodeMap renders node's cores as a grid of two-glyph cells, perRow
+// cores per row (also used, restricted to one node at a time, for the CPU
+// Map tab's per-node panels -- see renderCPUMapTab): threads in highlight
+// render in the wizard highlight style, the core at cursor (a nodeCores
+// index, -1 for none) renders reverse-video instead. Alongside the string
+// it returns one hit of the given kind per cell (kind "" records no hits
+// at all -- the wizard form's own preview isn't clickable), 0-based
+// relative to the grid's own top-left corner (x0 = the cell's column *
+// 3), indexed by its position in nodeCores(s, node) -- the CPU Map tab,
+// whose cursor is a *global* s.Topo.Cores index, translates that back via
 // globalCoreIndices.
-func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int, kind string) (string, []hit) {
+func renderNodeMap(s *model.Snapshot, node int, highlight map[int]bool, cursor int, kind string, perRow int) (string, []hit) {
+	if perRow < 1 {
+		perRow = 1
+	}
 	var b strings.Builder
 	var hits []hit
 	col := 0
 	row := 0
 	for i, core := range nodeCores(s, node) {
-		if col == coresPerRow {
+		if col == perRow {
 			b.WriteString("\n")
 			row++
 			col = 0
