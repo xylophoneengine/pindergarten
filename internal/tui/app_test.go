@@ -248,6 +248,52 @@ func TestTabSwitch(t *testing.T) {
 	}
 }
 
+// TestTabSwitchKeysWorkFromEveryTab covers the key-routing question behind
+// "navigation between tabs only possible with mouse click": Tab, a digit
+// rune, and shift+Tab are all checked early in handleKey's switch, before
+// any tab-specific case (CPU Map's cursor movement, VMs selection, etc.)
+// gets a chance to see them, so they must switch tabs regardless of which
+// tab is currently active -- including the CPU Map tab, whose own h/j/k/l
+// and arrow-key handling could plausibly shadow them.
+func TestTabSwitchKeysWorkFromEveryTab(t *testing.T) {
+	a := testApp(t, false)
+	a.tab = 1 // CPU Map
+
+	sendKeyType(a, tea.KeyTab)
+	if got := activeTabName(a); got != "VMs" {
+		t.Fatalf("active tab after Tab from CPU Map = %q, want VMs", got)
+	}
+
+	sendKey(a, '5')
+	if got := activeTabName(a); got != "Backups" {
+		t.Fatalf("active tab after '5' = %q, want Backups", got)
+	}
+
+	sendKeyType(a, tea.KeyShiftTab)
+	if got := activeTabName(a); got != "Pending" {
+		t.Fatalf("active tab after shift+Tab = %q, want Pending", got)
+	}
+}
+
+// TestKeyBarAlwaysHintsTabSwitch covers the discoverability half of the
+// same fix: since a mouse click on a tab label is the only other hint
+// that tabs are switchable at all, the key bar always names the digit/Tab
+// shortcut, first, right after the pending-ops count -- regardless of
+// which tab is active.
+func TestKeyBarAlwaysHintsTabSwitch(t *testing.T) {
+	a := testApp(t, false)
+	for tab := 0; tab < len(tabNames); tab++ {
+		a.tab = tab
+		hint := a.renderStatusBar()
+		if !strings.Contains(hint, "[1-5]") || !strings.Contains(hint, "tabs") {
+			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[1-5] tabs\" hint", tab, hint)
+		}
+		if !strings.Contains(hint, "[tab]") || !strings.Contains(hint, "next") {
+			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[tab] next\" hint", tab, hint)
+		}
+	}
+}
+
 func TestQuitConfirmWithPending(t *testing.T) {
 	a := testApp(t, false)
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})

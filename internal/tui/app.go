@@ -1090,7 +1090,11 @@ func (a *App) renderStatusBar() string {
 		return statusBarStyle.Render(pending + "  " + a.flow.statusBarHint())
 	}
 
-	var hints []keyHint
+	// Tab switching (digit keys, Tab/shift+Tab) works from every tab and
+	// isn't otherwise mentioned anywhere on screen (only a row-0 click on a
+	// tab label hints at it visually), so it's always named here, first,
+	// right after the pending count.
+	hints := []keyHint{{"1-5", "tabs"}, {"tab", "next"}}
 	if a.tab == 0 && !a.overviewSideBySide() {
 		hints = append(hints, keyHint{"up/down", "scroll"})
 	}
