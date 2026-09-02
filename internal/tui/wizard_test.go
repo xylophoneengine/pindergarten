@@ -436,6 +436,33 @@ func TestWizardDialogIsCenteredAndWidthCapped(t *testing.T) {
 	}
 }
 
+// TestWizardViewIsOnePanel covers the fix for wizard.view rendering two
+// stacked bordered boxes (a grid panel, then a separate "info" panel):
+// it must now be a single popup panel -- exactly one top-left border
+// corner -- with the grid, a rule line, and the info text all inside it.
+func TestWizardViewIsOnePanel(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = 2
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	if len(a.wizard.proposal.Rationale) == 0 {
+		t.Fatal("proposal.Rationale is empty, test fixture needs at least one sentence")
+	}
+
+	view, _ := a.wizard.view(60, 40)
+	if n := strings.Count(view, "\u256d"); n != 1 { // top-left border corner
+		t.Fatalf("wizard.view() has %d top-left border corners, want exactly 1 (one panel, not two): %q", n, view)
+	}
+	if !strings.Contains(view, strings.Repeat("-", 10)) {
+		t.Fatalf("wizard.view() = %q, want a \"-\" rule line between the grid and info sections", view)
+	}
+}
+
 // TestMouseClickTogglesWizardManualCore covers a click on the wizard's
 // manual screen node map: it must move the cursor to the clicked core and
 // toggle it, same as moving there with the arrow keys and pressing space.

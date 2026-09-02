@@ -670,6 +670,35 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 	return msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == r
 }
 
+// Minimum terminal size below which the layout cannot be drawn honestly.
+// Like btop, a smaller window shows only a resize notice instead of a
+// half-clipped UI.
+const (
+	minWidth  = 80
+	minHeight = 16
+)
+
+// tooSmall reports whether the terminal is below the minimum size. An
+// unknown size (before the first WindowSizeMsg) is not too small.
+func (a *App) tooSmall() bool {
+	return (a.width > 0 && a.width < minWidth) || (a.height > 0 && a.height < minHeight)
+}
+
+// tooSmallView is the whole screen while the terminal is undersized.
+// clampHeight/clampWidth guard it exactly like renderFull's own output --
+// the notice's own text is fixed, but a terminal so small even placing it
+// centered could in principle overflow (e.g. narrower than the longest
+// line), and this is the only other thing View ever returns.
+func (a *App) tooSmallView() string {
+	msg := fmt.Sprintf("terminal too small: %dx%d, need at least %dx%d\nenlarge the window or zoom out (ctrl+-)\n[q] quit",
+		a.width, a.height, minWidth, minHeight)
+	msg = warningStyle.Render(msg)
+	if a.width > 0 && a.height > 0 {
+		msg = lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, msg)
+	}
+	return a.clampHeight(a.clampWidth(msg))
+}
+
 // View renders the full screen: tab row (row 0, hit-tested by mouse
 // clicks), header, tab body, optional status message, then the status
 // bar -- any open dialog (confirm, wizard, mem-node picker, apply flow) is
@@ -689,31 +718,6 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 // recorded mouse-hit y off by the same amount). clampHeight/clampWidth
 // remain a final safety net for whatever still slips through (e.g. a
 // pathologically short a.height that can't even fit chrome alone).
-// Minimum terminal size below which the layout cannot be drawn honestly.
-// Like btop, a smaller window shows only a resize notice instead of a
-// half-clipped UI.
-const (
-	minWidth  = 80
-	minHeight = 16
-)
-
-// tooSmall reports whether the terminal is below the minimum size. An
-// unknown size (before the first WindowSizeMsg) is not too small.
-func (a *App) tooSmall() bool {
-	return (a.width > 0 && a.width < minWidth) || (a.height > 0 && a.height < minHeight)
-}
-
-// tooSmallView is the whole screen while the terminal is undersized.
-func (a *App) tooSmallView() string {
-	msg := fmt.Sprintf("terminal too small: %dx%d, need at least %dx%d\nenlarge the window or zoom out (ctrl+-)\n[q] quit",
-		a.width, a.height, minWidth, minHeight)
-	msg = warningStyle.Render(msg)
-	if a.width > 0 && a.height > 0 {
-		return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, msg)
-	}
-	return msg
-}
-
 func (a *App) View() string {
 	if a.tooSmall() {
 		a.hits = nil
@@ -787,7 +791,11 @@ func lineCount(s string) int {
 func (a *App) renderChrome() (tabs, header, statusLine, keyBar string, lines int) {
 	tabs = a.renderTabs()
 	header = a.renderHeader()
-	keyBar = a.wrapProse(a.renderStatusBar())
+	// renderStatusBar does its own width-aware layout (dropping/wrapping
+	// on whole "[key] label" tokens) -- wrapping it again here via
+	// wrapProse would risk lipgloss's own naive word-wrap splitting a
+	// token's key from its label after all.
+	keyBar = a.renderStatusBar()
 	fixed := 2 + lineCount(keyBar) // tab row + header + key bar
 
 	if a.status != "" {
@@ -805,30 +813,37 @@ func (a *App) renderChrome() (tabs, header, statusLine, keyBar string, lines int
 // renderDialog renders whichever modal (confirm, wizard, mem-node picker,
 // apply flow) is currently open as a single self-contained panel, tight
 // to its own content -- no centering baked in, any hits 0-based relative
-// to its own top-left corner -- clamped to at most dw = dialogWidth(w)
-// wide and budget lines tall (the same budget the tab body renders into,
-// so a dialog never grows past the body's own footprint; none of these
-// stretch to fill it the way a body panel does -- a popup should stay its
-// own natural size). renderFull composites the result via overlay,
-// computing the centering offset itself so every dialog type shares one
-// placement rule instead of each rolling its own. ok is false when
-// nothing is open.
+// to its own top-left corner -- clamped to at most dw = dialogWidth(w,
+// ...) wide (sized to its own content when it has an opinion, e.g. the
+// confirm prompt; dialogMaxWidth itself, i.e. "as wide as available",
+// when it doesn't -- the wizard/mem-node-picker/apply-flow screens want
+// all the room they can get for their own grid/prose) and budget lines
+// tall (the same budget the tab body renders into, so a dialog never
+// grows past the body's own footprint; none of these stretch to fill it
+// the way a body panel does -- a popup should stay its own natural size).
+// renderFull composites the result via overlay, computing the centering
+// offset itself so every dialog type shares one placement rule instead of
+// each rolling its own. ok is false when nothing is open.
 func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
-	dw := dialogWidth(w)
 	switch {
 	case a.help:
+		dw := dialogWidth(w, dialogMaxWidth)
 		return helpPanel(dw, budget), nil, true
 	case a.confirm != nil:
 		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
+		dw := dialogWidth(w, maxLineWidth(body))
 		panel, _ = panelWrapH("Confirm", body, dw, budget, false)
 		return panel, nil, true
 	case a.wizard != nil:
+		dw := dialogWidth(w, dialogMaxWidth)
 		p, h := a.wizard.view(dw, budget)
 		return p, h, true
 	case a.memPicker != nil:
+		dw := dialogWidth(w, dialogMaxWidth)
 		p, h := a.memPicker.view(dw, budget)
 		return p, h, true
 	case a.flow != nil:
+		dw := dialogWidth(w, dialogMaxWidth)
 		return a.renderFlowPanel(dw, budget), nil, true
 	}
 	return "", nil, false
@@ -852,7 +867,7 @@ func (a *App) clampDiffScroll() {
 	total := len(a.diffLinesCached(inner))
 	_, _, _, _, chrome := a.renderChrome()
 	budget := a.bodyBudget(chrome) - 2
-	a.diffScroll = clampScroll(a.diffScroll, budget, total)
+	a.diffScroll = clampScroll(a.diffScroll, footerBudget(total, budget), total)
 }
 
 // diffLinesCached returns a.diffView colored (colorDiff) and truncated to
@@ -876,7 +891,7 @@ func (a *App) clampResultsScroll() {
 		return
 	}
 	w := effectiveWidth(a.width)
-	dw := dialogWidth(w)
+	dw := dialogWidth(w, dialogMaxWidth)
 	inner := dw - 2
 	if inner < 1 {
 		inner = 1
@@ -884,7 +899,7 @@ func (a *App) clampResultsScroll() {
 	_, _, _, _, chrome := a.renderChrome()
 	budget := a.bodyBudget(chrome)
 	total := lineCount(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)))
-	a.flow.resultsScroll = clampScroll(a.flow.resultsScroll, budget-2, total)
+	a.flow.resultsScroll = clampScroll(a.flow.resultsScroll, footerBudget(total, budget-2), total)
 }
 
 // bodyBudget returns how many lines the tab body may use: a.height minus
@@ -1040,7 +1055,7 @@ func (a *App) renderDiffView(w, budget int) string {
 	}
 	lines := a.diffLinesCached(inner)
 	contentBudget := budget - 2
-	visible, offset, total := windowAt(lines, contentBudget, a.diffScroll)
+	visible, offset, total := windowWithFooter(lines, contentBudget, a.diffScroll)
 	body := strings.Join(visible, "\n")
 	if footer := scrollFooter(offset, len(visible), total); footer != "" {
 		body += "\n" + keyBarLabelStyle.Render(footer)
@@ -1066,7 +1081,7 @@ func (a *App) renderFlowPanel(dw, budget int) string {
 	}
 	lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)), "\n")
 	contentBudget := budget - 2
-	visible, offset, total := windowAt(lines, contentBudget, a.flow.resultsScroll)
+	visible, offset, total := windowWithFooter(lines, contentBudget, a.flow.resultsScroll)
 	body := strings.Join(visible, "\n")
 	if footer := scrollFooter(offset, len(visible), total); footer != "" {
 		body += "\n" + keyBarLabelStyle.Render(footer)
@@ -1110,45 +1125,93 @@ func (a *App) renderStatusBar() string {
 	// '?' (help) and tab switching (digit keys, Tab/shift+Tab) both work
 	// from every tab and aren't otherwise mentioned anywhere on screen
 	// (only a row-0 click on a tab label hints at tab-switching visually),
-	// so they're always named here, first, right after the pending count.
-	hints := []keyHint{{"?", "help"}, {"1-5", "tabs"}, {"tab", "next"}}
+	// so they're always named right after the pending count; rescan/edit/
+	// quit always come last. Neither set ever drops, however tight a.width
+	// gets -- only the context-specific hints in between (below) do, in
+	// priority order, so the bar keeps to one row rather than word-
+	// wrapping (which could otherwise split a "[key] label" hint's own key
+	// from its label across two lines).
+	head := []keyHint{{"?", "help"}, {"1-5", "tabs"}, {"tab", "next"}}
+	tail := []keyHint{{"r", "rescan"}, {"e", "edit"}, {"q", "quit"}}
+
+	var context []keyHint
 	if a.tab == 0 && !a.overviewSideBySide() {
-		hints = append(hints, keyHint{"up/down", "scroll"})
+		context = append(context, keyHint{"up/down", "scroll"})
 	}
 	if a.tab == 1 {
-		hints = append(hints, keyHint{"arrows/hjkl", "move"})
+		context = append(context, keyHint{"arrows/hjkl", "move"})
 	}
 	if a.editMode && a.tab == 3 {
-		hints = append(hints, keyHint{"x", "remove"})
+		context = append(context, keyHint{"x", "remove"})
 	}
 	if a.editMode && a.queue.Len() > 0 {
-		hints = append(hints, keyHint{"a", "apply"})
+		context = append(context, keyHint{"a", "apply"})
 	}
 	if a.editMode && a.tab == 3 && a.queue.Len() > 0 {
 		// 'd' (discard all) is only routed on the Pending tab.
-		hints = append(hints, keyHint{"d", "discard"})
+		context = append(context, keyHint{"d", "discard"})
 	}
 	if a.editMode && a.tab == 2 {
-		hints = append(hints, keyHint{"p", "pin"}, keyHint{"s", "strip"}, keyHint{"n", "mem-node"})
+		context = append(context, keyHint{"p", "pin"}, keyHint{"s", "strip"}, keyHint{"n", "mem-node"})
 	}
 	if a.tab == 4 {
 		switch {
 		case a.diffView != "":
 			// Dismissing the diff isn't gated by edit mode either.
-			hints = append(hints, keyHint{"any", "close"})
+			context = append(context, keyHint{"any", "close"})
 		case a.editMode:
-			hints = append(hints, keyHint{"R", "restore"}, keyHint{"enter", "diff"})
+			context = append(context, keyHint{"R", "restore"}, keyHint{"enter", "diff"})
 		default:
 			// 'enter' (show diff) isn't gated by edit mode; only R is.
-			hints = append(hints, keyHint{"enter", "diff"})
+			context = append(context, keyHint{"enter", "diff"})
 		}
 	}
-	hints = append(hints, keyHint{"r", "rescan"}, keyHint{"e", "edit"}, keyHint{"q", "quit"})
 
-	parts := make([]string, 0, len(hints)+1)
-	parts = append(parts, keyBarLabelStyle.Render(pending))
-	for _, h := range hints {
-		parts = append(parts, renderKeyHint(h))
+	pendingTok := keyBarLabelStyle.Render(pending)
+	headToks, tailToks := renderKeyHints(head), renderKeyHints(tail)
+	w := effectiveWidth(a.width)
+	fixedWidth := tokenSetWidth(append([]string{pendingTok}, append(headToks, tailToks...)...))
+
+	// Greedily keep as many context hints (in priority order -- the ones
+	// added first above, so the least important tend to be added last and
+	// so dropped first here) as still fit alongside the fixed set on one
+	// row.
+	var kept []string
+	used := fixedWidth
+	for _, h := range context {
+		tok := renderKeyHint(h)
+		if add := 2 + lipgloss.Width(tok); used+add <= w {
+			kept = append(kept, tok)
+			used += add
+		} else {
+			break
+		}
 	}
-	return strings.Join(parts, "  ")
+
+	tokens := append([]string{pendingTok}, headToks...)
+	tokens = append(tokens, kept...)
+	tokens = append(tokens, tailToks...)
+	return wrapKeyBarTokens(tokens, w)
+}
+
+// renderKeyHints renders each of hints via renderKeyHint.
+func renderKeyHints(hints []keyHint) []string {
+	toks := make([]string, len(hints))
+	for i, h := range hints {
+		toks[i] = renderKeyHint(h)
+	}
+	return toks
+}
+
+// tokenSetWidth returns the total width of toks laid out on one row with
+// a two-space separator between each.
+func tokenSetWidth(toks []string) int {
+	w := 0
+	for i, t := range toks {
+		if i > 0 {
+			w += 2
+		}
+		w += lipgloss.Width(t)
+	}
+	return w
 }

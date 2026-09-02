@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/model"
@@ -235,14 +236,15 @@ func (w *wizard) buildOp(pins map[int][]int) model.PendingOp {
 
 // view renders the active screen against w.base (the self-stripped snapshot
 // Propose ran against, used for the node map's live pin state) as a
-// self-contained dialog panel dw wide: a titled node-map panel (grid
-// content, so it truncates rather than wraps) and an info panel below it
-// (prose, so it wraps), both trimmed to fit budget -- no centering baked
-// in (the caller composites it onto the body via overlay and does that
-// itself, so every dialog type shares one placement rule). Alongside the
-// string it returns the manual screen's per-core hits, 0-based relative
-// to the wizard panel's own top-left corner -- the proposal screen's map
-// isn't clickable, so it reports none.
+// single self-contained dialog panel dw wide -- one border, not two
+// stacked boxes: the node-map grid (truncated, never wrapped), then a
+// "-"-rule line, then the info text (word-wrapped prose) below it, all
+// inside the same titled panel, top-down truncated together to fit
+// budget. No centering baked in (the caller composites it onto the body
+// via overlay and does that itself, so every dialog type shares one
+// placement rule). Alongside the string it returns the manual screen's
+// per-core hits, 0-based relative to the wizard panel's own top-left
+// corner -- the proposal screen's map isn't clickable, so it reports none.
 func (w *wizard) view(dw, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus) -> node %d", w.vm, w.vcpus(), w.node)
 
@@ -274,18 +276,42 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 		}
 	}
 
-	gridBudget, infoBudget := splitStackedBudget(budget, lineCount(grid))
-	gridPanel, kept := panelH(title, grid, dw, gridBudget, false)
-	hits := offsetHits(clipHitsToWindow(gridHits, kept, dw-2), 1, 1)
-	infoPanel := ""
-	if infoBudget > 0 {
-		infoPanel, _ = panelWrapH("info", strings.TrimRight(info.String(), "\n"), dw, infoBudget, false)
+	inner := dw - 2
+	if inner < 1 {
+		inner = 1
 	}
-	out := gridPanel
-	if infoPanel != "" {
-		out = gridPanel + "\n" + infoPanel
+	gridLines := strings.Split(truncateLines(grid, inner), "\n")
+	var infoLines []string
+	if infoText := strings.TrimRight(info.String(), "\n"); infoText != "" {
+		infoLines = strings.Split(lipgloss.NewStyle().Width(inner).Render(infoText), "\n")
 	}
-	return out, hits
+
+	lines := append([]string{}, gridLines...)
+	if len(infoLines) > 0 {
+		lines = append(lines, strings.Repeat("-", inner))
+		lines = append(lines, infoLines...)
+	}
+
+	contentBudget := budget - 2 // one set of borders now, not two
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	kept := len(lines)
+	if kept > contentBudget {
+		lines = lines[:contentBudget]
+		kept = contentBudget
+	}
+	panel := panelInner(title, strings.Join(lines, "\n"), dw, 0)
+
+	// Only the grid's own rows (never the rule or info lines after it) are
+	// hit-testable; gridKept is how many of them actually survived the
+	// combined height clip above.
+	gridKept := kept
+	if gridKept > len(gridLines) {
+		gridKept = len(gridLines)
+	}
+	hits := offsetHits(clipHitsToWindow(gridHits, gridKept, inner), 1, 1)
+	return panel, hits
 }
 
 // statusBarHint returns the status bar's replacement content while the

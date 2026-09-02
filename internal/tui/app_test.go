@@ -9,7 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/xylophoneengine/pindergarten/internal/apply"
 	"github.com/xylophoneengine/pindergarten/internal/backup"
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -291,6 +293,35 @@ func TestKeyBarAlwaysHintsTabSwitch(t *testing.T) {
 		if !strings.Contains(hint, "[tab]") || !strings.Contains(hint, "next") {
 			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[tab] next\" hint", tab, hint)
 		}
+	}
+}
+
+// TestKeyBarStaysOneRowAtNarrowWidths covers the fix for the key bar's own
+// hints overflowing an 80-100 column terminal: the VMs tab in edit mode
+// with a pending op (help/tabs/next, pin/strip/mem-node/apply, rescan/
+// edit/quit -- far more than fits at width 90) must still render as one
+// row, with rescan and quit -- which never drop -- intact, and the whole
+// row no wider than the terminal.
+func TestKeyBarStaysOneRowAtNarrowWidths(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	enterEdit(a)
+	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+
+	keyBar := a.renderStatusBar()
+	if n := strings.Count(keyBar, "\n") + 1; n != 1 {
+		t.Fatalf("renderStatusBar() = %q, want exactly one row at width 90, got %d rows", keyBar, n)
+	}
+	if !strings.Contains(keyBar, "[r] rescan") {
+		t.Fatalf("renderStatusBar() = %q, want the rescan hint intact (never dropped/split)", keyBar)
+	}
+	if !strings.Contains(keyBar, "[q] quit") {
+		t.Fatalf("renderStatusBar() = %q, want the quit hint intact (never dropped/split)", keyBar)
+	}
+	if w := lipgloss.Width(keyBar); w > 90 {
+		t.Fatalf("renderStatusBar() width = %d, want <= 90: %q", w, keyBar)
 	}
 }
 
@@ -1101,10 +1132,120 @@ func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
 	row := rowOf(t, view, "\u256d Confirm") // the dialog's own titled top border (ASCII escape, not a literal byte, to avoid any encoding mishap)
 	idx := strings.Index(lines[row], "\u256d Confirm")
 	leading := lipgloss.Width(lines[row][:idx])
-	dw := dialogWidth(120)
+	// Confirm is content-sized (see dialogWidth), not always dialogMaxWidth.
+	dw := dialogWidth(120, maxLineWidth("Enable edit mode? [y/n]\n\n[y]es  [n]/esc cancel"))
 	wantX := (120 - dw) / 2
 	if leading < wantX-1 || leading > wantX+1 {
-		t.Fatalf("dialog row's leading width = %d, want about %d (= (120-dialogWidth(120))/2 = (120-%d)/2)", leading, wantX, dw)
+		t.Fatalf("dialog row's leading width = %d, want about %d (= (120-dw)/2 = (120-%d)/2)", leading, wantX, dw)
+	}
+}
+
+// TestOverlayPreservesBodyRightOfDialog covers the fix for overlay
+// blanking everything to the right of a dialog on every row it covers:
+// at 175x22 on the VMs tab (wide enough to go side by side, so there's a
+// detail panel to the right of the confirm dialog once it opens), every
+// row's content from the dialog's right edge onward must be byte-for-byte
+// (well, visible-cell-for-visible-cell -- an inserted reset code is
+// harmless) identical to the same row rendered with no dialog open at
+// all.
+func TestOverlayPreservesBodyRightOfDialog(t *testing.T) {
+	a := wizardTestApp(t, manyVMXMLs(5), noNode)
+	runScan(t, a)
+	a.tab = 2
+	a.Update(tea.WindowSizeMsg{Width: 175, Height: 22})
+
+	without := strings.Split(a.View(), "\n")
+
+	sendKey(a, 'e')
+	if a.confirm == nil {
+		t.Fatal("confirm modal did not open")
+	}
+	with := strings.Split(a.View(), "\n")
+
+	if len(without) != len(with) {
+		t.Fatalf("line count changed: %d without the dialog, %d with", len(without), len(with))
+	}
+
+	dw := dialogWidth(175, maxLineWidth("Enable edit mode? [y/n]\n\n[y]es  [n]/esc cancel"))
+	x, _ := centerXY(dw, 5, 175, 0)
+	rightCol := x + dw
+	for i := range without {
+		gotRight := ansi.Strip(ansi.TruncateLeft(with[i], rightCol, ""))
+		wantRight := ansi.Strip(ansi.TruncateLeft(without[i], rightCol, ""))
+		if gotRight != wantRight {
+			t.Fatalf("row %d: body content right of the dialog (col %d) = %q, want unchanged %q", i, rightCol, gotRight, wantRight)
+		}
+	}
+}
+
+// TestApplyResultsScreenBottomBorderSurvives covers the off-by-one in
+// renderFlowPanel's results branch: a footer line was appended *after*
+// windowing to the full content budget, making the assembled body
+// budget+1 lines -- one too many for the panel's own (natural, unpadded)
+// height, silently dropping the bottom border. At 120x24 with 60 results
+// (well more than fit, so a footer is always shown), the panel's own
+// last line must still be its bottom border.
+func TestApplyResultsScreenBottomBorderSurvives(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	results := make([]apply.Result, 60)
+	for i := range results {
+		results[i] = apply.Result{Op: model.PendingOp{Summary: fmt.Sprintf("op %d", i)}, Applied: true}
+	}
+	a.flow = &applyFlow{screen: flowResults, results: results}
+
+	_, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome)
+	panel, _, ok := a.renderDialog(effectiveWidth(a.width), budget)
+	if !ok {
+		t.Fatal("renderDialog() ok = false, want true with a.flow at flowResults")
+	}
+	lines := strings.Split(panel, "\n")
+	if len(lines) > budget {
+		t.Fatalf("results panel has %d lines, want <= budget (%d): %q", len(lines), budget, panel)
+	}
+	if !strings.Contains(lines[len(lines)-1], "\u2570") { // bottom-left corner
+		t.Fatalf("last line of results panel = %q, want the bottom border", lines[len(lines)-1])
+	}
+}
+
+// TestDiffViewBottomBorderSurvives covers the same off-by-one in
+// renderDiffView: with a 208-line diff at 120x24 (far more than fits, so
+// a footer is always shown), the diff panel's own last body line must
+// still be its bottom border, with the "lines N-M of T" footer visible
+// just above it.
+func TestDiffViewBottomBorderSurvives(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	bigXML := plainVMXML + "\n" + strings.Repeat("  <!-- padding line -->\n", 208)
+	if _, err := backup.Save(a.backupDir, "plain-vm", "pin", "test", bigXML); err != nil {
+		t.Fatalf("backup.Save: %v", err)
+	}
+	a.tab = 4
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	sendKeyType(a, tea.KeyEnter)
+	if a.diffView == "" {
+		t.Fatal("diff view did not open")
+	}
+
+	_, _, _, _, chrome := a.renderChrome()
+	budget := a.bodyBudget(chrome)
+	body, _ := a.renderBody(budget)
+	lines := strings.Split(body, "\n")
+	if len(lines) > budget {
+		t.Fatalf("diff body has %d lines, want <= budget (%d): %q", len(lines), budget, body)
+	}
+	if !strings.Contains(lines[len(lines)-1], "\u2570") { // bottom-left corner
+		t.Fatalf("last line of diff body = %q, want the bottom border", lines[len(lines)-1])
+	}
+	foundFooter := false
+	for _, l := range lines {
+		if strings.Contains(l, "lines ") && strings.Contains(l, " of ") {
+			foundFooter = true
+		}
+	}
+	if !foundFooter {
+		t.Fatalf("diff body = %q, want a \"lines N-M of T\" footer visible", body)
 	}
 }
 

@@ -480,6 +480,36 @@ func windowAt(lines []string, budget, offset int) (window []string, usedOffset, 
 	return lines[offset : offset+budget], offset, total
 }
 
+// footerBudget returns the budget a windowed view should actually use once
+// a trailing scrollFooter line is accounted for: budget itself when total
+// already fits (no footer will be shown, the same condition windowAt/
+// clampScroll use), else budget-1 (floored at 1) to leave the footer its
+// own line. Shared by windowWithFooter and the diff/results scroll clamps
+// so both derive the same effective budget windowWithFooter's caller will
+// actually render into.
+func footerBudget(total, budget int) int {
+	if total > budget {
+		budget--
+		if budget < 1 {
+			budget = 1
+		}
+	}
+	return budget
+}
+
+// windowWithFooter mirrors windowAt, but reserves one line of budget for a
+// scrollFooter -- and only when one will actually be shown (lines doesn't
+// already fit within budget, the same condition windowAt itself uses) --
+// so a caller that always appends a non-empty scrollFooter result to its
+// windowed body never ends up with budget+1 lines: giving windowAt the
+// full budget and then unconditionally appending a footer line afterward
+// pushes the assembled body past whatever the caller sized its panel to
+// (panelInner's own height parameter only pads a *shorter* body, it never
+// truncates a longer one), silently dropping the bottom border.
+func windowWithFooter(lines []string, budget, offset int) (window []string, usedOffset, total int) {
+	return windowAt(lines, footerBudget(len(lines), budget), offset)
+}
+
 // scrollFooter renders a "lines N-M of T" footer for a scrolled view, or ""
 // when nothing was trimmed (total == 0, scrollWindow/windowAt's shared
 // convention for "it all fit already").
@@ -517,19 +547,38 @@ func clipHitsToWindow(hits []hit, hBudget, wBudget int) []hit {
 // terminal is.
 const dialogMaxWidth = 90
 
-// dialogWidth returns the width to render a centered dialog at: narrower
-// than the terminal (w-4, so it visibly floats over the body) but never
-// wider than dialogMaxWidth, so a very wide terminal doesn't stretch it
-// edge to edge.
-func dialogWidth(w int) int {
-	limit := w - 4
+// dialogWidth returns the width to render a centered dialog at: sized to
+// its content (contentWidth + 4 for the borders) so a short confirm
+// prompt doesn't float in a needlessly huge box, but never wider than
+// dialogMaxWidth or than the terminal itself (w-4, so it visibly floats
+// over the body). A caller with no particular content-width preference
+// (the wizard/mem-node-picker/apply-flow dialogs, which want as much room
+// as the terminal allows for their own grid/prose) passes dialogMaxWidth
+// itself, which -- since it's already the cap -- is a no-op through the
+// first clamp and behaves exactly like "always use the widest available".
+func dialogWidth(w, contentWidth int) int {
+	limit := contentWidth + 4
 	if limit > dialogMaxWidth {
 		limit = dialogMaxWidth
+	}
+	if wLimit := w - 4; limit > wLimit {
+		limit = wLimit
 	}
 	if limit < 4 {
 		limit = 4
 	}
 	return limit
+}
+
+// maxLineWidth returns the widest line in s (0 for an empty string).
+func maxLineWidth(s string) int {
+	w := 0
+	for _, l := range strings.Split(s, "\n") {
+		if lw := lipgloss.Width(l); lw > w {
+			w = lw
+		}
+	}
+	return w
 }
 
 // centerXY returns the (x, y) top-left offset that centers a dw x dh box
@@ -550,16 +599,18 @@ func centerXY(dw, dh, wf, hf int) (x, y int) {
 
 // overlay composites dialog over base, splicing each of dialog's lines
 // into the background row at column x starting from row y: the
-// background's own content survives up to column x (its ANSI state cut
-// cleanly via ansi.Truncate, then explicitly reset so no leftover style
-// bleeds into the dialog); the rest of that row is fully replaced by the
-// dialog's own line, padded back out to the background's original line
-// width -- attempting to preserve the tail's ANSI styling past an
-// arbitrary cut point is unreliable (ansi.TruncateLeft/Cut can drop a
-// still-open style's start code), so it's simply blanked rather than
-// spliced back in. Rows the dialog doesn't reach are left untouched, and
-// the underlying body's own layout/scroll state never changes -- only
-// what's drawn on top of it does.
+// background's own content survives on both sides of the dialog -- its
+// left part cut with ansi.Truncate, its right part (from column
+// x+dialogWidth on) cut with ansi.TruncateLeft -- with an explicit reset
+// spliced in on either side of the dialog's own content so neither side's
+// leftover style bleeds across the seam. ansi.TruncateLeft re-opens
+// whatever style was active at its cut point on its own (any SGR sequence
+// preceding the cut is copied into the output verbatim, only the
+// *visible* cells before it are dropped), so the background's right side
+// -- a neighboring panel's content and border, say -- survives
+// byte-for-byte rather than being blanked. Rows the dialog doesn't reach
+// are left untouched, and the underlying body's own layout/scroll state
+// never changes -- only what's drawn on top of it does.
 func overlay(base, dialog string, x, y int) string {
 	if x < 0 {
 		x = 0
@@ -567,21 +618,24 @@ func overlay(base, dialog string, x, y int) string {
 	if y < 0 {
 		y = 0
 	}
-	baseLines := strings.Split(base, "\n")
+	dw := 0
 	dialogLines := strings.Split(dialog, "\n")
+	for _, dl := range dialogLines {
+		if w := lipgloss.Width(dl); w > dw {
+			dw = w
+		}
+	}
+
+	baseLines := strings.Split(base, "\n")
 	for i, dl := range dialogLines {
 		row := y + i
 		if row < 0 || row >= len(baseLines) {
 			continue
 		}
 		bg := baseLines[row]
-		total := lipgloss.Width(bg)
 		left := padRight(ansi.Truncate(bg, x, ""), x)
-		spliced := left + "\x1b[0m" + dl
-		if w := lipgloss.Width(spliced); w < total {
-			spliced += strings.Repeat(" ", total-w)
-		}
-		baseLines[row] = spliced
+		right := ansi.TruncateLeft(bg, x+dw, "")
+		baseLines[row] = left + "\x1b[0m" + dl + "\x1b[0m" + right
 	}
 	return strings.Join(baseLines, "\n")
 }
@@ -643,6 +697,37 @@ type keyHint struct{ key, label string }
 // renderKeyHint styles one key hint: bold key, dim label.
 func renderKeyHint(h keyHint) string {
 	return keyBarKeyStyle.Render("["+h.key+"]") + " " + keyBarLabelStyle.Render(h.label)
+}
+
+// wrapKeyBarTokens joins tokens (each a whole "[key] label" hint, or the
+// leading pending-count label) with two-space separators, greedily
+// packing them onto rows of at most width cells and starting a new row
+// rather than ever splitting a token across two -- unlike lipgloss's own
+// Width-wrap, which treats every space (including the one inside "[key]
+// label") as a break point. A token wider than width on its own still
+// gets its own (overflowing) row rather than being broken up.
+func wrapKeyBarTokens(tokens []string, width int) string {
+	var lines []string
+	var cur []string
+	curWidth := 0
+	for _, tok := range tokens {
+		add := lipgloss.Width(tok)
+		if len(cur) > 0 {
+			add += 2 // the "  " separator
+		}
+		if len(cur) > 0 && curWidth+add > width {
+			lines = append(lines, strings.Join(cur, "  "))
+			cur = nil
+			curWidth = 0
+			add = lipgloss.Width(tok)
+		}
+		cur = append(cur, tok)
+		curWidth += add
+	}
+	if len(cur) > 0 {
+		lines = append(lines, strings.Join(cur, "  "))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // styleStatus colors a status/result line by what it reports: red for an

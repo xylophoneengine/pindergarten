@@ -50,6 +50,27 @@ func TestTooSmallShowsResizeNotice(t *testing.T) {
 	}
 }
 
+// TestTooSmallViewClampsToTerminalSize covers the fix for tooSmallView
+// returning unclamped output: at a genuinely tiny size (well under even
+// the notice text's own longest line), the notice must still be clamped
+// to the terminal's actual width and height rather than overflowing it.
+func TestTooSmallViewClampsToTerminalSize(t *testing.T) {
+	a := testApp(t, false)
+	runScan(t, a)
+	a.Update(tea.WindowSizeMsg{Width: 20, Height: 5})
+
+	view := a.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) > 5 {
+		t.Fatalf("view has %d lines, want <= 5: %q", len(lines), view)
+	}
+	for i, l := range lines {
+		if w := lipgloss.Width(l); w > 20 {
+			t.Fatalf("line %d width = %d, want <= 20: %q", i, w, l)
+		}
+	}
+}
+
 func TestUnknownSizeIsNotTooSmall(t *testing.T) {
 	a := testApp(t, false)
 	runScan(t, a)
