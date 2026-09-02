@@ -55,6 +55,7 @@ type App struct {
 	backupsSel     int    // selected row on the Backups tab
 	overviewScroll int    // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
 	diffView       string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
+	help           bool   // toggled by '?'/F1; any key closes it again
 	editMode       bool
 	queue          model.Queue
 	snap           *model.Snapshot
@@ -198,6 +199,9 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.tooSmall() {
 		return a, nil
 	}
+	if a.help {
+		return a, nil
+	}
 	if delta, ok := wheelDelta(msg); ok {
 		a.scrollWheel(delta)
 		return a, nil
@@ -316,6 +320,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 'q' still asks first when ops are pending; ctrl+c never does.
 		return a, tea.Quit
 	}
+	if a.help {
+		// Any key closes the help overlay, not just esc/'?' -- it's a pure
+		// reference popup with nothing to confirm or select.
+		a.help = false
+		return a, nil
+	}
 	if a.confirm != nil {
 		return a.handleConfirmKey(msg)
 	}
@@ -353,6 +363,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
+	case isRune(msg, '?'), msg.Type == tea.KeyF1:
+		a.help = true
+		return a, nil
 	case isRune(msg, 'q'):
 		return a.requestQuit()
 	case isRune(msg, 'e'):
@@ -803,6 +816,8 @@ func (a *App) renderChrome() (tabs, header, statusLine, keyBar string, lines int
 func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
 	dw := dialogWidth(w)
 	switch {
+	case a.help:
+		return helpPanel(dw, budget), nil, true
 	case a.confirm != nil:
 		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
 		panel, _ = panelWrapH("Confirm", body, dw, budget, false)
@@ -1082,6 +1097,8 @@ func (a *App) renderStatusBar() string {
 	pending := pluralize(a.queue.Len(), "pending op")
 
 	switch {
+	case a.help:
+		return statusBarStyle.Render(pending + "  any key: close")
 	case a.wizard != nil:
 		return statusBarStyle.Render(pending + "  " + a.wizard.statusBarHint())
 	case a.memPicker != nil:
@@ -1090,11 +1107,11 @@ func (a *App) renderStatusBar() string {
 		return statusBarStyle.Render(pending + "  " + a.flow.statusBarHint())
 	}
 
-	// Tab switching (digit keys, Tab/shift+Tab) works from every tab and
-	// isn't otherwise mentioned anywhere on screen (only a row-0 click on a
-	// tab label hints at it visually), so it's always named here, first,
-	// right after the pending count.
-	hints := []keyHint{{"1-5", "tabs"}, {"tab", "next"}}
+	// '?' (help) and tab switching (digit keys, Tab/shift+Tab) both work
+	// from every tab and aren't otherwise mentioned anywhere on screen
+	// (only a row-0 click on a tab label hints at tab-switching visually),
+	// so they're always named here, first, right after the pending count.
+	hints := []keyHint{{"?", "help"}, {"1-5", "tabs"}, {"tab", "next"}}
 	if a.tab == 0 && !a.overviewSideBySide() {
 		hints = append(hints, keyHint{"up/down", "scroll"})
 	}

@@ -294,6 +294,45 @@ func TestKeyBarAlwaysHintsTabSwitch(t *testing.T) {
 	}
 }
 
+// TestKeyBarStartsWithHelpHint covers the help overlay's discoverability
+// requirement: "[?] help" is always the very first hint, before even the
+// tab-switch one.
+func TestKeyBarStartsWithHelpHint(t *testing.T) {
+	a := testApp(t, false)
+	hint := a.renderStatusBar()
+	if i, j := strings.Index(hint, "[?]"), strings.Index(hint, "[1-5]"); i < 0 || j < 0 || i > j {
+		t.Fatalf("renderStatusBar() = %q, want \"[?] help\" before \"[1-5] tabs\"", hint)
+	}
+}
+
+// TestHelpOverlayOpensAndAnyKeyCloses covers the help overlay's own
+// contract: '?' opens it (composited over the body, per the round-4
+// dialog/overlay mechanism -- it shows up in View()'s output), F1 does
+// too, and any key (not just esc/'?') closes it again.
+func TestHelpOverlayOpensAndAnyKeyCloses(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	sendKey(a, '?')
+	if !a.help {
+		t.Fatal("'?' did not open the help overlay")
+	}
+	view := a.View()
+	if !strings.Contains(view, "Help") {
+		t.Fatalf("View() with help open = %q, want the help panel composited over the body", view)
+	}
+
+	sendKey(a, 'z') // an arbitrary key, not esc/'?', must still close it
+	if a.help {
+		t.Fatal("help overlay still open after an arbitrary key")
+	}
+
+	sendKeyType(a, tea.KeyF1)
+	if !a.help {
+		t.Fatal("F1 did not open the help overlay")
+	}
+}
+
 func TestQuitConfirmWithPending(t *testing.T) {
 	a := testApp(t, false)
 	a.queue.Add(model.PendingOp{VM: "plain-vm", Summary: "pin"})
