@@ -98,7 +98,7 @@ func TestTopologyRealHostSmoke(t *testing.T) {
 		t.Fatalf("no topocore hit for global core index 6 (hits = %+v)", hits)
 	}
 
-	body, _ := renderTopologyTab(s, 120, 40, 0, topoZoomAuto)
+	body, _ := renderTopologyTab(s, 120, 40, 0)
 	if n := strings.Count(body, "\n") + 1; n != 40 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 40 (budget)", n)
 	}
@@ -218,7 +218,7 @@ func TestTopologyWidthInvariant(t *testing.T) {
 func TestTopologyFillsAndScrolls(t *testing.T) {
 	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
 
-	body, _ := renderTopologyTab(s, 120, 30, 0, topoZoomDetailed)
+	body, _ := renderTopologyTab(s, 120, 30, 0)
 	if n := strings.Count(body, "\n") + 1; n != 30 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 30 (budget)", n)
 	}
@@ -228,8 +228,8 @@ func TestTopologyFillsAndScrolls(t *testing.T) {
 	if total <= 3 {
 		t.Skip("fixture's drawing isn't tall enough to exercise scrolling at this width")
 	}
-	scrolled, _ := renderTopologyTab(s, 120, 3, total-3, topoZoomDetailed)
-	unscrolled, _ := renderTopologyTab(s, 120, 3, 0, topoZoomDetailed)
+	scrolled, _ := renderTopologyTab(s, 120, 3, total-3)
+	unscrolled, _ := renderTopologyTab(s, 120, 3, 0)
 	if scrolled == unscrolled {
 		t.Fatalf("renderTopologyTab() at scroll %d == scroll 0, want scrolling to actually move the window", total-3)
 	}
@@ -242,7 +242,7 @@ func TestTopologyFillsAndScrolls(t *testing.T) {
 // start with a border glyph.
 func TestTopologyFillsWithBorderNotBlankRows(t *testing.T) {
 	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	body, _ := renderTopologyTab(s, 120, 60, 0, topoZoomDetailed)
+	body, _ := renderTopologyTab(s, 120, 60, 0)
 	lines := strings.Split(body, "\n")
 	if len(lines) != 60 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 60 (budget)", len(lines))
@@ -305,7 +305,7 @@ func isGlyphRune(r rune) bool {
 func TestTopologyManyCoresWrapAndHits(t *testing.T) {
 	s := &model.Snapshot{Topo: bigTwoNodeTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
 
-	body, hits := renderTopologyTab(s, 120, 40, 0, topoZoomAuto)
+	body, hits := renderTopologyTab(s, 120, 40, 0)
 	lines := strings.Split(body, "\n")
 	if len(lines) != 40 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 40 (budget)", len(lines))

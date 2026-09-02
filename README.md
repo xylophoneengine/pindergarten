@@ -112,7 +112,6 @@ is on; browsing and rescanning always work in read-only mode.
 | mouse click | tab bar | jump to that tab |
 | arrows / `h j k l` | CPU Map | move the selected core |
 | up/down / `j k` | VMs, Pending, Backups, Topology | move the selected row, or scroll the drawing (Topology) |
-| `z` | Topology | cycle the zoom level: auto, detailed, compact |
 | mouse click | Topology, on a core box | jump to that core on the CPU Map tab |
 | `e` | anywhere | toggle edit mode (confirmed) |
 | `p` | VMs (edit mode) | open the pin wizard for the selected VM |

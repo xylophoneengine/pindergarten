@@ -11,22 +11,6 @@ import (
 	"github.com/xylophoneengine/pindergarten/internal/model"
 )
 
-// topoZoom used to select between a detailed (one box per core) and a
-// compact (dense grid) Topology drawing; the whole tab is now always the
-// one compact ruler-grid drawing described in renderTopoCoreGrid, so this
-// type/its consts -- and the App.topoZoom field, and the 'z' key's own
-// cycling of it (see App.handleKey's tab==topology 'z' case) -- survive
-// only so that field and app.go's key handling keep compiling;
-// topologyInnerForZoom and renderTopologyTab both ignore the value
-// entirely now (see their own doc comments).
-type topoZoom int
-
-const (
-	topoZoomAuto topoZoom = iota
-	topoZoomDetailed
-	topoZoomCompact
-)
-
 // boxChild is one child box ready for wrapBoxesInto: its already-rendered
 // rectangular block (as panelInner produces: a titled rounded-border box,
 // every line the same width), and any hits recorded within it, 0-based
@@ -405,7 +389,7 @@ func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
 // box per node directly, plus a trailing "unknown locality" box for any
 // display-class PCI device hostinfo.Read couldn't place on a real node
 // (see renderTopoUnknownBox). Shared by buildTopologyTab and
-// renderTopologyTab (via topologyInnerForZoom).
+// renderTopologyTab (via topologyInner).
 func topologyChildren(s *model.Snapshot, w int) []boxChild {
 	var children []boxChild
 	if len(s.Topo.Sockets) > 0 {
@@ -451,34 +435,28 @@ func machineBoxWidth(inner string, w int) int {
 	return mw
 }
 
-// topologyInnerForZoom returns the Topology tab's raw, unbordered content
+// topologyInner returns the Topology tab's raw, unbordered content
 // (topologyChildren wrapped via wrapBoxesInto -- the machine box's own
-// border/fill isn't added yet) at width w. There's only the one drawing
-// now (see the topoZoom doc comment), so budget and override are both
-// unused -- this is a trivial pass-through to topologyChildren/
-// wrapBoxesInto, kept only so App.clampTopologyScroll and
-// renderTopologyTab (which windows/borders whatever this returns) don't
-// need their own call sites changed.
-func topologyInnerForZoom(s *model.Snapshot, w, budget int, override topoZoom) (string, []hit) {
+// border/fill isn't added yet) at width w. Shared by renderTopologyTab
+// and App.clampTopologyScroll, which needs the total line count.
+func topologyInner(s *model.Snapshot, w int) (string, []hit) {
 	return wrapBoxesInto(topologyChildren(s, w), w-2)
 }
 
 // renderTopologyTab renders the Topology tab: the nested-box drawing
-// topologyInnerForZoom builds, windowed vertically to budget lines
+// topologyInner builds, windowed vertically to budget lines
 // starting at scroll (the caller clamps scroll via App.clampTopologyScroll)
 // *before* the machine box's own border is added -- so a short drawing
 // fills the border down to budget (panelInner's height parameter, exactly
 // like every other tab's body panel) instead of leaving bare blank rows
 // below it, and a long one keeps its own full top/bottom border around
 // whatever page is visible, the same pattern renderDiffView (and every
-// other scrollable panel in this package) already uses. zoom is unused
-// (see topologyInnerForZoom), kept only for signature compatibility with
-// app.go's call site. Alongside the string it returns one "topocore" hit
-// per visible glyph cell, 0-based relative to the visible window -- a
-// click switches to the CPU Map tab and moves its cursor there (see
-// App.handleBodyClick).
-func renderTopologyTab(s *model.Snapshot, w, budget, scroll int, zoom topoZoom) (string, []hit) {
-	inner, hits := topologyInnerForZoom(s, w, budget, zoom)
+// other scrollable panel in this package) already uses. Alongside the
+// string it returns one "topocore" hit per visible glyph cell, 0-based
+// relative to the visible window -- a click switches to the CPU Map tab
+// and moves its cursor there (see App.handleBodyClick).
+func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit) {
+	inner, hits := topologyInner(s, w)
 	lines := strings.Split(inner, "\n")
 	contentBudget := budget - 2
 	if contentBudget < 1 {
