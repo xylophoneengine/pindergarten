@@ -262,3 +262,83 @@ func TestProposeUnknownVM(t *testing.T) {
 		t.Fatal("Propose: want error, got nil")
 	}
 }
+
+// TestProposeWithinAutoMatchesPropose covers the wizard form's default
+// state: ProposeWithin(s, vm, -1, nil) (choose automatically, any
+// thread) must produce exactly what Propose itself does.
+func TestProposeWithinAutoMatchesPropose(t *testing.T) {
+	snap := buildSnap(t, nil, plainXML)
+
+	want, err := Propose(snap, "plain-vm")
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	got, err := ProposeWithin(snap, "plain-vm", -1, nil)
+	if err != nil {
+		t.Fatalf("ProposeWithin: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ProposeWithin(-1, nil) = %+v, want %+v (same as Propose)", got, want)
+	}
+}
+
+// TestProposeWithinExplicitNodeIgnoresGPU covers the form's "cycle to
+// another node" case: gpu-unknown's hostdev resolves to node 1, so plain
+// Propose would force node 1 -- but ProposeWithin with an explicit node
+// (0) must honor that choice outright, not silently override it back
+// onto the GPU's node.
+func TestProposeWithinExplicitNodeIgnoresGPU(t *testing.T) {
+	snap := buildSnap(t, map[string]int{"0000:81:00.0": 1}, gpuXML)
+
+	got, err := ProposeWithin(snap, "gpu-unknown", 0, nil)
+	if err != nil {
+		t.Fatalf("ProposeWithin: %v", err)
+	}
+	if got.Node != 0 {
+		t.Fatalf("Node = %d, want 0 (the explicit node, not the GPU's node 1)", got.Node)
+	}
+	if got.MemNode != 0 {
+		t.Errorf("MemNode = %d, want 0", got.MemNode)
+	}
+	for vcpu, threads := range got.Pins {
+		if th, ok := snap.Topo.Threads[threads[0]]; !ok || th.Node != 0 {
+			t.Errorf("Pins[%d] = %v, want a thread on node 0", vcpu, threads)
+		}
+	}
+}
+
+// TestProposeWithinAllowedRestrictsThreads covers the form's "within: L3
+// #k" filter: allowed = node1's core {2,6} only. A 2-vcpu VM must be
+// pinned to exactly threads 2 and 6; the same VM asking for more vcpus
+// than allowed contains must error rather than spill onto node1's other
+// (disallowed) core {3,7}.
+func TestProposeWithinAllowedRestrictsThreads(t *testing.T) {
+	snap := buildSnap(t, nil, plainXML) // vcpu 2, memory 1000
+
+	got, err := ProposeWithin(snap, "plain-vm", 1, []int{2, 6})
+	if err != nil {
+		t.Fatalf("ProposeWithin: %v", err)
+	}
+	if got.Node != 1 {
+		t.Fatalf("Node = %d, want 1", got.Node)
+	}
+	want := map[int][]int{0: {2}, 1: {6}}
+	if !reflect.DeepEqual(got.Pins, want) {
+		t.Errorf("Pins = %v, want %v (restricted to the allowed set)", got.Pins, want)
+	}
+
+	_, err = ProposeWithin(snap, "plain-vm", 1, []int{2})
+	if err == nil {
+		t.Fatal("ProposeWithin(allowed of 1 thread, 2 vcpus): want error, got nil")
+	}
+}
+
+// TestProposeWithinUnknownVM mirrors TestProposeUnknownVM for the new
+// entry point.
+func TestProposeWithinUnknownVM(t *testing.T) {
+	snap := buildSnap(t, nil, plainXML)
+
+	if _, err := ProposeWithin(snap, "nope", -1, nil); err == nil {
+		t.Fatal("ProposeWithin: want error, got nil")
+	}
+}
