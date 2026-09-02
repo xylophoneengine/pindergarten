@@ -26,7 +26,7 @@ type helpEntry struct {
 // the set of unique keys, not row count.
 var helpKeys = []helpEntry{
 	{"Global", "? / F1", "show/hide this help"},
-	{"Global", "1-5", "jump to tab: Overview, CPU Map, VMs, Pending, Backups"},
+	{"Global", "1-6", "jump to tab: Overview, CPU Map, VMs, Pending, Backups, Topology"},
 	{"Global", "Tab / Shift+Tab", "next / previous tab"},
 	{"Global", "mouse click", "tab bar: jump to that tab"},
 	{"Global", "e", "toggle edit mode (confirmed)"},
@@ -50,6 +50,9 @@ var helpKeys = []helpEntry{
 	{"Backups", "enter", "show a diff of the selected backup's XML against the domain's current XML"},
 	{"Backups", "R", "stage restoring the selected backup (edit mode)"},
 	{"Backups", "any key", "(diff shown) close the diff and return to the list"},
+
+	{"Topology", "up/down / j k", "scroll the drawing"},
+	{"Topology", "mouse click", "on a core box: jump to that core on the CPU Map tab"},
 
 	{"Set memory node", "digit 0-9", "stage a memory-node-only change to that node"},
 	{"Set memory node", "esc", "cancel"},

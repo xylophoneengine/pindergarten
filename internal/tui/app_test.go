@@ -287,8 +287,8 @@ func TestKeyBarAlwaysHintsTabSwitch(t *testing.T) {
 	for tab := 0; tab < len(tabNames); tab++ {
 		a.tab = tab
 		hint := a.renderStatusBar()
-		if !strings.Contains(hint, "[1-5]") || !strings.Contains(hint, "tabs") {
-			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[1-5] tabs\" hint", tab, hint)
+		if !strings.Contains(hint, "[1-6]") || !strings.Contains(hint, "tabs") {
+			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[1-6] tabs\" hint", tab, hint)
 		}
 		if !strings.Contains(hint, "[tab]") || !strings.Contains(hint, "next") {
 			t.Fatalf("tab %d: renderStatusBar() = %q, want the \"[tab] next\" hint", tab, hint)
@@ -331,8 +331,8 @@ func TestKeyBarStaysOneRowAtNarrowWidths(t *testing.T) {
 func TestKeyBarStartsWithHelpHint(t *testing.T) {
 	a := testApp(t, false)
 	hint := a.renderStatusBar()
-	if i, j := strings.Index(hint, "[?]"), strings.Index(hint, "[1-5]"); i < 0 || j < 0 || i > j {
-		t.Fatalf("renderStatusBar() = %q, want \"[?] help\" before \"[1-5] tabs\"", hint)
+	if i, j := strings.Index(hint, "[?]"), strings.Index(hint, "[1-6]"); i < 0 || j < 0 || i > j {
+		t.Fatalf("renderStatusBar() = %q, want \"[?] help\" before \"[1-6] tabs\"", hint)
 	}
 }
 

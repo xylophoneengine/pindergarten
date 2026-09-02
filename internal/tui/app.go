@@ -20,12 +20,12 @@ import (
 type ScanFn func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error)
 
 // numTabs is len(tabNames), fixed as a const so it can size tabRanges.
-const numTabs = 5
+const numTabs = 6
 
 // tabNames are the tabs, in order. The active one renders as a filled
 // accent pill (see renderTabs/tabActiveStyle); tests check which is
 // active via a.tab / activeTabName, not by grepping a text marker.
-var tabNames = [numTabs]string{"Overview", "CPU Map", "VMs", "Pending", "Backups"}
+var tabNames = [numTabs]string{"Overview", "CPU Map", "VMs", "Pending", "Backups", "Topology"}
 
 // confirm is a pending yes/no prompt. While set, Update handles only
 // y/n/esc; yes runs the confirmed action and returns its Cmd.
@@ -54,6 +54,7 @@ type App struct {
 	pendingSel     int    // selected row (queue.Ops) on the Pending tab
 	backupsSel     int    // selected row on the Backups tab
 	overviewScroll int    // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
+	topologyScroll int    // scroll offset into the Topology tab's drawing; up/down/wheel-driven
 	diffView       string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
 	help           bool   // toggled by '?'/F1; any key closes it again
 	editMode       bool
@@ -169,6 +170,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.clampVMSel()
 		a.clampOverviewScroll()
+		a.clampTopologyScroll()
 		if a.reopenVM != "" {
 			vm := a.reopenVM
 			a.reopenVM = ""
@@ -288,6 +290,9 @@ func (a *App) scrollActive(delta int) {
 			kt = tea.KeyUp
 		}
 		a.handleBackupsKey(tea.KeyMsg{Type: kt}, &a.backupsSel, a.backupsCount())
+	case 5:
+		a.topologyScroll += delta
+		a.clampTopologyScroll()
 	}
 }
 
@@ -304,6 +309,11 @@ func (a *App) handleBodyClick(msg tea.MouseMsg) {
 			case "backup":
 				a.backupsSel = h.index
 			case "core":
+				a.cursor = h.index
+			case "topocore":
+				// A click on the Topology tab's core box jumps to the
+				// same core on the CPU Map tab, per the brief.
+				a.tab = 1
 				a.cursor = h.index
 			}
 			return
@@ -384,7 +394,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.tab = (a.tab - 1 + len(tabNames)) % len(tabNames)
 		a.status = ""
 		return a, nil
-	case msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '5':
+	case msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '6':
 		if next := int(msg.Runes[0] - '1'); next != a.tab {
 			a.tab = next
 			a.status = ""
@@ -445,6 +455,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case a.tab == 4 && isRune(msg, 'R'):
 		a.status = a.stageRestore(a.backupsSel)
+		return a, nil
+	case a.tab == 5 && (msg.Type == tea.KeyUp || isRune(msg, 'k')):
+		a.topologyScroll--
+		a.clampTopologyScroll()
+		return a, nil
+	case a.tab == 5 && (msg.Type == tea.KeyDown || isRune(msg, 'j')):
+		a.topologyScroll++
+		a.clampTopologyScroll()
 		return a, nil
 	}
 	return a, nil
@@ -521,6 +539,27 @@ func (a *App) clampOverviewScroll() {
 	if max := maxStackedScroll(heights, cardsBudget); a.overviewScroll > max {
 		a.overviewScroll = max
 	}
+}
+
+// clampTopologyScroll re-clamps a.topologyScroll to the Topology tab's
+// actual valid range at the current width/body-budget, writing the
+// clamped value back -- same pattern as clampDiffScroll/
+// clampOverviewScroll, so an over-scrolled offset doesn't leave the next
+// up/wheel-up producing no visible change until several presses "catch
+// up" to render-time-only clamping.
+func (a *App) clampTopologyScroll() {
+	if a.snap == nil {
+		a.topologyScroll = 0
+		return
+	}
+	if a.topologyScroll < 0 {
+		a.topologyScroll = 0
+	}
+	projected := model.Project(a.snap, a.doms, a.queue.Ops)
+	block, _ := buildTopologyTab(projected, effectiveWidth(a.width))
+	total := lineCount(block)
+	_, _, _, _, chrome := a.renderChrome()
+	a.topologyScroll = clampScroll(a.topologyScroll, a.bodyBudget(chrome), total)
 }
 
 // selectedVM returns the VM at a.vmSel in the raw (unprojected) snapshot,
@@ -1041,6 +1080,8 @@ func (a *App) renderBody(budget int) (string, []hit) {
 			return a.renderDiffView(w, budget), nil
 		}
 		return a.renderBackupsTab(a.backupsSel, w, budget)
+	case 5:
+		return renderTopologyTab(projected, w, budget, a.topologyScroll)
 	}
 	return "", nil
 }
@@ -1132,7 +1173,7 @@ func (a *App) renderStatusBar() string {
 	// priority order, so the bar keeps to one row rather than word-
 	// wrapping (which could otherwise split a "[key] label" hint's own key
 	// from its label across two lines).
-	head := []keyHint{{"?", "help"}, {"1-5", "tabs"}, {"tab", "next"}}
+	head := []keyHint{{"?", "help"}, {"1-6", "tabs"}, {"tab", "next"}}
 	tail := []keyHint{{"r", "rescan"}, {"e", "edit"}, {"q", "quit"}}
 
 	var context []keyHint
@@ -1141,6 +1182,9 @@ func (a *App) renderStatusBar() string {
 	}
 	if a.tab == 1 {
 		context = append(context, keyHint{"arrows/hjkl", "move"})
+	}
+	if a.tab == 5 {
+		context = append(context, keyHint{"up/down", "scroll"})
 	}
 	if a.editMode && a.tab == 3 {
 		context = append(context, keyHint{"x", "remove"})
