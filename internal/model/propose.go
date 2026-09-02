@@ -73,7 +73,7 @@ func chooseNode(s *Snapshot, vm *VM) (int, []string) {
 	node := pickNode(s, vm)
 	return node, []string{fmt.Sprintf(
 		"Node %d was chosen because it has %d KiB free memory (%d KiB needed) and %d fully free core(s), the best of the host's NUMA nodes.",
-		node, FreeMemKiB(s, node), vm.MemoryKiB, fullyFreeCoreCount(s, node))}
+		node, FreeMemKiB(s, node), vm.MemoryKiB, FullyFreeCoreCount(s, node))}
 }
 
 // proposeOnNode is Propose/ProposeWithin's shared implementation once a
@@ -159,11 +159,11 @@ func gpuDevice(vm *VM) *Device {
 func pickNode(s *Snapshot, vm *VM) int {
 	best := s.Topo.Nodes[0].ID
 	bestMemOK := FreeMemKiB(s, best) >= vm.MemoryKiB
-	bestFreeCores := fullyFreeCoreCount(s, best)
+	bestFreeCores := FullyFreeCoreCount(s, best)
 
 	for _, n := range s.Topo.Nodes[1:] {
 		memOK := FreeMemKiB(s, n.ID) >= vm.MemoryKiB
-		freeCores := fullyFreeCoreCount(s, n.ID)
+		freeCores := FullyFreeCoreCount(s, n.ID)
 		if betterNode(memOK, freeCores, bestMemOK, bestFreeCores) {
 			best, bestMemOK, bestFreeCores = n.ID, memOK, freeCores
 		}
@@ -201,9 +201,11 @@ func FreeMemKiB(s *Snapshot, node int) uint64 {
 	return total - bound
 }
 
-// fullyFreeCoreCount counts node's cores where every thread is unused: zero
-// VMs and zero Pending claims.
-func fullyFreeCoreCount(s *Snapshot, node int) int {
+// FullyFreeCoreCount counts node's cores where every thread is unused: zero
+// VMs and zero Pending claims. Exported alongside FreeMemKiB: the wizard
+// form's per-node hint line ("free: N cores, M free") needs the same
+// ranking-time figure pickNode itself uses.
+func FullyFreeCoreCount(s *Snapshot, node int) int {
 	count := 0
 	for _, c := range s.Topo.Cores {
 		if c.Node == node && coreFullyFree(s, c) {

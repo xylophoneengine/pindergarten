@@ -82,6 +82,13 @@ var (
 	// flag badges.
 	warningStyle = lipgloss.NewStyle().Foreground(errColor)
 
+	// gpuWarningStyle is warningStyle's "loud" variant: bold on top of the
+	// same red, for the one warning in this app that gates a confirm
+	// (crossing a VM's GPU node -- the pin wizard form, the mem-node
+	// picker, and the Pending tab's row for a staged op that did) rather
+	// than being purely informational.
+	gpuWarningStyle = lipgloss.NewStyle().Bold(true).Foreground(errColor)
+
 	// barEmptyStyle renders the unfilled portion of a progress bar.
 	barEmptyStyle = lipgloss.NewStyle().Foreground(dimColor)
 

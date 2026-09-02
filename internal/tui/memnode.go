@@ -22,6 +22,14 @@ type memNodePicker struct {
 	stagedHash string
 	stagedXML  string          // domain XML at open time (same XML stagedHash hashes), for the drift screen's diff
 	snap       *model.Snapshot // for rendering each node's free memory
+
+	// pendingConfirm is the node id awaiting a second pick to confirm it
+	// crosses the VM's GPU node (see crossesGPU/App.pickMemNode) -- the
+	// same loud-warning, confirm-on-first-press softening the pin
+	// wizard's form uses for the same condition, since picking a node
+	// here is otherwise a single keypress with no separate "enter" to
+	// gate on. -1 means nothing is armed.
+	pendingConfirm int
 }
 
 // newMemNodePicker builds a picker for vm, computing gpuNode/pinNode from
@@ -29,14 +37,23 @@ type memNodePicker struct {
 // against.
 func newMemNodePicker(vm *model.VM, stagedHash, stagedXML string, snap *model.Snapshot) *memNodePicker {
 	return &memNodePicker{
-		vm:         vm.Name,
-		pins:       copyPinsMap(vm.Pins),
-		gpuNode:    vm.GPUNode(),
-		pinNode:    pinsNode(snap.Topo, vm.Pins),
-		stagedHash: stagedHash,
-		stagedXML:  stagedXML,
-		snap:       snap,
+		vm:             vm.Name,
+		pins:           copyPinsMap(vm.Pins),
+		gpuNode:        vm.GPUNode(),
+		pinNode:        pinsNode(snap.Topo, vm.Pins),
+		stagedHash:     stagedHash,
+		stagedXML:      stagedXML,
+		snap:           snap,
+		pendingConfirm: -1,
 	}
+}
+
+// crossesGPU reports whether picking node would cross the VM's GPU node
+// -- the one warning reason (of warning's two) that gets the loud,
+// confirm-on-first-press treatment; "differs from the current pin node"
+// stays a plain, immediate warning, since it isn't a locality concern.
+func (p *memNodePicker) crossesGPU(node int) bool {
+	return p.gpuNode != -1 && node != p.gpuNode
 }
 
 // pinsNode returns the single node pins all sit on, or -1 if pins is empty
@@ -79,7 +96,14 @@ func (p *memNodePicker) warning(node int) string {
 // buildOp stages an OpPin that only touches numatune: Pins carries the
 // VM's own current pins back in unchanged (SetPinning leaves cputune
 // untouched when Pins is empty, so an unpinned VM stays unpinned).
+// Summary gets the same " (crosses GPU node)" suffix the pin wizard's
+// form uses when crossesGPU(node), so the Pending tab (pendingCrossesGPU,
+// pending.go) can flag this op's row too.
 func (p *memNodePicker) buildOp(node int) model.PendingOp {
+	summary := fmt.Sprintf("%s: memory -> node %d (strict); vcpu pinning unchanged", p.vm, node)
+	if p.crossesGPU(node) {
+		summary += " (crosses GPU node)"
+	}
 	return model.PendingOp{
 		Kind:       model.OpPin,
 		VM:         p.vm,
@@ -87,7 +111,7 @@ func (p *memNodePicker) buildOp(node int) model.PendingOp {
 		MemNode:    node,
 		StagedHash: p.stagedHash,
 		StagedXML:  p.stagedXML,
-		Summary:    fmt.Sprintf("%s: memory -> node %d (strict); vcpu pinning unchanged", p.vm, node),
+		Summary:    summary,
 	}
 }
 
@@ -178,11 +202,23 @@ func (a *App) handleMemNodeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // pickMemNode stages a memory-node op for the open picker's VM if node
-// names an existing topology node (appending its (non-blocking) warning
-// line, styled, to the status), closing the picker either way once staged.
+// names an existing topology node, appending its (non-blocking) plain
+// warning line, styled, to the status. A pick that crosses the VM's GPU
+// node is never blocked either, but does need a second pick of the same
+// node to confirm -- the first just arms pendingConfirm and shows a
+// loud warning explaining why nothing staged yet, mirroring the pin
+// wizard form's own confirm-on-first-enter softening; the mouse click
+// and the digit key share this same gate, since they both funnel
+// through here. Closes the picker once something actually stages.
 // Shared by the digit-key handler and the node-line mouse click.
 func (a *App) pickMemNode(node int) {
 	if !a.memPicker.hasNode(node) {
+		return
+	}
+	if a.memPicker.crossesGPU(node) && a.memPicker.pendingConfirm != node {
+		a.memPicker.pendingConfirm = node
+		a.status = gpuWarningStyle.Render(fmt.Sprintf(
+			"GPU is on node %d; node %d crosses it -- pick node %d again to confirm", a.memPicker.gpuNode, node, node))
 		return
 	}
 	op := a.memPicker.buildOp(node)

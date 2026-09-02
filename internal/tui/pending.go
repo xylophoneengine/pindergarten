@@ -441,13 +441,24 @@ func pendingOpDetail(q model.Queue, sel int) string {
 		op.Summary, hash)
 }
 
+// pendingCrossesGPU reports whether op's Summary carries the pin
+// wizard's/mem-node picker's " (crosses GPU node)" suffix -- the marker
+// string is the one place that condition is recorded (PendingOp has no
+// dedicated field for it), so this is the one place every caller that
+// needs to know checks it.
+func pendingCrossesGPU(op model.PendingOp) bool {
+	return strings.Contains(op.Summary, "(crosses GPU node)")
+}
+
 // renderPendingTab renders the Pending tab: a numbered list panel of q's op
-// summaries (the row at sel background-highlighted, rows scrolled to keep
-// sel visible within budget), and a detail panel for the selected op below
-// it, or beside it when wide. Alongside the string it returns one
-// "pending" hit per visible row, bounded to the list panel's inner width
-// (so a click in a neighboring detail panel can't land on it), 0-based
-// relative to the list's own top-left corner.
+// summaries (the row at sel background-highlighted; one that crosses the
+// VM's GPU node -- pendingCrossesGPU -- rendered in gpuWarningStyle
+// instead, unless it's also sel, in which case the selection highlight
+// wins; rows scrolled to keep sel visible within budget), and a detail
+// panel for the selected op below it, or beside it when wide. Alongside
+// the string it returns one "pending" hit per visible row, bounded to
+// the list panel's inner width (so a click in a neighboring detail panel
+// can't land on it), 0-based relative to the list's own top-left corner.
 func renderPendingTab(q model.Queue, sel, w, budget int) (string, []hit) {
 	primaryW, secondaryW, sideBySide := splitBodyWidth(w)
 
@@ -462,8 +473,11 @@ func renderPendingTab(q model.Queue, sel, w, budget int) (string, []hit) {
 		lines := make([]string, len(q.Ops))
 		for i, op := range q.Ops {
 			line := fmt.Sprintf("%d. %s", i+1, op.Summary)
-			if i == sel {
+			switch {
+			case i == sel:
 				line = selectedRowStyle.Render(line)
+			case pendingCrossesGPU(op):
+				line = gpuWarningStyle.Render(line)
 			}
 			lines[i] = line
 		}

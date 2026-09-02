@@ -238,6 +238,11 @@ func TestMemNodeEscCancels(t *testing.T) {
 // TestMemNodeWarnsOnGPUMismatch covers the non-blocking GPU-locality
 // warning: vm2XML's hostdev resolves to node 1 (vm2PCINode), so picking
 // node 0 must stage successfully but surface a warning.
+// TestMemNodeWarnsOnGPUMismatch covers the amendment folded into the pin
+// wizard v2 round: picking a node that crosses the VM's GPU node is
+// still never blocked outright, but -- like the wizard form's own
+// confirm-on-first-enter -- the first press only arms a loud warning;
+// the same digit pressed again actually stages.
 func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
@@ -250,13 +255,29 @@ func TestMemNodeWarnsOnGPUMismatch(t *testing.T) {
 	}
 	sendKey(a, '0')
 
-	if a.queue.Len() != 1 {
-		t.Fatalf("queue.Len() = %d, want 1 (warning must not block staging)", a.queue.Len())
+	if a.memPicker == nil {
+		t.Fatal("picker closed on the first press crossing the GPU node, want it armed instead")
 	}
-	if a.queue.Ops[0].MemNode != 0 {
-		t.Fatalf("op.MemNode = %d, want 0", a.queue.Ops[0].MemNode)
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after the first press, want 0 (not staged yet)", a.queue.Len())
 	}
 	if !strings.Contains(a.status, "GPU is on node 1") {
 		t.Fatalf("status = %q, want the GPU-locality warning", a.status)
+	}
+
+	sendKey(a, '0') // second press of the same node: confirms
+
+	if a.memPicker != nil {
+		t.Fatal("picker still open after the confirming second press")
+	}
+	if a.queue.Len() != 1 {
+		t.Fatalf("queue.Len() = %d, want 1 (warning must not block staging)", a.queue.Len())
+	}
+	op := a.queue.Ops[0]
+	if op.MemNode != 0 {
+		t.Fatalf("op.MemNode = %d, want 0", op.MemNode)
+	}
+	if !strings.Contains(op.Summary, "crosses GPU node") {
+		t.Fatalf("op.Summary = %q, want the crosses-GPU-node suffix", op.Summary)
 	}
 }

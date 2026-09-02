@@ -250,11 +250,14 @@ func TestWizardEscCancels(t *testing.T) {
 	}
 }
 
-// TestWizardManualCount drives the manual-adjust screen: an initial toggle
-// that empties the selection must be refused with a running-count warning;
-// selecting the node's other core (exactly 2 threads, matching plain-vm's
-// VCPUs) must then stage successfully.
-func TestWizardManualCount(t *testing.T) {
+// TestWizardManualRoundTrip drives the manual grid as an alternative
+// threads-field editor: opening it starts with the form's current
+// threads pre-selected, an edit there (deselect core 0, select core 1
+// instead) writes back into threadsText as a cpulist on enter, and
+// returns to the form screen -- not staged outright, since any count is
+// accepted by the manual screen itself; the form's own validation is
+// what actually gates staging (see TestWizardFormInvalidThreadsBlocksEnter).
+func TestWizardManualRoundTrip(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
 	enterEdit(a)
@@ -272,52 +275,51 @@ func TestWizardManualCount(t *testing.T) {
 	if a.wizard.screen != manualScreen {
 		t.Fatal("'m' did not switch to the manual screen")
 	}
+	if len(a.wizard.selected) != 2 {
+		t.Fatalf("manual screen selected = %v, want the form's 2 current threads pre-selected", a.wizard.selected)
+	}
 
-	// Cursor starts at core 0 (node 0's first core), which is exactly where
-	// the proposal's 2 threads (0 and 4, both siblings on that core) live.
-	// Toggling it empties the selection.
+	// Cursor starts at core 0 (threads 0,4); toggle it off, move to core 1
+	// (threads 1,5) and toggle it on -- still exactly 2 threads overall.
+	sendKeyType(a, tea.KeySpace)
+	sendKeyType(a, tea.KeyRight)
 	sendKeyType(a, tea.KeySpace)
 	sendKeyType(a, tea.KeyEnter)
 
 	if a.wizard == nil {
-		t.Fatal("wizard closed after an incomplete manual selection, want it to stay open")
+		t.Fatal("wizard closed after accepting the manual selection, want it back on the form")
 	}
-	if !strings.Contains(a.wizard.status, "select exactly 2 threads (0 selected)") {
-		t.Fatalf("wizard.status = %q, want the running-count warning", a.wizard.status)
+	if a.wizard.screen != formScreen {
+		t.Fatal("enter on the manual screen did not return to the form")
+	}
+	if a.wizard.threadsText != "1,5" {
+		t.Fatalf("threadsText = %q, want %q (the manual selection, written back as a cpulist)", a.wizard.threadsText, "1,5")
 	}
 
-	sendKeyType(a, tea.KeyRight) // move to core 1 (threads 1,5)
-	sendKeyType(a, tea.KeySpace)
-	sendKeyType(a, tea.KeyEnter)
-
+	sendKeyType(a, tea.KeyEnter) // now stage from the form
 	if a.wizard != nil {
-		t.Fatal("wizard still open after a correctly-sized manual selection")
-	}
-	if a.queue.Len() != 1 {
-		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
+		t.Fatal("wizard still open after staging from the form")
 	}
 	op := a.queue.Ops[0]
-	if op.Kind != model.OpPin {
-		t.Fatalf("op.Kind = %v, want OpPin", op.Kind)
-	}
 	if got := op.Pins[0]; len(got) != 1 || got[0] != 1 {
 		t.Fatalf("op.Pins[0] = %v, want [1]", got)
 	}
 	if got := op.Pins[1]; len(got) != 1 || got[0] != 5 {
 		t.Fatalf("op.Pins[1] = %v, want [5]", got)
 	}
-	if op.MemNode != 0 {
-		t.Fatalf("op.MemNode = %d, want 0", op.MemNode)
-	}
 }
 
-// TestWizardManualCycleNodeWarnsAndStages covers the 'n' node-override key
-// on the manual screen: vm2's hostdev forces the proposal onto node 1, so
-// cycling away to node 0 must reset the selection, show the crosses-GPU
-// warning, and (once threads are picked and accepted) land the staged op
-// on node 0 with the warning folded into Summary -- proving the override
-// is soft (never blocked), matching the design spec's locality rule.
-func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
+// TestWizardFormCyclesNodeAndWarnsOnGPUCross covers the form's node field
+// (left/right cycles, re-proposing within the new node) and the loud,
+// confirm-on-first-enter GPU-crossing softening: vm2's hostdev forces the
+// proposal onto node 1; cycling the node field to 0 must re-propose there
+// (a fresh, valid 2-thread selection on node 0) and show the crosses-GPU
+// warning. Pressing enter there must NOT stage on the first press (only
+// arm the confirmation) but must on the second, landing the op on node 0
+// with the Summary's "crosses GPU node" suffix -- proving the override is
+// soft (never blocked outright), matching the design spec's locality
+// rule, while still requiring a deliberate second confirmation.
+func TestWizardFormCyclesNodeAndWarnsOnGPUCross(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
 	runScan(t, a)
 	enterEdit(a)
@@ -330,21 +332,16 @@ func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
 	if a.wizard.proposal.Node != 1 {
 		t.Fatalf("proposal.Node = %d, want 1 (forced by vm2's hostdev)", a.wizard.proposal.Node)
 	}
-
-	sendKey(a, 'm')
-	if a.wizard.screen != manualScreen {
-		t.Fatal("'m' did not switch to the manual screen")
-	}
-	if a.wizard.node != 1 {
-		t.Fatalf("wizard.node = %d, want 1 before cycling", a.wizard.node)
+	if a.wizard.field != fieldNode {
+		t.Fatalf("field = %d, want fieldNode focused by default", a.wizard.field)
 	}
 
-	sendKey(a, 'n')
+	sendKeyType(a, tea.KeyLeft) // cycle node 1 -> node 0 (wraps)
 	if a.wizard.node != 0 {
-		t.Fatalf("wizard.node = %d, want 0 after cycling away from node 1", a.wizard.node)
+		t.Fatalf("node = %d, want 0 after cycling", a.wizard.node)
 	}
-	if len(a.wizard.selected) != 0 {
-		t.Fatalf("wizard.selected = %v, want reset to empty after cycling node", a.wizard.selected)
+	if len(a.wizard.threadsText) == 0 {
+		t.Fatal("threadsText empty after re-propose, want a fresh 2-thread selection on node 0")
 	}
 
 	view, _ := a.wizard.view(200, 40)
@@ -352,11 +349,20 @@ func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
 		t.Fatalf("view() = %q, want the crosses-GPU-node warning", view)
 	}
 
-	sendKeyType(a, tea.KeySpace) // core 0 on node 0: threads 0,4 (exactly vcpus()==2)
-	sendKeyType(a, tea.KeyEnter)
+	sendKeyType(a, tea.KeyEnter) // first enter: must only arm, not stage
+	if a.wizard == nil {
+		t.Fatal("wizard closed on the first enter while crossing the GPU node, want it armed instead")
+	}
+	if !a.wizard.crossConfirmed {
+		t.Fatal("crossConfirmed = false after the first enter, want it armed")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d after the first enter, want 0 (not staged yet)", a.queue.Len())
+	}
 
+	sendKeyType(a, tea.KeyEnter) // second enter: now stages
 	if a.wizard != nil {
-		t.Fatal("wizard still open after a correctly-sized manual selection")
+		t.Fatal("wizard still open after the confirming second enter")
 	}
 	if a.queue.Len() != 1 {
 		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
@@ -370,29 +376,210 @@ func TestWizardManualCycleNodeWarnsAndStages(t *testing.T) {
 	}
 }
 
-// TestWizardManualEscResetsNode covers the esc-from-manual invariant: the
-// proposal screen's Pins are specific thread IDs on the proposal's own
-// node, so cycling in manual and then escaping without staging must not
-// leave the wizard's node pointing anywhere but back at the proposal's.
-func TestWizardManualEscResetsNode(t *testing.T) {
-	a := wizardTestApp(t, map[string]string{"vm2": vm2XML}, vm2PCINode)
+// fourVCPUWizardXML is a plain 4-vcpu VM with no pins/devices, sized to
+// fit inside realHostTopo's L3 #0 domain (12 threads) for
+// TestWizardFormWithinFilterRestrictsThreads.
+const fourVCPUWizardXML = `<domain type='kvm'>
+  <name>four-vcpu</name>
+  <uuid>2fdd4bd1-6f52-4a3c-9e57-1f6a1d6f3b30</uuid>
+  <memory unit='KiB'>1000</memory>
+  <vcpu>4</vcpu>
+  <os><type arch='x86_64'>hvm</type></os>
+  <devices/>
+</domain>`
+
+// TestWizardFormWithinFilterRestrictsThreads covers the "within" field's
+// L3-domain filter (cycling it re-proposes restricted to just that
+// domain's threads) on realHostTopo (2 L3 domains: #0 threads
+// 0-5,12-17, #1 threads 6-11,18-23).
+func TestWizardFormWithinFilterRestrictsThreads(t *testing.T) {
+	topo := realHostTopo()
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"four-vcpu": fourVCPUWizardXML}}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(topo, doms, noNode), domsMap, nil
+	}
+	a := New(f, scan, t.TempDir(), "test")
 	runScan(t, a)
 	enterEdit(a)
 	a.tab = tabVMs
 
 	sendKey(a, 'p')
-	sendKey(a, 'm')
-	sendKey(a, 'n')
-	if a.wizard.node == a.wizard.proposal.Node {
-		t.Fatal("test setup: cycling did not change the node")
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	a.wizard.field = fieldWithin
+	sendKeyType(a, tea.KeyRight) // any -> L3 #0 (threads 0-5,12-17)
+
+	if a.wizard.within != 0 {
+		t.Fatalf("within = %d, want 0 (L3 #0)", a.wizard.within)
+	}
+	ids, errMsg := a.wizard.parseThreads()
+	if errMsg != "" {
+		t.Fatalf("parseThreads() error = %q, want a valid 4-thread selection within L3 #0", errMsg)
+	}
+	l3Zero := threadSet([]int{0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17})
+	for _, id := range ids {
+		if !l3Zero[id] {
+			t.Fatalf("threads = %v, want all within L3 #0 (0-5,12-17)", ids)
+		}
+	}
+}
+
+// TestWizardFormOpensWithProposalDefaults covers the form's own defaults:
+// node = Propose's node, threadsText = Propose's own threads (formatted
+// as a cpulist), field starts on fieldNode, within on "any", memory node
+// on "same as node".
+func TestWizardFormOpensWithProposalDefaults(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatalf("status = %q, wizard did not open", a.status)
+	}
+	w := a.wizard
+	if w.node != w.proposal.Node {
+		t.Fatalf("node = %d, want proposal.Node %d", w.node, w.proposal.Node)
+	}
+	if w.field != fieldNode {
+		t.Fatalf("field = %d, want fieldNode", w.field)
+	}
+	if w.within != -1 {
+		t.Fatalf("within = %d, want -1 (any)", w.within)
+	}
+	if w.memSel != -2 {
+		t.Fatalf("memSel = %d, want -2 (same as node)", w.memSel)
+	}
+	want := formatCPURanges(assignedThreads(w.proposal.Pins))
+	if w.threadsText != want {
+		t.Fatalf("threadsText = %q, want %q (the proposal's own threads)", w.threadsText, want)
+	}
+}
+
+// TestWizardFormInvalidThreadsBlocksEnter covers live validation: a
+// threads field with the wrong count never stages, and the resulting
+// error message ("N threads given, need M") shows in the view.
+func TestWizardFormInvalidThreadsBlocksEnter(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	a.wizard.field = fieldThreads
+	a.wizard.threadsText = "0"
+	a.wizard.threadsCaret = len(a.wizard.threadsText)
+
+	sendKeyType(a, tea.KeyEnter)
+	if a.wizard == nil {
+		t.Fatal("wizard closed after enter with an invalid thread count, want it to stay open")
+	}
+	if a.queue.Len() != 0 {
+		t.Fatalf("queue.Len() = %d, want 0 (an invalid list must not stage)", a.queue.Len())
+	}
+	view, _ := a.wizard.view(90, 30)
+	if !strings.Contains(view, "1 threads given, need 2") {
+		t.Fatalf("view() = %q, want the count-mismatch error message", view)
+	}
+}
+
+// TestWizardFormLeaveMemoryLeavesMemNode covers the "memory node" field's
+// "leave" option (cycled to, wrapping past every node id): the staged op
+// gets MemNode -1 (SetPinning's own "leave numatune untouched" sentinel)
+// and the summary reads "memory -> unchanged".
+func TestWizardFormLeaveMemoryLeavesMemNode(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	a.wizard.field = fieldMemNode
+	sendKeyType(a, tea.KeyLeft) // "same as node" is first; left wraps to "leave", the last option
+
+	if a.wizard.memSel != -1 {
+		t.Fatalf("memSel = %d, want -1 (leave)", a.wizard.memSel)
 	}
 
-	sendKeyType(a, tea.KeyEsc)
-	if a.wizard.screen != proposalScreen {
-		t.Fatal("esc did not return to the proposal screen")
+	sendKeyType(a, tea.KeyEnter)
+	if a.wizard != nil {
+		t.Fatal("wizard still open after staging")
 	}
-	if a.wizard.node != a.wizard.proposal.Node {
-		t.Fatalf("wizard.node = %d, want reset to proposal.Node %d", a.wizard.node, a.wizard.proposal.Node)
+	op := a.queue.Ops[0]
+	if op.MemNode != -1 {
+		t.Fatalf("op.MemNode = %d, want -1 (leave)", op.MemNode)
+	}
+	if !strings.Contains(op.Summary, "memory -> unchanged") {
+		t.Fatalf("op.Summary = %q, want \"memory -> unchanged\"", op.Summary)
+	}
+}
+
+// TestWizardFormFitsPopupAtExtremeSizes covers the width/height
+// invariant: at 80x16 (cramped) and 250x95 (huge) with a 2-node/200-
+// core-per-node fixture (so the preview grid has far more rows than any
+// budget could show), the form panel must never exceed the dialog width
+// (dw) or the body budget's line count -- the preview windows/scrolls
+// itself to fit rather than overflow the popup.
+func TestWizardFormFitsPopupAtExtremeSizes(t *testing.T) {
+	topo := manyNodeManyCoresTopo(2, 200)
+	f := &libvirtio.Fake{ConnURI: "test:///x", XML: map[string]string{"plain-vm": plainVMXML}}
+	scan := func() (*model.Snapshot, map[string]*libvirtio.DomainConfig, error) {
+		doms, err := f.ListDomains()
+		if err != nil {
+			return nil, nil, err
+		}
+		domsMap := make(map[string]*libvirtio.DomainConfig, len(doms))
+		for _, d := range doms {
+			domsMap[d.Config.Name] = d.Config
+		}
+		return model.Build(topo, doms, noNode), domsMap, nil
+	}
+	a := New(f, scan, t.TempDir(), "test")
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	for _, sz := range []struct{ w, h int }{{80, 16}, {250, 95}} {
+		a.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		sendKey(a, 'p')
+		if a.wizard == nil {
+			t.Fatalf("width %d height %d: wizard did not open (status %q)", sz.w, sz.h, a.status)
+		}
+
+		_, _, _, _, chrome := a.renderChrome()
+		budget := a.bodyBudget(chrome)
+		dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+		panel, _ := a.wizard.view(dw, budget)
+		lines := strings.Split(panel, "\n")
+		if len(lines) > budget {
+			t.Fatalf("width %d height %d: panel has %d lines, want <= %d (budget)", sz.w, sz.h, len(lines), budget)
+		}
+		for i, l := range lines {
+			if lw := lipgloss.Width(l); lw > dw {
+				t.Fatalf("width %d height %d: line %d width = %d, want <= %d (dw)", sz.w, sz.h, i, lw, dw)
+			}
+		}
+
+		sendKeyType(a, tea.KeyEsc)
+		if a.wizard != nil {
+			t.Fatalf("width %d height %d: wizard still open after esc", sz.w, sz.h)
+		}
 	}
 }
 
@@ -648,33 +835,6 @@ func TestWizardProposalShowsOwnPinsAsFree(t *testing.T) {
 	}
 }
 
-// TestWizardViewRendersRationale covers wizard.view's proposal-screen
-// rationale rendering (0% covered before this fix round).
-func TestWizardViewRendersRationale(t *testing.T) {
-	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
-	runScan(t, a)
-	enterEdit(a)
-	a.tab = tabVMs
-
-	sendKey(a, 'p')
-	if a.wizard == nil {
-		t.Fatalf("status = %q, wizard did not open", a.status)
-	}
-	if len(a.wizard.proposal.Rationale) == 0 {
-		t.Fatal("proposal.Rationale is empty, test fixture needs at least one sentence")
-	}
-
-	view, _ := a.wizard.view(200, 40)
-	// The dialog is capped at dialogMaxWidth regardless of the terminal
-	// width, so a long sentence word-wraps across lines even at width 200
-	// -- check a short, guaranteed-single-line prefix rather than the
-	// whole (possibly-wrapped) sentence.
-	prefix := a.wizard.proposal.Rationale[0][:30]
-	if !strings.Contains(view, prefix) {
-		t.Fatalf("wizard.view() = %q, want the first Rationale sentence (prefix %q)", view, prefix)
-	}
-}
-
 // TestWizardViewRendersWarning saturates every thread of node 1 with vm1's
 // pending pin, then opens the wizard for vm2 (forced onto node 1 by its
 // hostdev) so Propose has to share threads and returns a Warning. Covers
@@ -704,9 +864,10 @@ func TestWizardViewRendersWarning(t *testing.T) {
 	}
 
 	view, _ := a.wizard.view(200, 40)
-	// See TestWizardViewRendersRationale: the dialog is capped at
-	// dialogMaxWidth regardless of the terminal width, so check a
-	// guaranteed-single-line prefix rather than the whole sentence.
+	// The dialog is capped at dialogMaxWidth regardless of the terminal
+	// width, so a long sentence word-wraps across lines even at width 200
+	// -- check a short, guaranteed-single-line prefix rather than the
+	// whole (possibly-wrapped) sentence.
 	prefix := a.wizard.proposal.Warnings[0][:30]
 	if !strings.Contains(view, prefix) {
 		t.Fatalf("wizard.view() = %q, want the Warning sentence (prefix %q)", view, prefix)

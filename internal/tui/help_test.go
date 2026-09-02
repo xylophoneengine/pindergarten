@@ -103,17 +103,18 @@ var (
 // teaKeyNonKeyIdents just below for the identifiers this regex matches
 // that aren't a key at all and so are deliberately exempt.
 var teaKeyMarkers = map[string][]string{
-	"Up":       {"up/down", "arrows"},
-	"Down":     {"up/down", "arrows"},
-	"Left":     {"arrows"},
-	"Right":    {"arrows"},
-	"Enter":    {"enter"},
-	"Esc":      {"esc"},
-	"Tab":      {"Tab"},
-	"ShiftTab": {"Shift+Tab"},
-	"Space":    {"space"},
-	"F1":       {"F1"},
-	"CtrlC":    {"ctrl+c"},
+	"Up":        {"up/down", "arrows"},
+	"Down":      {"up/down", "arrows"},
+	"Left":      {"arrows"},
+	"Right":     {"arrows"},
+	"Enter":     {"enter"},
+	"Esc":       {"esc"},
+	"Tab":       {"Tab"},
+	"ShiftTab":  {"Shift+Tab"},
+	"Space":     {"space"},
+	"F1":        {"F1"},
+	"CtrlC":     {"ctrl+c"},
+	"Backspace": {"backspace"},
 }
 
 // teaKeyNonKeyIdents are tea.Key* identifiers the `tea\.Key(\w+)` regex

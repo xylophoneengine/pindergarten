@@ -9,6 +9,8 @@ runs as a single binary over SSH, works with mouse and keyboard, and never
 trusts its own bookkeeping: every view is built from a fresh scan of
 reality.
 
+Built with help from Claude (Anthropic).
+
 ## Install / build
 
 Build dependencies (the libvirt cgo bindings need the development headers):
@@ -130,20 +132,24 @@ Set memory node (after `n`):
 
 | Key | Action |
 |-----|--------|
-| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node |
+| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node needs the same digit again to confirm |
 | `esc` | cancel |
 
-Pin wizard (after `p`):
+Pin wizard (after `p`): a form (node, within, threads, memory node, a
+live preview) plus the manual grid as an alternative threads editor.
 
 | Key | Screen | Action |
 |-----|--------|--------|
-| `enter` | proposal | accept the proposed pin placement |
-| `m` | proposal | switch to manual thread selection |
-| `esc` | proposal / manual | cancel back out (to VMs tab / to proposal, resetting any node override) |
+| up/down / `j k` | form | move between the node/within/threads/memory node fields |
+| left/right | form | cycle the focused field's value, or move the caret within the threads field |
+| backspace | form, threads field | delete the character before the caret |
+| `a` | form | re-fill the threads field from the current proposal |
+| `m` | form | open the manual grid, an alternative threads editor |
+| `enter` | form | stage, once the threads field is valid; a placement that crosses the VM's GPU node needs a second `enter` to confirm, never blocked outright |
+| `esc` | form / manual | cancel back out |
 | `h`/`l`/`j`/`k`, up/down | manual | move the cursor across the node's cores |
-| `n` | manual | cycle the target node; warns, but never blocks, if it now differs from the VM's GPU node |
 | `space` | manual | toggle the thread pair under the cursor |
-| `enter` | manual | accept the manual selection, once it matches the VM's vCPU count |
+| `enter` | manual | write the selection into the form's threads field and return to it |
 
 Apply review and drift (after `a`, while applying):
 
