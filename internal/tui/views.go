@@ -641,9 +641,11 @@ func cpuMapNodeGrid(s *model.Snapshot, node int, cursor int, kind string, perRow
 			// would spill past the row's own width -- same rule
 			// renderTopoCoreGrid's ruler row uses for an id that doesn't
 			// fit -- rather than letting panelH's own truncateLines cut it
-			// short with "..".
+			// short with "..". Likewise skipped when the previous label
+			// still occupies this column (two domains starting within a
+			// few cells of each other), so labels never run together.
 			label := fmt.Sprintf("L3 #%d", core.L3)
-			if x+len(label) <= rowWidth {
+			if x+len(label) <= rowWidth && (x == 0 || labelLine.Len() < x) {
 				for labelLine.Len() < x {
 					labelLine.WriteString(" ")
 				}

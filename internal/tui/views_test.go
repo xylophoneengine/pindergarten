@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -713,6 +714,23 @@ func TestCPUMapL3LabelNeverOverflowsRow(t *testing.T) {
 		out, _ := renderCPUMapTab(s, 0, tc.w, 60)
 		if strings.Contains(out, "..") {
 			t.Fatalf("%s at width %d: renderCPUMapTab() = %q, want no \"..\" truncation artifact", tc.name, tc.w, out)
+		}
+	}
+}
+
+// TestCPUMapL3LabelsNeverCollide: two domains starting within a few cells
+// of each other on one row must not have their labels run together
+// ("L3 #2L3 #3"); the second label is skipped and the "|" fence still
+// marks the boundary. Sweeps every width the layout supports.
+func TestCPUMapL3LabelsNeverCollide(t *testing.T) {
+	collision := regexp.MustCompile(`L3 #[0-9]+L3 #`)
+	for _, topo := range []*hostinfo.Topology{epycHostTopo(), noSMTL3Topo(128, 4)} {
+		s := &model.Snapshot{Topo: topo, Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+		for w := 80; w <= 250; w++ {
+			out, _ := renderCPUMapTab(s, 0, w, 60)
+			if m := collision.FindString(out); m != "" {
+				t.Fatalf("width %d: labels run together (%q)", w, m)
+			}
 		}
 	}
 }
