@@ -49,15 +49,16 @@ type App struct {
 	version   string
 
 	tab            int
-	cursor         int    // selected core index (s.Topo.Cores) on the CPU Map tab
-	vmSel          int    // selected row (s.VMs) on the VMs tab
-	pendingSel     int    // selected row (queue.Ops) on the Pending tab
-	backupsSel     int    // selected row on the Backups tab
-	overviewScroll int    // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
-	topologyScroll int    // scroll offset into the Topology tab's drawing; up/down/wheel-driven
-	diffView       string // set by 'enter' on the Backups tab; non-empty shows it instead of the list
-	help           bool   // toggled by '?'/F1; any other key closes it again
-	helpScroll     int    // scroll offset into the help overlay; up/down/wheel-driven, reset on close
+	cursor         int      // selected core index (s.Topo.Cores) on the CPU Map tab
+	vmSel          int      // selected row (s.VMs) on the VMs tab
+	pendingSel     int      // selected row (queue.Ops) on the Pending tab
+	backupsSel     int      // selected row on the Backups tab
+	overviewScroll int      // first NUMA node card shown on the Overview tab, when stacked; up/down/wheel-driven
+	topologyScroll int      // scroll offset into the Topology tab's drawing; up/down/wheel-driven
+	topoZoom       topoZoom // Topology tab's detail-level override; 'z' cycles auto -> detailed -> compact -> auto
+	diffView       string   // set by 'enter' on the Backups tab; non-empty shows it instead of the list
+	help           bool     // toggled by '?'/F1; any other key closes it again
+	helpScroll     int      // scroll offset into the help overlay; up/down/wheel-driven, reset on close
 	editMode       bool
 	queue          model.Queue
 	snap           *model.Snapshot
@@ -479,6 +480,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.topologyScroll++
 		a.clampTopologyScroll()
 		return a, nil
+	case a.tab == 5 && isRune(msg, 'z'):
+		a.topoZoom = (a.topoZoom + 1) % 3 // auto -> detailed -> compact -> auto
+		a.clampTopologyScroll()
+		return a, nil
 	}
 	return a, nil
 }
@@ -571,10 +576,11 @@ func (a *App) clampTopologyScroll() {
 		a.topologyScroll = 0
 	}
 	projected := model.Project(a.snap, a.doms, a.queue.Ops)
-	block, _ := buildTopologyTab(projected, effectiveWidth(a.width))
-	total := lineCount(block)
 	_, _, _, _, chrome := a.renderChrome()
-	a.topologyScroll = clampScroll(a.topologyScroll, a.bodyBudget(chrome), total)
+	budget := a.bodyBudget(chrome)
+	inner, _ := topologyInnerForZoom(projected, effectiveWidth(a.width), budget, a.topoZoom)
+	total := lineCount(inner) + 2 // the machine box's own border rows, added back by renderTopologyTab
+	a.topologyScroll = clampScroll(a.topologyScroll, budget, total)
 }
 
 // selectedVM returns the VM at a.vmSel in the raw (unprojected) snapshot,
@@ -1117,7 +1123,7 @@ func (a *App) renderBody(budget int) (string, []hit) {
 		}
 		return a.renderBackupsTab(a.backupsSel, w, budget)
 	case 5:
-		return renderTopologyTab(projected, w, budget, a.topologyScroll)
+		return renderTopologyTab(projected, w, budget, a.topologyScroll, a.topoZoom)
 	}
 	return "", nil
 }
@@ -1220,7 +1226,7 @@ func (a *App) renderStatusBar() string {
 		context = append(context, keyHint{"arrows/hjkl", "move"})
 	}
 	if a.tab == 5 {
-		context = append(context, keyHint{"up/down", "scroll"})
+		context = append(context, keyHint{"up/down", "scroll"}, keyHint{"z", "zoom"})
 	}
 	if a.editMode && a.tab == 3 {
 		context = append(context, keyHint{"x", "remove"})

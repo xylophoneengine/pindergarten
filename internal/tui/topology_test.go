@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/libvirtio"
@@ -166,7 +167,7 @@ func TestTopologyWidthInvariant(t *testing.T) {
 func TestTopologyFillsAndScrolls(t *testing.T) {
 	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
 
-	body, _ := renderTopologyTab(s, 120, 30, 0)
+	body, _ := renderTopologyTab(s, 120, 30, 0, topoZoomDetailed)
 	if n := strings.Count(body, "\n") + 1; n != 30 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 30 (budget)", n)
 	}
@@ -176,8 +177,8 @@ func TestTopologyFillsAndScrolls(t *testing.T) {
 	if total <= 3 {
 		t.Skip("fixture's drawing isn't tall enough to exercise scrolling at this width")
 	}
-	scrolled, _ := renderTopologyTab(s, 120, 3, total-3)
-	unscrolled, _ := renderTopologyTab(s, 120, 3, 0)
+	scrolled, _ := renderTopologyTab(s, 120, 3, total-3, topoZoomDetailed)
+	unscrolled, _ := renderTopologyTab(s, 120, 3, 0, topoZoomDetailed)
 	if scrolled == unscrolled {
 		t.Fatalf("renderTopologyTab() at scroll %d == scroll 0, want scrolling to actually move the window", total-3)
 	}
@@ -192,7 +193,7 @@ func TestTopologyFillsAndScrolls(t *testing.T) {
 // a blank line floating below it.
 func TestTopologyFillsWithBorderNotBlankRows(t *testing.T) {
 	s := &model.Snapshot{Topo: testTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
-	body, _ := renderTopologyTab(s, 120, 60, 0)
+	body, _ := renderTopologyTab(s, 120, 60, 0, topoZoomDetailed)
 	lines := strings.Split(body, "\n")
 	if len(lines) != 60 {
 		t.Fatalf("renderTopologyTab() has %d lines, want exactly 60 (budget)", len(lines))
@@ -236,4 +237,154 @@ func TestTopologyClickJumpsToCPUMapCursor(t *testing.T) {
 	if a.cursor != h.index {
 		t.Fatalf("cursor = %d after clicking a core box, want %d", a.cursor, h.index)
 	}
+}
+
+// bigTwoNodeTopo builds a synthetic 2-node, 200-core topology (1 thread
+// per core, no SMT, no L3 domains, no sockets) -- large enough that
+// per-core bordered boxes (detailed mode, 3 rows each) can't come close
+// to fitting any real terminal, the topology-compact brief's own
+// "imagine 400 cores across two NUMA nodes" scaling problem.
+func bigTwoNodeTopo() *hostinfo.Topology {
+	const coresPerNode = 100
+	threads := make(map[int]hostinfo.Thread, coresPerNode*2)
+	var cores []hostinfo.Core
+	nodes := make([]hostinfo.Node, 2)
+	for n := 0; n < 2; n++ {
+		var nodeThreads []int
+		for c := 0; c < coresPerNode; c++ {
+			id := n*coresPerNode + c
+			threads[id] = hostinfo.Thread{ID: id, Core: c, Socket: n, Node: n, Sibling: -1, L3: -1}
+			cores = append(cores, hostinfo.Core{Socket: n, ID: c, Node: n, L3: -1, Threads: []int{id}})
+			nodeThreads = append(nodeThreads, id)
+		}
+		nodes[n] = hostinfo.Node{ID: n, Threads: nodeThreads, MemTotalKiB: 64 * 1024 * 1024, MemFreeKiB: 32 * 1024 * 1024}
+	}
+	return &hostinfo.Topology{Nodes: nodes, Cores: cores, Threads: threads}
+}
+
+// glyphAt returns the rune at (y, x) in lines (ANSI-stripped first, since
+// styling shouldn't affect which character is there) -- 0 if the line is
+// too short to have a column x at all.
+func glyphAt(lines []string, y, x int) rune {
+	if y < 0 || y >= len(lines) {
+		return 0
+	}
+	plain := []rune(ansi.Strip(ansi.TruncateLeft(lines[y], x, "")))
+	if len(plain) == 0 {
+		return 0
+	}
+	return plain[0]
+}
+
+// isGlyphRune reports whether r is one of nodeMapCell's plain (unstyled)
+// glyphs -- free/pinned/shared -- never a space, separator, or border.
+func isGlyphRune(r rune) bool {
+	return r == '\u25cb' || r == '\u25cf' || r == '\u25d0'
+}
+
+// TestTopologyAutoPicksCompactForManyCores covers point 2 of the
+// topology-compact brief: auto mode measures the detailed drawing and
+// falls back to compact once it doesn't fit -- at 120x40 with 200 cores
+// across 2 nodes, the output must be compact (dense grids, not one
+// bordered box per core: no "core 0" title anywhere), fit the budget,
+// and every recorded "topocore" hit must land on an actual glyph
+// character, not a space or border (so a click can't silently miss).
+func TestTopologyAutoPicksCompactForManyCores(t *testing.T) {
+	s := &model.Snapshot{Topo: bigTwoNodeTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, hits := renderTopologyTab(s, 120, 40, 0, topoZoomAuto)
+	lines := strings.Split(body, "\n")
+	if len(lines) != 40 {
+		t.Fatalf("renderTopologyTab() has %d lines, want exactly 40 (budget)", len(lines))
+	}
+	if strings.Contains(body, "core 0 ") || strings.Contains(body, "core 0(") {
+		t.Fatalf("renderTopologyTab() = %q, want compact mode (no per-core \"core N\" boxes)", body)
+	}
+	if !strings.Contains(body, "cores 0-") {
+		t.Fatalf("renderTopologyTab() = %q, want a compact box's \"cores <range>\" title", body)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no topocore hits recorded")
+	}
+	for _, h := range hits {
+		if h.kind != "topocore" {
+			continue
+		}
+		if r := glyphAt(lines, h.y0, h.x0); !isGlyphRune(r) {
+			t.Fatalf("hit %+v lands on %q, want a glyph character", h, r)
+		}
+	}
+}
+
+// TestTopologyAutoPicksDetailedWhenItFits covers the other side of auto
+// mode: realHostTopo (12 cores) at 120x40 easily fits, so auto must keep
+// the more informative detailed drawing (individual "core N" boxes), not
+// fall back to compact needlessly.
+func TestTopologyAutoPicksDetailedWhenItFits(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, _ := renderTopologyTab(s, 120, 40, 0, topoZoomAuto)
+	mustIndex(t, body, "core 0")
+	if strings.Contains(body, "cores 0-") {
+		t.Fatalf("renderTopologyTab() = %q, want detailed mode (no compact-box \"cores <range>\" title)", body)
+	}
+}
+
+// TestTopologyCompactL3BoxTitle covers the compact L3 box's own title
+// format ("L3 #k  cores <range>  threads <range>") on realHostTopo,
+// forced into compact mode explicitly (topoZoomCompact) regardless of
+// whether it would auto-fit, since this fixture is small enough that
+// auto would otherwise always pick detailed.
+func TestTopologyCompactL3BoxTitle(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	body, _ := buildTopologyTabCompact(s, 120)
+	if !strings.Contains(body, "L3 #0  cores 0-5  threads 0-5,12-17") {
+		t.Fatalf("buildTopologyTabCompact() = %q, want L3 #0's compact title with core/thread ranges", body)
+	}
+}
+
+// TestTopologyZoomCycles covers the 'z' key: auto -> detailed -> compact
+// -> auto, on a fixture (realHostTopo) where auto itself would pick
+// detailed, so forcing compact is only visible through the override.
+func TestTopologyZoomCycles(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	a.snap = &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	a.doms = map[string]*libvirtio.DomainConfig{}
+	a.tab = 5
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	if a.topoZoom != topoZoomAuto {
+		t.Fatalf("topoZoom = %d, want topoZoomAuto initially", a.topoZoom)
+	}
+	view := a.View()
+	mustIndex(t, view, "core 0") // auto picked detailed
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if a.topoZoom != topoZoomDetailed {
+		t.Fatalf("topoZoom = %d after one 'z', want topoZoomDetailed", a.topoZoom)
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if a.topoZoom != topoZoomCompact {
+		t.Fatalf("topoZoom = %d after two 'z', want topoZoomCompact", a.topoZoom)
+	}
+	view = a.View()
+	if strings.Contains(view, "core 0 ") || strings.Contains(view, "core 0(") {
+		t.Fatalf("view = %q, want compact mode forced (no \"core 0\" box)", view)
+	}
+	mustIndex(t, view, "cores 0-")
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if a.topoZoom != topoZoomAuto {
+		t.Fatalf("topoZoom = %d after three 'z', want back to topoZoomAuto", a.topoZoom)
+	}
+}
+
+// TestTopologyCoreBoxNamesThreadIDs covers point 3 of the topology-
+// compact brief: sysfs core_id can skip numbers (AMD: core ids 8-13 for
+// threads 6-11), so a detailed-mode core box's title also names its
+// thread ids ("core N (T1,T2)"), not just the (possibly-gapped) core_id
+// alone. realHostTopo's core 0 has threads 0 and 12 (its SMT sibling).
+func TestTopologyCoreBoxNamesThreadIDs(t *testing.T) {
+	s := &model.Snapshot{Topo: realHostTopo(), Use: map[int]model.ThreadUse{}, BoundMemKiB: map[int]uint64{}}
+	out, _ := buildTopologyTab(s, 120)
+	mustIndex(t, out, "core 0 (0,12)")
 }

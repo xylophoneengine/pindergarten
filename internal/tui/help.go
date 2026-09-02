@@ -54,6 +54,7 @@ var helpKeys = []helpEntry{
 	{"Backups", "any key", "(diff shown) close the diff and return to the list"},
 
 	{"Topology", "up/down / j k", "scroll the drawing"},
+	{"Topology", "z", "cycle the zoom level: auto, detailed, compact"},
 	{"Topology", "mouse click", "on a core box: jump to that core on the CPU Map tab"},
 
 	{"Set memory node", "digit 0-9", "stage a memory-node-only change to that node"},

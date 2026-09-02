@@ -2,12 +2,27 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xylophoneengine/pindergarten/internal/hostinfo"
 	"github.com/xylophoneengine/pindergarten/internal/model"
+)
+
+// topoZoom is the Topology tab's box-detail mode: topoZoomAuto (the
+// zero value, so a fresh App starts here) picks whichever of the other
+// two actually fits the body height, preferring detailed since it's the
+// more informative view; 'z' cycles the override auto -> detailed ->
+// compact -> auto (see App.topoZoom, App.handleKey's tab==topology 'z'
+// case).
+type topoZoom int
+
+const (
+	topoZoomAuto topoZoom = iota
+	topoZoomDetailed
+	topoZoomCompact
 )
 
 // boxChild is one child box ready for wrapBoxesInto: its already-rendered
@@ -79,7 +94,12 @@ func wrapBoxesInto(children []boxChild, maxWidth int) (string, []hit) {
 	return strings.Join(outRows, "\n"), hits
 }
 
-// renderTopoCoreBox renders one leaf box for a core: title "core N",
+// renderTopoCoreBox renders one leaf box for a core: title "core N
+// (T1,T2)" -- sysfs core_id (N) skips numbers on some hosts (AMD: core
+// IDs 8-13 for threads 6-11, say), so the thread ids are named too
+// rather than leaving them unrecoverable from the drawing alone; adding
+// them to the title (not a second content line under the glyphs) is the
+// cheaper of the brief's two options and keeps the box the same height --
 // content its threads' glyph cells -- the same nodeMapCell the CPU Map
 // tab uses, so pinning/pending claims are visible here too (no cursor/
 // highlight in v1, per the brief). globalIdx is the core's position in
@@ -88,7 +108,7 @@ func wrapBoxesInto(children []boxChild, maxWidth int) (string, []hit) {
 func renderTopoCoreBox(s *model.Snapshot, globalIdx int, core hostinfo.Core) boxChild {
 	cells := nodeMapCell(s, core, nil, false)
 	cw := lipgloss.Width(cells)
-	title := fmt.Sprintf("core %d", core.ID)
+	title := fmt.Sprintf("core %d (%s)", core.ID, hostinfo.FormatCPUList(core.Threads))
 	// Wide enough for the title to actually show (spliceTitle silently
 	// truncates it otherwise -- fine for a long sentence, useless for a
 	// two-word label like this one), not just the (much narrower) thread
@@ -119,6 +139,97 @@ func renderTopoL3Box(s *model.Snapshot, l3 hostinfo.L3Domain, maxWidth int) boxC
 	w := maxLineWidth(inner) + 2
 	block := panelInner(fmt.Sprintf("L3 #%d", l3.ID), inner, w, 0)
 	return boxChild{block, offsetHits(hits, 1, 1)}
+}
+
+// renderTopoCompactGrid renders cores as a dense glyph grid: nodeMapCell's
+// plain two-glyph cell per core (no cursor -- compact mode has none, per
+// the brief), one space between cores, coresPerRow per row -- the same
+// density renderNodeMap already uses for the CPU Map tab's own per-node
+// grid, but restricted to an arbitrary core subset (an L3 domain's cores,
+// or a whole node's when there's no L3 data) and hit-indexed by each
+// core's GLOBAL s.Topo.Cores position (idxs[i], parallel to cores[i])
+// rather than a per-node-local one -- renderTopoCoreBox/renderTopoL3Box
+// need that same global index for their own "topocore" hits, so this
+// does too, to jump to the right core on the CPU Map tab.
+func renderTopoCompactGrid(s *model.Snapshot, cores []hostinfo.Core, idxs []int) (string, []hit) {
+	var b strings.Builder
+	var hits []hit
+	col, row := 0, 0
+	for i, core := range cores {
+		if col == coresPerRow {
+			b.WriteString("\n")
+			row++
+			col = 0
+		}
+		if col > 0 {
+			b.WriteString(" ")
+		}
+		x0 := col * 3
+		hits = append(hits, hit{y0: row, y1: row + 1, x0: x0, x1: x0 + 2, kind: "topocore", index: idxs[i]})
+		b.WriteString(nodeMapCell(s, core, nil, false))
+		col++
+	}
+	return b.String(), hits
+}
+
+// renderTopoCompactBox renders one compact-mode box for a group of cores:
+// title "<label>  cores <range>  threads <range>" (formatCPURanges, the
+// same compact range notation the Overview hardware panel's L3 lines
+// use), body a dense glyph grid (renderTopoCompactGrid) instead of one
+// bordered box per core -- per-core boxes (3 rows + borders each) can't
+// scale to hundreds of cores, where this stays a handful of rows. label
+// is "L3 #k" (an L3 domain) or "cores" (a whole node, when the topology
+// has no L3 data at all -- see renderTopoNodeBox).
+func renderTopoCompactBox(s *model.Snapshot, label string, cores []hostinfo.Core, idxs []int) boxChild {
+	coreIDs := make([]int, len(cores))
+	var threadIDs []int
+	for i, c := range cores {
+		coreIDs[i] = c.ID
+		threadIDs = append(threadIDs, c.Threads...)
+	}
+	sort.Ints(threadIDs)
+	body, hits := renderTopoCompactGrid(s, cores, idxs)
+	title := fmt.Sprintf("%s  cores %s  threads %s", label, formatCPURanges(coreIDs), formatCPURanges(threadIDs))
+	w := maxLineWidth(body) + 2
+	if minW := len(title) + 4; w < minW {
+		w = minW
+	}
+	block := panelInner(title, body, w, 0)
+	return boxChild{block, offsetHits(hits, 1, 1)}
+}
+
+// renderTopoL3BoxCompact is renderTopoL3Box's compact-mode counterpart:
+// same core selection (Core.L3 == l3.ID), rendered as one dense grid box
+// (renderTopoCompactBox) instead of one bordered box per core.
+func renderTopoL3BoxCompact(s *model.Snapshot, l3 hostinfo.L3Domain) boxChild {
+	var cores []hostinfo.Core
+	var idxs []int
+	for i, core := range s.Topo.Cores {
+		if core.L3 != l3.ID {
+			continue
+		}
+		cores = append(cores, core)
+		idxs = append(idxs, i)
+	}
+	return renderTopoCompactBox(s, fmt.Sprintf("L3 #%d", l3.ID), cores, idxs)
+}
+
+// renderTopoNodeCoresCompact is compact mode's fallback for a topology
+// with no L3 domain data at all: the same "skip a level with no data"
+// gating renderTopoNodeBox's detailed branch already uses, but grouping
+// the whole node's cores into one dense grid box directly (there's no L3
+// level to nest under) instead of one core box per core.
+func renderTopoNodeCoresCompact(s *model.Snapshot, node hostinfo.Node) boxChild {
+	var cores []hostinfo.Core
+	var idxs []int
+	for i, core := range s.Topo.Cores {
+		if core.Node != node.ID {
+			continue
+		}
+		cores = append(cores, core)
+		idxs = append(idxs, i)
+	}
+	return renderTopoCompactBox(s, "cores", cores, idxs)
 }
 
 // gpuInUse reports whether any VM's passthrough device list references
@@ -161,17 +272,30 @@ func renderTopoGPUBox(s *model.Snapshot, dev hostinfo.PCIDevice) boxChild {
 // containing one box per L3 domain in that node (or, when the topology
 // has no L3 data at all, one core box per core directly -- the same
 // "skip a level with no data" gating as everywhere else this round) plus
-// one box per display-class PCI device attached to it.
-func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int) boxChild {
+// one box per display-class PCI device attached to it. compact swaps the
+// L3/core boxes for their dense-grid counterparts (renderTopoL3BoxCompact/
+// renderTopoNodeCoresCompact); the node/GPU boxes themselves are
+// identical either way, per the brief.
+func renderTopoNodeBox(s *model.Snapshot, node hostinfo.Node, maxWidth int, compact bool) boxChild {
 	var children []boxChild
-	if len(s.Topo.L3Domains) > 0 {
+	switch {
+	case len(s.Topo.L3Domains) > 0 && compact:
+		for _, l3 := range s.Topo.L3Domains {
+			if l3.Node != node.ID {
+				continue
+			}
+			children = append(children, renderTopoL3BoxCompact(s, l3))
+		}
+	case len(s.Topo.L3Domains) > 0:
 		for _, l3 := range s.Topo.L3Domains {
 			if l3.Node != node.ID {
 				continue
 			}
 			children = append(children, renderTopoL3Box(s, l3, maxWidth-2))
 		}
-	} else {
+	case compact:
+		children = append(children, renderTopoNodeCoresCompact(s, node))
+	default:
 		for i, core := range s.Topo.Cores {
 			if core.Node != node.ID {
 				continue
@@ -213,14 +337,14 @@ func renderTopoUnknownBox(s *model.Snapshot, devs []hostinfo.PCIDevice, maxWidth
 // renderTopoSocketBox renders one socket box: title "socket N  <CPU
 // model>", containing one box per NUMA node the socket's threads belong
 // to.
-func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int) boxChild {
+func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int, compact bool) boxChild {
 	var children []boxChild
 	for _, nodeID := range sock.Nodes {
 		node := nodeByID(s.Topo.Nodes, nodeID)
 		if node == nil {
 			continue
 		}
-		children = append(children, renderTopoNodeBox(s, *node, maxWidth-2))
+		children = append(children, renderTopoNodeBox(s, *node, maxWidth-2, compact))
 	}
 	inner, hits := wrapBoxesInto(children, maxWidth-2)
 	title := fmt.Sprintf("socket %d", sock.ID)
@@ -233,21 +357,38 @@ func renderTopoSocketBox(s *model.Snapshot, sock hostinfo.Socket, maxWidth int) 
 }
 
 // buildTopologyTab renders the full, unwindowed (every row, no scroll
-// applied) topology drawing at width w: an lstopo-style nesting of boxes,
-// machine > socket > node > L3 domain > core, each level skipped
-// entirely when the topology has no data for it (no sockets at all -- a
-// hand-built fixture, most likely -- puts nodes directly under the
-// machine box; no L3 domains puts cores directly under their node, see
-// renderTopoNodeBox), plus GPU boxes attached under their node. Boxes lay
-// out left to right inside their parent, wrapping to a new row once the
-// parent's own width budget is exhausted (wrapBoxesInto); a final
+// applied) DETAILED topology drawing at width w: an lstopo-style nesting
+// of boxes, machine > socket > node > L3 domain > core, each level
+// skipped entirely when the topology has no data for it (no sockets at
+// all -- a hand-built fixture, most likely -- puts nodes directly under
+// the machine box; no L3 domains puts cores directly under their node,
+// see renderTopoNodeBox), plus GPU boxes attached under their node. Boxes
+// lay out left to right inside their parent, wrapping to a new row once
+// the parent's own width budget is exhausted (wrapBoxesInto); a final
 // truncateLines pass guarantees no line exceeds w even so (boxes only
 // ever shrink-wrap their own content, never grow past what's asked of
-// them, so this is a safety net, not the primary mechanism). Shared by
-// renderTopologyTab (which windows it to a budget/scroll) and
-// App.clampTopologyScroll (which only needs the total line count).
+// them, so this is a safety net, not the primary mechanism). See
+// buildTopologyTabCompact for the dense-grid alternative, and
+// topologyInnerForZoom for how the Topology tab actually picks between
+// them at render time.
 func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
-	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
+	return buildTopologyTabMode(s, w, false)
+}
+
+// buildTopologyTabCompact is buildTopologyTab's compact-mode counterpart:
+// same machine/socket/node nesting and GPU/unknown-locality boxes, but
+// each L3 domain (or, with no L3 data, each node directly) collapses to
+// one dense glyph-grid box (renderTopoCompactBox) instead of one bordered
+// box per core -- the fix for hundreds of cores otherwise not fitting
+// any terminal at all.
+func buildTopologyTabCompact(s *model.Snapshot, w int) (string, []hit) {
+	return buildTopologyTabMode(s, w, true)
+}
+
+// buildTopologyTabMode is buildTopologyTab/buildTopologyTabCompact's
+// shared implementation.
+func buildTopologyTabMode(s *model.Snapshot, w int, compact bool) (string, []hit) {
+	inner, hits := wrapBoxesInto(topologyChildren(s, w, compact), w-2)
 	mw := machineBoxWidth(inner, w)
 	block := panelInner(topologyMachineTitle(s), inner, mw, 0)
 	return truncateLines(block, w), offsetHits(hits, 1, 1)
@@ -256,17 +397,22 @@ func buildTopologyTab(s *model.Snapshot, w int) (string, []hit) {
 // topologyChildren builds the machine box's top-level children: one box
 // per socket, or -- when the topology has no socket data at all, the
 // same "skip a level with no data" gating every level here uses -- one
-// box per node directly. Shared by buildTopologyTab and
-// renderTopologyTab.
-func topologyChildren(s *model.Snapshot, w int) []boxChild {
+// box per node directly, plus a trailing "unknown locality" box for any
+// display-class PCI device hostinfo.Read couldn't place on a real node
+// (see renderTopoUnknownBox). compact is threaded down to every node/
+// socket box to select detailed vs dense-grid L3/core rendering; the
+// unknown-locality box is unaffected by it (GPU boxes never scale with
+// core count). Shared by buildTopologyTabMode and renderTopologyTab
+// (via topologyInnerForZoom).
+func topologyChildren(s *model.Snapshot, w int, compact bool) []boxChild {
 	var children []boxChild
 	if len(s.Topo.Sockets) > 0 {
 		for _, sock := range s.Topo.Sockets {
-			children = append(children, renderTopoSocketBox(s, sock, w-2))
+			children = append(children, renderTopoSocketBox(s, sock, w-2, compact))
 		}
 	} else {
 		for _, node := range s.Topo.Nodes {
-			children = append(children, renderTopoNodeBox(s, node, w-2))
+			children = append(children, renderTopoNodeBox(s, node, w-2, compact))
 		}
 	}
 	var unknown []hostinfo.PCIDevice
@@ -303,21 +449,43 @@ func machineBoxWidth(inner string, w int) int {
 	return mw
 }
 
-// renderTopologyTab renders the Topology tab: the same nested-box
-// drawing as buildTopologyTab, windowed vertically to budget lines
-// starting at scroll (the caller clamps scroll via App.clampTopology-
-// Scroll) *before* the machine box's own border is added -- so a short
-// drawing fills the border down to budget (panelInner's height
-// parameter, exactly like every other tab's body panel) instead of
-// leaving bare blank rows below it, and a long one keeps its own full
-// top/bottom border around whatever page is visible, the same pattern
-// renderDiffView (and every other scrollable panel in this package)
-// already uses. Alongside the string it returns one "topocore" hit per
-// visible core box, 0-based relative to the visible window -- a click
-// switches to the CPU Map tab and moves its cursor there (see
-// App.handleBodyClick).
-func renderTopologyTab(s *model.Snapshot, w, budget, scroll int) (string, []hit) {
-	inner, hits := wrapBoxesInto(topologyChildren(s, w), w-2)
+// topologyInnerForZoom returns the Topology tab's raw, unbordered content
+// (topologyChildren wrapped via wrapBoxesInto -- the machine box's own
+// border/fill isn't added yet) for override at width w: a non-auto
+// override always wins outright, without ever building the mode it isn't
+// using; topoZoomAuto builds the DETAILED drawing first -- there's no way
+// to know whether it fits without actually measuring it -- and keeps it
+// if its height (+2 for the machine box's own border rows) fits budget,
+// falling back to the compact drawing only when it doesn't. Shared by
+// App.clampTopologyScroll (total line count only) and renderTopologyTab
+// (which windows/borders whichever content this returns), so both always
+// agree on which mode is actually showing.
+func topologyInnerForZoom(s *model.Snapshot, w, budget int, override topoZoom) (string, []hit) {
+	if override == topoZoomCompact {
+		return wrapBoxesInto(topologyChildren(s, w, true), w-2)
+	}
+	inner, hits := wrapBoxesInto(topologyChildren(s, w, false), w-2)
+	if override == topoZoomDetailed || lineCount(inner)+2 <= budget {
+		return inner, hits
+	}
+	return wrapBoxesInto(topologyChildren(s, w, true), w-2)
+}
+
+// renderTopologyTab renders the Topology tab: the nested-box drawing
+// topologyInnerForZoom picks for zoom (detailed, compact, or whichever
+// auto resolves to), windowed vertically to budget lines starting at
+// scroll (the caller clamps scroll via App.clampTopologyScroll) *before*
+// the machine box's own border is added -- so a short drawing fills the
+// border down to budget (panelInner's height parameter, exactly like
+// every other tab's body panel) instead of leaving bare blank rows below
+// it, and a long one keeps its own full top/bottom border around
+// whatever page is visible, the same pattern renderDiffView (and every
+// other scrollable panel in this package) already uses. Alongside the
+// string it returns one "topocore" hit per visible core box, 0-based
+// relative to the visible window -- a click switches to the CPU Map tab
+// and moves its cursor there (see App.handleBodyClick).
+func renderTopologyTab(s *model.Snapshot, w, budget, scroll int, zoom topoZoom) (string, []hit) {
+	inner, hits := topologyInnerForZoom(s, w, budget, zoom)
 	lines := strings.Split(inner, "\n")
 	contentBudget := budget - 2
 	if contentBudget < 1 {
