@@ -195,7 +195,7 @@ typing into the threads field -- staged with `[A]pply` or dropped with
 
 | Key | Action |
 |-----|--------|
-| up/down / `j k` | move between the node/within/threads/memory node/core-grid fields; wraps between the grid's top/bottom row and the neighboring field |
+| up/down / `j k` | move between the node/within/threads/memory node/core-grid fields; inside the grid, up/down / `j k` move the cursor by row; at the grid's top/bottom edge they leave to the previous/next field |
 | left/right / `h l` | cycle the focused field's value, move the caret within the threads field, or move the core-grid cursor |
 | backspace | (threads field) delete the character before the caret |
 | `space` | (core grid) toggle the cursor's core into/out of the threads field |

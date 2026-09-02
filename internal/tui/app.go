@@ -256,9 +256,10 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // scrollWheel implements the mouse-wheel-as-up/down-key contract: on the
 // drift screen it moves the selected drifted op; on the results screen (or
-// the Backups tab's diff view) it scrolls that long-text view; a confirm
-// modal has nothing scrollable; otherwise it falls through to whichever
-// tab/screen is active.
+// the Backups tab's diff view) it scrolls that long-text view; over an open
+// wizard it moves the grid cursor a row at a time (see wizard.scrollGrid);
+// a confirm modal and the mem-node picker have nothing scrollable;
+// otherwise it falls through to whichever tab/screen is active.
 func (a *App) scrollWheel(delta int) {
 	if a.help {
 		a.helpScroll += delta
@@ -278,7 +279,12 @@ func (a *App) scrollWheel(delta int) {
 		}
 		return
 	}
-	if a.wizard != nil || a.memPicker != nil {
+	if a.wizard != nil {
+		dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+		a.wizard.scrollGrid(delta, coresPerRowForInner(dw-2))
+		return
+	}
+	if a.memPicker != nil {
 		return
 	}
 	if a.tab == tabBackups && a.diffView != "" {

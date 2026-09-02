@@ -924,11 +924,8 @@ func TestMouseClickTogglesWizardGridCore(t *testing.T) {
 	if a.wizard.cursor != 0 {
 		t.Fatalf("wizard.cursor = %d, want 0 (moved to the clicked core)", a.wizard.cursor)
 	}
-	ids, _ := a.wizard.parseThreads()
-	for _, id := range ids {
-		if id == 0 || id == 4 {
-			t.Fatalf("threadsText = %q, want core 0's threads (0,4) toggled off (click mirrors space)", a.wizard.threadsText)
-		}
+	if a.wizard.threadsText != "" {
+		t.Fatalf("threadsText = %q, want \"\" (plain-vm's 2 vcpus started on core 0's threads 0,4; toggling it off clicks mirrors space and leaves nothing selected)", a.wizard.threadsText)
 	}
 }
 
@@ -1027,6 +1024,20 @@ func TestWizardGridUpDownMovesByPerRow(t *testing.T) {
 				t.Fatalf("%dx%d: cursor = %d after up, want %d (column drifted from %d, perRow %d)", sz.w, sz.h, a.wizard.cursor, want, col, perRow)
 			}
 		}
+
+		// Down from the last reachable cell (no row below it) must leave to
+		// fieldNode without moving the cursor -- the mirror of
+		// TestWizardGridUpDownWrapsToNeighborField's up-at-row-0 case, on a
+		// real multi-row grid instead of testTopo's single row.
+		a.wizard.field = fieldGrid
+		a.wizard.cursor = totalCores - 1
+		sendKeyType(a, tea.KeyDown)
+		if a.wizard.field != fieldNode {
+			t.Fatalf("%dx%d: field = %d after down at the last reachable cell, want fieldNode", sz.w, sz.h, a.wizard.field)
+		}
+		if a.wizard.cursor != totalCores-1 {
+			t.Fatalf("%dx%d: cursor = %d after down at the last reachable cell, want unchanged %d", sz.w, sz.h, a.wizard.cursor, totalCores-1)
+		}
 	}
 }
 
@@ -1061,6 +1072,34 @@ func TestWizardGridUpDownWrapsToNeighborField(t *testing.T) {
 	sendKeyType(a, tea.KeyDown)
 	if a.wizard.field != fieldNode {
 		t.Fatalf("field = %d after down on the last row, want fieldNode", a.wizard.field)
+	}
+}
+
+// TestWizardMouseWheelScrollsGrid covers the fix for the mouse wheel being
+// dead over an open wizard (scrollWheel used to return early whenever
+// a.wizard != nil): wheel down/up must now move the grid cursor by perRow
+// and focus fieldGrid, clamped at the edges like the key path but without
+// crossing into a neighboring field.
+func TestWizardMouseWheelScrollsGrid(t *testing.T) {
+	const totalCores = 96
+	a := wizardGridTestApp(t, manyCoresTopo(totalCores), 80, 24)
+	a.wizard.field = fieldNode // the wheel must (re)focus the grid regardless of the field beforehand
+	a.wizard.cursor = 0
+
+	dw := dialogWidth(effectiveWidth(a.width), dialogMaxWidth)
+	perRow := coresPerRowForInner(dw - 2)
+
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	if a.wizard.cursor != 0 {
+		t.Fatalf("cursor = %d after wheel up at 0, want unchanged 0", a.wizard.cursor)
+	}
+
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	if a.wizard.field != fieldGrid {
+		t.Fatalf("field = %d after wheel down, want fieldGrid", a.wizard.field)
+	}
+	if a.wizard.cursor != perRow {
+		t.Fatalf("cursor = %d after wheel down at 0, want %d (perRow)", a.wizard.cursor, perRow)
 	}
 }
 

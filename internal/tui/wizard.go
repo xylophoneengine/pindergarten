@@ -80,6 +80,19 @@ func isThreadsChar(r rune) bool {
 	return (r >= '0' && r <= '9') || r == ',' || r == '-'
 }
 
+// isLeft reports whether msg is the Left arrow or 'h' -- the wizard's
+// form treats both as "move left" on every field (cycling node/within/
+// memory node, moving the threads caret, moving the grid cursor), not
+// just inside the grid block. See isRight for the mirror.
+func isLeft(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyLeft || isRune(msg, 'h')
+}
+
+// isRight reports whether msg is the Right arrow or 'l'. See isLeft.
+func isRight(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyRight || isRune(msg, 'l')
+}
+
 // update handles one key on the form: up/down (or j/k, outside the grid)
 // always move the focused field; left/right edit the caret when
 // fieldThreads is focused, move the grid cursor when fieldGrid is
@@ -96,12 +109,12 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 	}
 	if w.field == fieldThreads {
 		switch {
-		case msg.Type == tea.KeyLeft:
+		case isLeft(msg):
 			if w.threadsCaret > 0 {
 				w.threadsCaret--
 			}
 			return false, nil, ""
-		case msg.Type == tea.KeyRight:
+		case isRight(msg):
 			if w.threadsCaret < len(w.threadsText) {
 				w.threadsCaret++
 			}
@@ -123,12 +136,12 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 	if w.field == fieldGrid {
 		cores := nodeCores(w.base, w.node)
 		switch {
-		case msg.Type == tea.KeyLeft, isRune(msg, 'h'):
+		case isLeft(msg):
 			if w.cursor > 0 {
 				w.cursor--
 			}
 			return false, nil, ""
-		case msg.Type == tea.KeyRight, isRune(msg, 'l'):
+		case isRight(msg):
 			if w.cursor < len(cores)-1 {
 				w.cursor++
 			}
@@ -160,9 +173,9 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 	case msg.Type == tea.KeyDown, isRune(msg, 'j'):
 		w.field = (w.field + 1) % numFormFields
 		return false, nil, ""
-	case msg.Type == tea.KeyLeft, msg.Type == tea.KeyRight:
+	case isLeft(msg), isRight(msg):
 		delta := 1
-		if msg.Type == tea.KeyLeft {
+		if isLeft(msg) {
 			delta = -1
 		}
 		switch w.field {
@@ -751,7 +764,7 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 // wizard is open: its own keys, since edit/quit/pin/strip are inert while
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
-	return "[up/down] field  [left/right] change/edit  [space] toggle core  [a] autofill  [A] apply  [C] cancel"
+	return "[arrows] move/edit [space] toggle [a] autofill [A] apply [C] cancel"
 }
 
 // openWizard implements the 'p' key on the VMs tab: after the shared
@@ -833,12 +846,13 @@ func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // hit, it just focuses that field; on a "wizardbtn" hit, it replays the
 // same synthesized key ('A' for index 0, 'C' for index 1) through
 // handleWizardKey, so the confirm plumbing (a GPU-crossing stage) is
-// shared with the real keypress. Always returns a, nil (nothing here ever
-// produces a different model or a Cmd); the return value only exists so a
-// caller that wants it can chain, and app.go's own call site ignores it.
-func (a *App) handleWizardMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+// shared with the real keypress -- that call's own (tea.Model, tea.Cmd)
+// result is discarded here, same as app.go's own call site discards this
+// function's (nothing here ever produces a different model or a Cmd worth
+// returning).
+func (a *App) handleWizardMouse(msg tea.MouseMsg) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return a, nil
+		return
 	}
 	cores := nodeCores(a.wizard.base, a.wizard.node)
 	for _, h := range a.hits {
@@ -846,13 +860,13 @@ func (a *App) handleWizardMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			a.wizard.field = fieldGrid
 			a.wizard.cursor = h.index
 			a.wizard.toggleCore(cores)
-			return a, nil
+			return
 		}
 	}
 	for _, h := range a.hits {
 		if h.kind == "formfield" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
 			a.wizard.field = wizardFormField(h.index)
-			return a, nil
+			return
 		}
 	}
 	for _, h := range a.hits {
@@ -861,10 +875,34 @@ func (a *App) handleWizardMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if h.index == 1 {
 				r = 'C'
 			}
-			return a.handleWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			_, _ = a.handleWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			return
 		}
 	}
-	return a, nil
+}
+
+// scrollGrid implements the mouse wheel over an open wizard (see
+// App.scrollWheel): unlike the key path it always focuses fieldGrid and
+// never crosses into a neighboring field at the grid's top/bottom edge --
+// it just moves the cursor by one row (perRow cores) in delta's direction
+// (-1 up, +1 down, matching wheelDelta) and clamps to the grid's own
+// bounds.
+func (w *wizard) scrollGrid(delta, perRow int) {
+	if perRow < 1 {
+		perRow = 1
+	}
+	cores := nodeCores(w.base, w.node)
+	if len(cores) == 0 {
+		return
+	}
+	w.field = fieldGrid
+	w.cursor += delta * perRow
+	if w.cursor < 0 {
+		w.cursor = 0
+	}
+	if max := len(cores) - 1; w.cursor > max {
+		w.cursor = max
+	}
 }
 
 // nodeCores returns s.Topo.Cores restricted to node, in topology order.

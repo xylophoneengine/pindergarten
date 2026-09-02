@@ -508,8 +508,8 @@ const cpuMapDetailMaxHeight = 8
 // an already border-stripped inner width -- floor((inner+1)/3), floored
 // at 1 so even a pathologically narrow panel still wraps one core per row
 // rather than dividing by zero or going negative. Shared by the CPU Map
-// tab (via cpuMapCoresPerRow) and the wizard's manual/preview grids
-// (wizard.go), which each derive it from their own panel's inner width.
+// tab (via cpuMapCoresPerRow) and the wizard's core grid (wizard.go),
+// which each derive it from their own panel's inner width.
 func coresPerRowForInner(inner int) int {
 	perRow := (inner + 1) / 3
 	if perRow < 1 {
