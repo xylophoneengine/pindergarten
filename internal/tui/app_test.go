@@ -1008,7 +1008,7 @@ func TestVMsBodyFillsHeightBudget(t *testing.T) {
 	if a.status != "" {
 		t.Fatalf("a.status = %q, want empty for this scenario", a.status)
 	}
-	if !strings.Contains(lines[38], "?") { // bottom-left corner of the panel's border
+	if !strings.Contains(lines[38], "\u2570") { // bottom-left corner of the panel's border (ASCII escape, not a literal byte, to avoid any encoding mishap)
 		t.Fatalf("line above the key bar = %q, want the VMs panel's own bottom border directly above it (status is blank here)", lines[38])
 	}
 }
@@ -1059,8 +1059,8 @@ func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
 		t.Fatalf("last line = %q, want the key bar", lines[len(lines)-1])
 	}
 
-	row := rowOf(t, view, "? Confirm") // the dialog's own titled top border
-	idx := strings.Index(lines[row], "? Confirm")
+	row := rowOf(t, view, "\u256d Confirm") // the dialog's own titled top border (ASCII escape, not a literal byte, to avoid any encoding mishap)
+	idx := strings.Index(lines[row], "\u256d Confirm")
 	leading := lipgloss.Width(lines[row][:idx])
 	dw := dialogWidth(120)
 	wantX := (120 - dw) / 2
