@@ -195,6 +195,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // below. A left click on row 0 switches tabs, and a left click elsewhere
 // is hit-tested against a.hits (refreshed by the last View call).
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if a.tooSmall() {
+		return a, nil
+	}
 	if delta, ok := wheelDelta(msg); ok {
 		a.scrollWheel(delta)
 		return a, nil
@@ -672,7 +675,43 @@ func isRune(msg tea.KeyMsg, r rune) bool {
 // amount). clampHeight/clampWidth remain a final safety net for whatever
 // still slips through (e.g. a pathologically short a.height that can't
 // even fit chrome alone).
+// Minimum terminal size below which the layout cannot be drawn honestly.
+// Like btop, a smaller window shows only a resize notice instead of a
+// half-clipped UI.
+const (
+	minWidth  = 80
+	minHeight = 16
+)
+
+// tooSmall reports whether the terminal is below the minimum size. An
+// unknown size (before the first WindowSizeMsg) is not too small.
+func (a *App) tooSmall() bool {
+	return (a.width > 0 && a.width < minWidth) || (a.height > 0 && a.height < minHeight)
+}
+
+// tooSmallView is the whole screen while the terminal is undersized.
+func (a *App) tooSmallView() string {
+	msg := fmt.Sprintf("terminal too small: %dx%d, need at least %dx%d\nenlarge the window or zoom out (ctrl+-)\n[q] quit",
+		a.width, a.height, minWidth, minHeight)
+	msg = warningStyle.Render(msg)
+	if a.width > 0 && a.height > 0 {
+		return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, msg)
+	}
+	return msg
+}
+
 func (a *App) View() string {
+	if a.tooSmall() {
+		a.hits = nil
+		return a.tooSmallView()
+	}
+	return a.renderFull()
+}
+
+// renderFull draws the complete UI regardless of terminal size. View gates
+// it behind the minimum size; tests exercise the layout at small sizes
+// through it directly.
+func (a *App) renderFull() string {
 	tabs, header, statusLine, confirmPanel, keyBar, chrome := a.renderChrome()
 
 	budget := a.bodyBudget(chrome)

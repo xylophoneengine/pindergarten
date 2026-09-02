@@ -62,6 +62,10 @@ the host's `libvirt` group (whichever your libvirtd's socket permissions
 require). The top-right corner of the screen always shows a badge: red
 `READ ONLY` or orange `EDIT`, so you always know which mode you're in.
 
+The layout needs a terminal of at least 80x16 characters. Below that the
+screen shows only a resize notice; enlarge the window or zoom out and the
+interface returns.
+
 ## How changes apply
 
 Every change you stage (pinning a vCPU to a thread, stripping a pin,

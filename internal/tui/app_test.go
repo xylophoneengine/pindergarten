@@ -142,7 +142,7 @@ func TestConfirmFitsHeightBudget(t *testing.T) {
 		t.Fatal("confirm modal did not open")
 	}
 
-	view := a.View()
+	view := a.renderFull()
 	lines := strings.Split(view, "\n")
 	if len(lines) > 10 {
 		t.Fatalf("View() has %d lines, want <= 10: %q", len(lines), view)
@@ -171,7 +171,7 @@ func TestConfirmWithWrappedStatusKeepsKeyBarAndYes(t *testing.T) {
 		t.Fatal("confirm modal did not open")
 	}
 
-	view := a.View()
+	view := a.renderFull()
 	lines := strings.Split(view, "\n")
 	if len(lines) > 16 {
 		t.Fatalf("View() has %d lines, want <= 16: %q", len(lines), view)
@@ -202,7 +202,7 @@ func TestConfirmAtHeight8KeepsYesHint(t *testing.T) {
 		t.Fatal("confirm modal did not open")
 	}
 
-	view := a.View()
+	view := a.renderFull()
 	lines := strings.Split(view, "\n")
 	if len(lines) > 8 {
 		t.Fatalf("View() has %d lines, want <= 8: %q", len(lines), view)
@@ -476,7 +476,7 @@ func TestViewWrapsLongStatusToWidth(t *testing.T) {
 	tail := "ZZZFINALTAILMARKERZZZ"
 	a.status = "scan error: " + strings.Repeat("connection refused retrying now ", 6) + tail
 
-	view := a.View()
+	view := a.renderFull()
 	for i, line := range strings.Split(view, "\n") {
 		if w := lipgloss.Width(line); w > 40 {
 			t.Fatalf("line %d width = %d, want <= 40: %q", i, w, line)
@@ -721,7 +721,7 @@ func TestViewWrapsWideCPUMapToWidth(t *testing.T) {
 	a := &App{hv: &libvirtio.Fake{ConnURI: "test:///x"}, snap: s, doms: map[string]*libvirtio.DomainConfig{}, tab: 1}
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 
-	for i, line := range strings.Split(a.View(), "\n") {
+	for i, line := range strings.Split(a.renderFull(), "\n") {
 		if w := lipgloss.Width(line); w > 40 {
 			t.Fatalf("line %d width = %d, want <= 40: %q", i, w, line)
 		}
@@ -848,7 +848,7 @@ func TestVMsTableFitsNarrowWidth(t *testing.T) {
 	a.tab = 2
 	a.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
-	view := a.View()
+	view := a.renderFull()
 	for i, line := range strings.Split(view, "\n") {
 		if w := lipgloss.Width(line); w > 60 {
 			t.Fatalf("line %d width = %d, want <= 60: %q", i, w, line)
