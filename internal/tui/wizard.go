@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -48,6 +49,68 @@ type wizard struct {
 	field        wizardFormField // focused field
 	proposal     *model.Proposal // last successful ProposeWithin(node, within) result; nil if that combination has no valid proposal (e.g. an L3 filter too small for VCPUs) -- 'a' and the preview/summary's Warnings fall back to nothing when nil
 	cursor       int             // core index within nodeCores(base, node), used when field == fieldGrid
+	clicks       clicker         // double-click detection for the grid -- see clickCore
+}
+
+// doubleClick is the longest gap between two clicks on the same item that
+// still counts as a double-click -- see clicker.
+const doubleClick = 400 * time.Millisecond
+
+// clicker detects a double-click on an indexed item (a wizard grid core, a
+// memory-node picker row): double reports whether the click on idx at now
+// is the second on the same idx within doubleClick, resetting afterwards so
+// a third click starts over. The zero value is ready to use.
+type clicker struct {
+	idx int
+	at  time.Time
+}
+
+func (c *clicker) double(idx int, now time.Time) bool {
+	if !c.at.IsZero() && c.idx == idx && now.Sub(c.at) < doubleClick {
+		c.at = time.Time{}
+		return true
+	}
+	c.idx, c.at = idx, now
+	return false
+}
+
+// buttonRow renders the shared, centered two-button dialog line inner
+// columns wide -- primary (e.g. "[A]pply", "[y]es") as an accent pill,
+// secondary ("[C]ancel", "[n]o") as a grey one -- with one "dialogbtn" hit
+// per button (index 0 primary, 1 secondary) relative to that line's own
+// top-left corner. buttonRowWidth is the line's minimum width.
+func buttonRow(inner int, primary, secondary string) (string, []hit) {
+	applyBtn, cancelBtn := buttonStyle.Render(primary), buttonSecondaryStyle.Render(secondary)
+	applyW, cancelW := lipgloss.Width(applyBtn), lipgloss.Width(cancelBtn)
+	pad := (inner - (applyW + 2 + cancelW)) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	return strings.Repeat(" ", pad) + applyBtn + "  " + cancelBtn, []hit{
+		{y0: 0, y1: 1, x0: pad, x1: pad + applyW, kind: "dialogbtn", index: 0},
+		{y0: 0, y1: 1, x0: pad + applyW + 2, x1: pad + applyW + 2 + cancelW, kind: "dialogbtn", index: 1},
+	}
+}
+
+// buttonRowWidth returns the visible width of buttonRow's two pills plus
+// their gap -- the narrowest line that fits them unclipped.
+func buttonRowWidth(primary, secondary string) int {
+	return lipgloss.Width(buttonStyle.Render(primary)) + 2 + lipgloss.Width(buttonSecondaryStyle.Render(secondary))
+}
+
+// dialogButtonHit returns which button (0 primary, 1 secondary) a left
+// click at msg lands on among hits, or -1 -- the shared hit test for every
+// dialog that draws a buttonRow.
+func dialogButtonHit(hits []hit, msg tea.MouseMsg) int {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return -1
+	}
+	for _, h := range hits {
+		if h.kind == "dialogbtn" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
+			return h.index
+		}
+	}
+	return -1
 }
 
 // newWizard opens a wizard for vm (vcpus its own vcpu count), seeded from
@@ -99,10 +162,10 @@ func isRight(msg tea.KeyMsg) bool {
 // always move the focused field; left/right edit the caret when
 // fieldThreads is focused, move the grid cursor when fieldGrid is
 // focused, else cycle that field's value; space toggles the grid
-// cursor's core; 'a' re-fills threadsText from the last proposal; 'A'
+// cursor's core; 'f' re-fills threadsText from the last proposal; 'a'/'A'
 // validates and either stages outright or (see tryStage) hands back a
-// confirmPrompt for the caller to gate on instead; 'C' and esc cancel the
-// whole wizard. perRow is the preview grid's own cores-per-row, computed
+// confirmPrompt for the caller to gate on instead; 'c'/'C' and esc cancel
+// the whole wizard. perRow is the preview grid's own cores-per-row, computed
 // by the caller the same way view renders it (coresPerRowForInner(dw-2))
 // so a row of grid cursor movement always matches a row on screen.
 func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.PendingOp, confirmPrompt string) {
@@ -194,12 +257,12 @@ func (w *wizard) update(msg tea.KeyMsg, perRow int) (done bool, op *model.Pendin
 			w.toggleEmulator()
 		}
 		return false, nil, ""
-	case isRune(msg, 'a'):
+	case isRune(msg, 'f'):
 		w.autofillThreads()
 		return false, nil, ""
-	case isRune(msg, 'A'):
+	case isRune(msg, 'a'), isRune(msg, 'A'):
 		return w.tryStage()
-	case isRune(msg, 'C'):
+	case isRune(msg, 'c'), isRune(msg, 'C'):
 		return true, nil, ""
 	case msg.Type == tea.KeyEsc:
 		return true, nil, ""
@@ -414,7 +477,7 @@ func (w *wizard) reproposeAndFill() {
 	w.threadsCaret = len(w.threadsText)
 }
 
-// autofillThreads implements 'a': re-fills threadsText from the current
+// autofillThreads implements 'f': re-fills threadsText from the current
 // proposal, if there is one (see reproposeAndFill's failure case).
 func (w *wizard) autofillThreads() {
 	if w.proposal == nil {
@@ -593,18 +656,19 @@ func (w *wizard) buildOp(ids []int) model.PendingOp {
 }
 
 // toggleCore toggles the cursor's core (a nodeCores(base, node) index)
-// into or out of the threads field: parses threadsText into a set
-// (empty if it's currently invalid, so a bad hand-typed list doesn't
-// block the grid from starting fresh), applies the same all-selected/
-// any-unselected rule the old manual grid used, then writes the sorted
-// result back as a cpulist with the caret at the end.
+// into or out of the threads field: parses threadsText as a bare cpulist
+// (NOT parseThreads -- a half-built selection has the wrong thread count
+// and must still accumulate; only an unparseable list starts fresh),
+// applies the same all-selected/any-unselected rule the old manual grid
+// used, then writes the sorted result back as a cpulist with the caret at
+// the end.
 func (w *wizard) toggleCore(cores []hostinfo.Core) {
 	if w.cursor < 0 || w.cursor >= len(cores) {
 		return
 	}
 	core := cores[w.cursor]
 
-	ids, _ := w.parseThreads()
+	ids, _ := hostinfo.ParseCPUList(w.threadsText)
 	selected := threadSet(ids)
 
 	allSelected := true
@@ -624,6 +688,19 @@ func (w *wizard) toggleCore(cores []hostinfo.Core) {
 
 	w.threadsText = formatCPURanges(assignedThreads(assignSelected(selected)))
 	w.threadsCaret = len(w.threadsText)
+}
+
+// clickCore implements a left click on grid core idx at time now: the
+// first click focuses the grid and moves the cursor there (so the operator
+// sees the reverse-video box before committing); a second click on the
+// same core within doubleClick toggles it, exactly like space, and resets
+// so a third click starts over.
+func (w *wizard) clickCore(idx int, now time.Time) {
+	w.field = fieldGrid
+	w.cursor = idx
+	if w.clicks.double(idx, now) {
+		w.toggleCore(nodeCores(w.base, w.node))
+	}
 }
 
 // formLabelWidth is the widest field label ("memory node"), so every
@@ -728,7 +805,8 @@ func (w *wizard) summaryLine(ids []int) string {
 // hit kind, index the wizardFormField -- the grid's own formfield hit
 // covers the whole block, so a click there that misses a cell still
 // focuses it), the grid's own cells ("wizardcore", clickable regardless of
-// focus), and the two [A]pply/[C]ancel buttons ("wizardbtn", index 0/1).
+// focus), and the two centered [A]pply/[C]ancel buttons ("dialogbtn",
+// index 0/1 -- see buttonRow).
 func (w *wizard) view(dw, budget int) (string, []hit) {
 	title := fmt.Sprintf("pin %s (%d vcpus)", w.vm, w.vcpus)
 	inner := dw - 2
@@ -764,14 +842,14 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 
 	head = append(head, strings.Repeat("-", inner))
 
-	const applyLabel, cancelLabel = "[A]pply", "[C]ancel"
+	btnLine, btnHits := buttonRow(inner, "[A]pply", "[C]ancel")
 	var tail []string
 	tail = append(tail, strings.Split(lipgloss.NewStyle().Width(inner).Render(w.summaryLine(ids)), "\n")...)
 	for _, wm := range w.currentWarnings(ids) {
 		tail = append(tail, warningStyle.Render(wm))
 	}
 	btnRow := len(tail) // the button line's row within tail, for its own hits below
-	tail = append(tail, applyLabel+"  "+cancelLabel)
+	tail = append(tail, btnLine)
 
 	contentBudget := budget - 2
 	if contentBudget < 1 {
@@ -781,9 +859,12 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 	if previewBudget < 0 {
 		previewBudget = 0
 	}
+	// Highlight whatever the field currently names, valid vcpus count or
+	// not (bare ParseCPUList, same as toggleCore) -- a half-built selection
+	// must still show what's been toggled so far.
 	var highlight map[int]bool
-	if len(ids) > 0 {
-		highlight = threadSet(ids)
+	if sel, err := hostinfo.ParseCPUList(w.threadsText); err == nil && len(sel) > 0 {
+		highlight = threadSet(sel)
 	}
 	cursor := -1
 	if w.field == fieldGrid {
@@ -839,10 +920,7 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 	}
 
 	tailRowOff := len(head) + len(previewLines)
-	hits = append(hits,
-		hit{y0: tailRowOff + btnRow, y1: tailRowOff + btnRow + 1, x0: 0, x1: len(applyLabel), kind: "wizardbtn", index: 0},
-		hit{y0: tailRowOff + btnRow, y1: tailRowOff + btnRow + 1, x0: len(applyLabel) + 2, x1: len(applyLabel) + 2 + len(cancelLabel), kind: "wizardbtn", index: 1},
-	)
+	hits = append(hits, offsetHits(btnHits, tailRowOff+btnRow, 0)...)
 
 	lines := append([]string{}, head...)
 	lines = append(lines, previewLines...)
@@ -866,7 +944,7 @@ func (w *wizard) view(dw, budget int) (string, []hit) {
 // wizard is open: its own keys, since edit/quit/pin/strip are inert while
 // a wizard is capturing all key input.
 func (w *wizard) statusBarHint() string {
-	return "[arrows] move  [space] toggle  [a] fill  [A] apply  [C] cancel"
+	return "[arrows] move  [space] toggle  [f] fill  [A] apply  [C] cancel"
 }
 
 // openWizard implements the 'p' key on the VMs tab: after the shared
@@ -943,9 +1021,9 @@ func (a *App) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleWizardMouse routes a left click: on a "wizardcore" hit (checked
 // first, so a hit on the cell wins over the grid's own broader
-// "formfield" hit underneath it), it focuses fieldGrid, moves the cursor
-// there and toggles it, same as arrow keys + space; on a plain "formfield"
-// hit, it just focuses that field; on a "wizardbtn" hit, it replays the
+// "formfield" hit underneath it), it focuses fieldGrid and moves the cursor
+// there; a double-click toggles it, same as space (see clickCore); on a plain "formfield"
+// hit, it just focuses that field; on a "dialogbtn" hit, it replays the
 // same synthesized key ('A' for index 0, 'C' for index 1) through
 // handleWizardKey, so the confirm plumbing (a GPU-crossing stage) is
 // shared with the real keypress -- that call's own (tea.Model, tea.Cmd)
@@ -956,12 +1034,9 @@ func (a *App) handleWizardMouse(msg tea.MouseMsg) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return
 	}
-	cores := nodeCores(a.wizard.base, a.wizard.node)
 	for _, h := range a.hits {
 		if h.kind == "wizardcore" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
-			a.wizard.field = fieldGrid
-			a.wizard.cursor = h.index
-			a.wizard.toggleCore(cores)
+			a.wizard.clickCore(h.index, time.Now())
 			return
 		}
 	}
@@ -971,15 +1046,12 @@ func (a *App) handleWizardMouse(msg tea.MouseMsg) {
 			return
 		}
 	}
-	for _, h := range a.hits {
-		if h.kind == "wizardbtn" && msg.Y >= h.y0 && msg.Y < h.y1 && msg.X >= h.x0 && msg.X < h.x1 {
-			r := rune('A')
-			if h.index == 1 {
-				r = 'C'
-			}
-			_, _ = a.handleWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-			return
+	if btn := dialogButtonHit(a.hits, msg); btn >= 0 {
+		r := rune('A')
+		if btn == 1 {
+			r = 'C'
 		}
+		_, _ = a.handleWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 }
 

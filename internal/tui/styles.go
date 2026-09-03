@@ -75,8 +75,18 @@ var (
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
 
 	// wizardHighlightStyle marks a proposed/selected thread on the pin
-	// wizard's node map, distinct from the cursor and from pendingGlyphStyle.
-	wizardHighlightStyle = lipgloss.NewStyle().Bold(true).Foreground(okColor)
+	// wizard's node map: the same pending color the topology/CPU map use
+	// for a staged-but-unapplied claim (this selection is about to become
+	// one), bold to stand apart from another op's plain pendingGlyphStyle.
+	wizardHighlightStyle = lipgloss.NewStyle().Bold(true).Foreground(pendingColor)
+
+	// buttonStyle renders a dialog's primary button ([A]pply, [y]es) as a
+	// filled accent pill, same look as the active tab, so it reads as a
+	// control rather than plain text; buttonSecondaryStyle is the neutral
+	// grey pill for its counterpart ([C]ancel, [n]o), so the two never look
+	// like the same action -- see buttonRow.
+	buttonStyle          = tabActiveStyle
+	buttonSecondaryStyle = tabActiveStyle.Background(dimColor)
 
 	// warningStyle marks a wizard proposal's warning sentences and "[!]"
 	// flag badges.

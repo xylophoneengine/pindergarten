@@ -223,7 +223,19 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.scrollWheel(delta)
 		return a, nil
 	}
-	if a.help || a.confirm != nil || a.flow != nil {
+	if a.confirm != nil {
+		if btn := dialogButtonHit(a.hits, msg); btn >= 0 {
+			return a.handleConfirmKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{[]rune("yn")[btn]}})
+		}
+		return a, nil
+	}
+	if a.flow != nil {
+		if btn := dialogButtonHit(a.hits, msg); btn >= 0 && a.flow.screen == flowReview {
+			return a.handleFlowKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{[]rune("yn")[btn]}})
+		}
+		return a, nil
+	}
+	if a.help {
 		return a, nil
 	}
 	if a.wizard != nil {
@@ -963,10 +975,22 @@ func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
 		// renderConfirmUnder) is composited by renderFull separately,
 		// before this one -- this only ever returns the confirm's own
 		// panel.
-		body := a.confirm.prompt + "\n\n[y]es  [n]/esc cancel"
-		dw := dialogWidth(w, maxLineWidth(body))
-		panel, _ = panelWrapH("Confirm", body, dw, budget, false)
-		return panel, nil, true
+		dw := confirmDialogWidth(w, a.confirm.prompt)
+		inner := dw - 2
+		if inner < 1 {
+			inner = 1
+		}
+		prompt := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.confirm.prompt), "\n")
+		btnLine, btnHits := buttonRow(inner, "[y]es", "[n]o")
+		lines := append(append(prompt, ""), btnLine)
+		kept := len(lines)
+		if contentBudget := budget - 2; contentBudget >= 1 && kept > contentBudget {
+			lines = lines[:contentBudget]
+			kept = contentBudget
+		}
+		panel = panelInner("Confirm", strings.Join(lines, "\n"), dw, 0)
+		hits = offsetHits(clipHitsToWindow(offsetHits(btnHits, len(prompt)+1, 0), kept, inner), 1, 1)
+		return panel, hits, true
 	case a.wizard != nil:
 		dw := dialogWidth(w, dialogMaxWidth)
 		p, h := a.wizard.view(dw, budget)
@@ -977,9 +1001,21 @@ func (a *App) renderDialog(w, budget int) (panel string, hits []hit, ok bool) {
 		return p, h, true
 	case a.flow != nil:
 		dw := dialogWidth(w, dialogMaxWidth)
-		return a.renderFlowPanel(dw, budget), nil, true
+		p, h := a.renderFlowPanel(dw, budget)
+		return p, h, true
 	}
 	return "", nil, false
+}
+
+// confirmDialogWidth sizes the confirm dialog to its own content: the
+// prompt's widest line or the [y]es/[n]o button row, whichever is wider
+// (see dialogWidth for the clamp to the available width w).
+func confirmDialogWidth(w int, prompt string) int {
+	cw := maxLineWidth(prompt)
+	if bw := buttonRowWidth("[y]es", "[n]o"); bw > cw {
+		cw = bw
+	}
+	return dialogWidth(w, cw)
 }
 
 // clampDiffScroll re-clamps a.diffScroll to the Backups tab's diff view's
@@ -1222,18 +1258,33 @@ func (a *App) renderDiffView(w, budget int) string {
 // renderFlowPanel renders the apply flow's active screen inside a titled
 // panel, tight to its own content (no centering -- renderDialog/overlay
 // handle that, as one of the dialogs it composites over the body). The
-// review/drift/running screens are prose (word-wrap); the results screen
+// review/drift/running screens are prose (word-wrap) -- the review screen
+// ends in the shared [y]es/[n]o buttonRow, whose "dialogbtn" hits (0-based
+// within the panel) are the only hits returned; the results screen
 // scrolls like renderDiffView (via a.flow.resultsScroll), since it can be
 // one line per applied op and there's no other "selected row" to derive a
 // window from.
-func (a *App) renderFlowPanel(dw, budget int) string {
-	if a.flow.screen != flowResults {
-		out, _ := panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget, false)
-		return out
-	}
+func (a *App) renderFlowPanel(dw, budget int) (string, []hit) {
 	inner := dw - 2
 	if inner < 1 {
 		inner = 1
+	}
+	if a.flow.screen == flowReview {
+		lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(strings.TrimRight(a.flow.view(dw, budget), "\n")), "\n")
+		btnLine, btnHits := buttonRow(inner, "[y]es", "[n]o")
+		btnRow := len(lines) + 1
+		lines = append(append(lines, ""), btnLine)
+		kept := len(lines)
+		if contentBudget := budget - 2; contentBudget >= 1 && kept > contentBudget {
+			lines = lines[:contentBudget]
+			kept = contentBudget
+		}
+		panel := panelInner(flowTitle(a.flow.screen), strings.Join(lines, "\n"), dw, 0)
+		return panel, offsetHits(clipHitsToWindow(offsetHits(btnHits, btnRow, 0), kept, inner), 1, 1)
+	}
+	if a.flow.screen != flowResults {
+		out, _ := panelWrapH(flowTitle(a.flow.screen), a.flow.view(dw, budget), dw, budget, false)
+		return out, nil
 	}
 	lines := strings.Split(lipgloss.NewStyle().Width(inner).Render(a.flow.view(dw, budget)), "\n")
 	contentBudget := budget - 2
@@ -1242,7 +1293,7 @@ func (a *App) renderFlowPanel(dw, budget int) string {
 	if footer := scrollFooter(offset, len(visible), total); footer != "" {
 		body += "\n" + keyBarLabelStyle.Render(footer)
 	}
-	return panelInner(flowTitle(a.flow.screen), body, dw, 0)
+	return panelInner(flowTitle(a.flow.screen), body, dw, 0), nil
 }
 
 // flowTitle names the apply-flow panel by its current screen.
@@ -1265,8 +1316,8 @@ func flowTitle(screen flowScreen) string {
 // right now. While a wizard/mem-node-picker/apply-flow screen is open, its
 // own (unstyled) hint line replaces the default set. A plain confirm (the
 // quit/edit-mode/discard-all ones, with nothing open underneath) has no
-// case of its own here: its own "[y]es  [n]/esc cancel" hint already lives
-// inside the confirm panel itself (see renderDialog), so this falls through
+// case of its own here: its own [y]es/[n]o buttons already live inside
+// the confirm panel itself (see renderDialog), so this falls through
 // to the default set below -- several tests pin the key bar's usual quit/
 // rescan/edit hints staying visible under that kind of confirm. A confirm
 // stacked on top of the wizard or mem-node picker (the GPU-cross confirm --

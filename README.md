@@ -201,8 +201,11 @@ Set memory node (after `n`):
 
 | Key | Action |
 |-----|--------|
-| digit `0`-`9` | stage a memory-node-only change to that node (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node opens a yes/no confirm ("Bind memory across the GPU's node anyway?") before staging |
-| `esc` | cancel |
+| up/down / `j k` | move the cursor row; each row tags where the VM's GPU, vCPUs and memory currently are |
+| `space` | choose the cursor's node (marked, not yet staged); a mouse click moves the cursor there, a double-click picks that node outright |
+| `enter` / `a` / `A` | stage a memory-node-only change to the chosen (else cursor) node, or click `[A]pply` (vCPU pinning is left exactly as it was); warns, but never blocks, if it differs from the VM's GPU node or its current pin node -- a pick that crosses the GPU node opens a yes/no confirm ("Bind memory across the GPU's node anyway?") before staging |
+| digit `0`-`9` | pick that node outright |
+| `c` / `C` / `esc` | cancel (or click `[C]ancel`) |
 
 Pin wizard (after `p`): a form (node, within, threads, memory node,
 emulator) whose live preview grid is editable in place -- toggle cores
@@ -217,19 +220,19 @@ greyed out and a no-op when that node has none reserved.
 | up/down / `j k` | previous/next field (node, within, threads, memory node, emulator, core grid); inside the grid, move the cursor by row, leaving the grid at its top/bottom edge |
 | left/right / `h l` | cycle the focused field's value, move the caret within the threads field, toggle the emulator checkbox, or move the core-grid cursor |
 | mouse wheel | move the core-grid cursor by row |
-| mouse click | focus a field, toggle a grid core, or press `[A]pply` / `[C]ancel` |
+| mouse click | focus a field or grid core (double-click toggles the core), or press `[A]pply` / `[C]ancel` |
 | backspace | (threads field) delete the character before the caret |
 | `space` | (core grid) toggle the cursor's core into/out of the threads field; (emulator field) toggle the checkbox |
-| `a` | re-fill the threads field from the current proposal |
-| `A` | stage the current form (or click `[A]pply`); a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
-| `C` / `esc` | cancel back out (or click `[C]ancel`) |
+| `f` | re-fill the threads field from the current proposal |
+| `A` / `a` | stage the current form (or click `[A]pply`); a placement that crosses the VM's GPU node opens a yes/no confirm ("Pin across the GPU's node anyway?") before staging, never blocked outright |
+| `C` / `c` / `esc` | cancel back out (or click `[C]ancel`) |
 
 Apply review and drift (after `a`, while applying):
 
 | Key | Screen | Action |
 |-----|--------|--------|
-| `y` | apply review | confirm and run the apply sequence |
-| `n` / `esc` | apply review, or any `y`/`n` confirmation | cancel |
+| `y` | apply review, or any `y`/`n` confirmation | confirm (or click `[y]es`); on the apply review, runs the apply sequence |
+| `n` / `esc` | apply review, or any `y`/`n` confirmation | cancel (or click `[n]o`) |
 | up/down / `j k` | drift screen | select a drifted operation |
 | `d` | drift screen | discard the drifted operation |
 | `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data (closes the drift screen even if other operations are still drifted) |

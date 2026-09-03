@@ -1097,8 +1097,41 @@ func TestMouseClickTogglesWizardGridCore(t *testing.T) {
 	if a.wizard.cursor != 0 {
 		t.Fatalf("wizard.cursor = %d, want 0 (moved to the clicked core)", a.wizard.cursor)
 	}
+	if a.wizard.threadsText != "0,4" {
+		t.Fatalf("threadsText = %q, want %q (a single click only moves the cursor)", a.wizard.threadsText, "0,4")
+	}
+	// A second click on the same core right away is a double-click: toggle.
+	a.Update(press(h.x0, h.y0))
 	if a.wizard.threadsText != "" {
-		t.Fatalf("threadsText = %q, want \"\" (plain-vm's 2 vcpus started on core 0's threads 0,4; toggling it off clicks mirrors space and leaves nothing selected)", a.wizard.threadsText)
+		t.Fatalf("threadsText = %q, want \"\" (double-click toggles core 0 off)", a.wizard.threadsText)
+	}
+	// Two single clicks on different cores never toggle.
+	h1 := findHit(t, a, "wizardcore", 1)
+	a.Update(press(h.x0, h.y0))
+	a.Update(press(h1.x0, h1.y0))
+	if a.wizard.cursor != 1 || a.wizard.threadsText != "" {
+		t.Fatalf("cursor = %d, threadsText = %q; want cursor 1 and no toggle", a.wizard.cursor, a.wizard.threadsText)
+	}
+}
+
+// TestWizardGridHighlightsPartialSelection pins the preview grid to
+// highlight whatever the threads field currently names, even when the list
+// is not (yet) a valid vcpus-long one -- the operator must see what they
+// toggled without decoding the cpulist above (issue #1 follow-up).
+func TestWizardGridHighlightsPartialSelection(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+	sendKey(a, 'p')
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	a.wizard.threadsText = "0-1,4-5" // 4 threads, 2 vcpus: invalid, but selected
+	a.wizard.field = fieldNode       // no grid cursor in the way
+	view := a.View()
+	want := wizardHighlightStyle.Render(glyphChar(a.wizard.base, 1))
+	if !strings.Contains(view, want) {
+		t.Fatalf("view lacks a highlighted thread 1 glyph %q with threadsText %q", want, a.wizard.threadsText)
 	}
 }
 
@@ -1380,7 +1413,7 @@ func TestWizardApplyButtonStages(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 
-	h := findHit(t, a, "wizardbtn", 0)
+	h := findHit(t, a, "dialogbtn", 0)
 	a.Update(press(h.x0, h.y0))
 
 	if a.wizard != nil {
@@ -1406,7 +1439,7 @@ func TestWizardCancelButtonCancels(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	_ = a.View() // record hits
 
-	h := findHit(t, a, "wizardbtn", 1)
+	h := findHit(t, a, "dialogbtn", 1)
 	a.Update(press(h.x0, h.y0))
 
 	if a.wizard != nil {
@@ -1714,5 +1747,86 @@ func TestWizardEmulatorFieldUsesRanges(t *testing.T) {
 	sendKeyType(a, tea.KeySpace)
 	if got := a.wizard.emulatorFieldValue(); !strings.Contains(got, "threads 0-1,4-5") {
 		t.Fatalf("emulatorFieldValue() = %q, want ranges \"threads 0-1,4-5\"", got)
+	}
+}
+
+// TestWizardGridToggleAccumulates pins toggleCore to build on the current
+// selection even when it is not (yet) a valid vcpus-long list: with core 0
+// already selected, toggling core 1 on gives four threads (too many for 2
+// vcpus); toggling core 0 off must then leave core 1, not restart from an
+// empty set and re-select core 0 (issue #1).
+func TestWizardGridToggleAccumulates(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	if a.wizard == nil {
+		t.Fatal("wizard did not open")
+	}
+	a.wizard.field = fieldGrid
+	a.wizard.cursor = 1
+	sendKeyType(a, tea.KeySpace)
+	if a.wizard.threadsText != "0-1,4-5" {
+		t.Fatalf("threadsText = %q, want %q (toggle adds to the selection)", a.wizard.threadsText, "0-1,4-5")
+	}
+	sendKeyType(a, tea.KeyLeft)
+	sendKeyType(a, tea.KeySpace)
+	if a.wizard.threadsText != "1,5" {
+		t.Fatalf("threadsText = %q, want %q (toggle off keeps the rest)", a.wizard.threadsText, "1,5")
+	}
+}
+
+// TestWizardLowercaseApplyCancelFill covers the lowercase keys: 'a'
+// stages, 'c' cancels, 'f' re-fills from the proposal (issue #1).
+func TestWizardLowercaseApplyCancelFill(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'p')
+	want := a.wizard.threadsText
+	a.wizard.threadsText = "1"
+	sendKey(a, 'f')
+	if a.wizard.threadsText != want {
+		t.Fatalf("threadsText after 'f' = %q, want %q", a.wizard.threadsText, want)
+	}
+	sendKey(a, 'c')
+	if a.wizard != nil || a.queue.Len() != 0 {
+		t.Fatal("'c' did not cancel the wizard")
+	}
+
+	sendKey(a, 'p')
+	sendKey(a, 'a')
+	if a.wizard != nil || a.queue.Len() != 1 {
+		t.Fatal("'a' did not stage the wizard")
+	}
+}
+
+// TestWizardButtonsCentered checks the [a]pply/[c]ancel button row is
+// centered within the panel and not flush left (issue #1).
+func TestWizardButtonsCentered(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+	sendKey(a, 'p')
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_ = a.View()
+
+	apply := findHit(t, a, "dialogbtn", 0)
+	cancel := findHit(t, a, "dialogbtn", 1)
+	row := findHit(t, a, "formfield", int(fieldNode)) // spans the panel's full inner width
+	left := apply.x0 - row.x0
+	right := row.x1 - cancel.x1
+	if left < 2 || left-right > 1 || right-left > 1 {
+		t.Fatalf("buttons not centered: left pad %d, right pad %d (inner %d)", left, right, row.x1-row.x0)
+	}
+	// Clicking still works from the centered position.
+	a.Update(press(cancel.x0, cancel.y0))
+	if a.wizard != nil {
+		t.Fatal("wizard still open after clicking the centered cancel button")
 	}
 }

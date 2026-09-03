@@ -127,8 +127,8 @@ func TestMemNodeUsesProjectedPins(t *testing.T) {
 	}
 }
 
-// TestMouseClickPicksMemNode covers a left click on a node-picker line
-// staging the memory-node op, same as pressing its digit.
+// TestMouseClickPicksMemNode covers clicks on a node-picker line: one
+// moves the cursor, a double-click stages the memory-node op.
 func TestMouseClickPicksMemNode(t *testing.T) {
 	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
 	runScan(t, a)
@@ -144,9 +144,13 @@ func TestMouseClickPicksMemNode(t *testing.T) {
 
 	h := findHit(t, a, "memnode", 1)
 	a.Update(press(h.x0, h.y0))
+	if a.memPicker == nil || a.memPicker.cursor != 1 || a.queue.Len() != 0 {
+		t.Fatal("a single click must only move the cursor to the clicked node")
+	}
+	a.Update(press(h.x0, h.y0)) // double-click stages
 
 	if a.memPicker != nil {
-		t.Fatal("mem-node picker still open after clicking a node line")
+		t.Fatal("mem-node picker still open after double-clicking a node line")
 	}
 	if a.queue.Len() != 1 {
 		t.Fatalf("queue.Len() = %d, want 1", a.queue.Len())
@@ -390,5 +394,67 @@ func TestMemNodeGPUCrossEscKeepsPickerOpen(t *testing.T) {
 	}
 	if a.queue.Len() != 0 {
 		t.Fatalf("queue.Len() = %d after esc, want 0", a.queue.Len())
+	}
+}
+
+// TestMemNodeCursorSpaceApply covers the picker's wizard-style keys:
+// up/down move a cursor row, space chooses the cursor's node (marked but
+// not staged), 'a'/'A' stages the chosen node.
+func TestMemNodeCursorSpaceApply(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"plain-vm": plainVMXML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'n')
+	if a.memPicker == nil {
+		t.Fatal("mem-node picker did not open")
+	}
+	sendKey(a, 'j')
+	if a.memPicker.cursor != 1 {
+		t.Fatalf("cursor = %d after 'j', want 1", a.memPicker.cursor)
+	}
+	sendKeyType(a, tea.KeySpace)
+	if a.memPicker == nil || a.queue.Len() != 0 {
+		t.Fatal("space staged or closed the picker, want it to only choose")
+	}
+	if a.memPicker.chosen != 1 {
+		t.Fatalf("chosen = %d after space, want 1", a.memPicker.chosen)
+	}
+	sendKey(a, 'a')
+	if a.memPicker != nil || a.queue.Len() != 1 || a.queue.Ops[0].MemNode != 1 {
+		t.Fatalf("'a' did not stage the chosen node 1 (queue %d)", a.queue.Len())
+	}
+}
+
+// TestMemNodeMarkersAndButtons covers the row markers (a pinned VM's node
+// reads "vcpus") and the centered [A]pply/[C]ancel buttons (clicking
+// cancel closes the picker).
+func TestMemNodeMarkersAndButtons(t *testing.T) {
+	a := wizardTestApp(t, map[string]string{"pinned-vm": pinnedNode0XML}, noNode)
+	runScan(t, a)
+	enterEdit(a)
+	a.tab = tabVMs
+
+	sendKey(a, 'n')
+	if a.memPicker == nil {
+		t.Fatal("mem-node picker did not open")
+	}
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	view := a.View()
+	if !strings.Contains(view, "vcpus") {
+		t.Fatalf("view lacks a \"vcpus\" marker on the pinned node's row:\n%s", view)
+	}
+
+	apply := findHit(t, a, "dialogbtn", 0)
+	cancel := findHit(t, a, "dialogbtn", 1)
+	row := findHit(t, a, "memnode", 0)
+	left, right := apply.x0-row.x0, row.x1-cancel.x1
+	if left < 2 || left-right > 1 || right-left > 1 {
+		t.Fatalf("buttons not centered: left %d right %d", left, right)
+	}
+	a.Update(press(cancel.x0, cancel.y0))
+	if a.memPicker != nil || a.queue.Len() != 0 {
+		t.Fatal("clicking [C]ancel did not close the picker without staging")
 	}
 }

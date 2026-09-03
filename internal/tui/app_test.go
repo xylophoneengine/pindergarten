@@ -390,7 +390,7 @@ func TestHelpOverlayScrollsToApplyDriftSection(t *testing.T) {
 		t.Fatalf("View() with help open at height 24 = %q, want the Apply/drift section not visible before scrolling", view)
 	}
 
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 80; i++ { // well past the end of the list, whatever its length
 		sendKeyType(a, tea.KeyDown)
 	}
 	if !a.help {
@@ -1247,7 +1247,7 @@ func TestConfirmOverlayCentersWithoutShiftingBody(t *testing.T) {
 	idx := strings.Index(lines[row], "\u256d Confirm")
 	leading := lipgloss.Width(lines[row][:idx])
 	// Confirm is content-sized (see dialogWidth), not always dialogMaxWidth.
-	dw := dialogWidth(120, maxLineWidth("Enable edit mode? [y/n]\n\n[y]es  [n]/esc cancel"))
+	dw := confirmDialogWidth(120, "Enable edit mode? [y/n]")
 	wantX := (120 - dw) / 2
 	if leading < wantX-1 || leading > wantX+1 {
 		t.Fatalf("dialog row's leading width = %d, want about %d (= (120-dw)/2 = (120-%d)/2)", leading, wantX, dw)
@@ -1280,7 +1280,7 @@ func TestOverlayPreservesBodyRightOfDialog(t *testing.T) {
 		t.Fatalf("line count changed: %d without the dialog, %d with", len(without), len(with))
 	}
 
-	dw := dialogWidth(175, maxLineWidth("Enable edit mode? [y/n]\n\n[y]es  [n]/esc cancel"))
+	dw := confirmDialogWidth(175, "Enable edit mode? [y/n]")
 	x, _ := centerXY(dw, 5, 175, 0)
 	rightCol := x + dw
 	for i := range without {
@@ -1547,5 +1547,46 @@ func TestRescanSetsStatus(t *testing.T) {
 	}
 	if !strings.Contains(a.View(), "rescanning...") {
 		t.Fatalf("View() after 'r' = %q, want rescanning status", a.View())
+	}
+}
+
+// TestConfirmButtonsClickable covers the confirm dialog's [y]es/[n]o
+// buttons: clicking [n]o dismisses without running the action, clicking
+// [y]es runs it -- same as the keys.
+func TestConfirmButtonsClickable(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	called := 0
+	open := func() {
+		a.confirm = &confirm{prompt: "Really? [y/n]", yes: func() tea.Cmd { called++; return nil }}
+		_ = a.View() // record hits
+	}
+
+	open()
+	no := findHit(t, a, "dialogbtn", 1)
+	a.Update(press(no.x0, no.y0))
+	if a.confirm != nil || called != 0 {
+		t.Fatalf("after clicking [n]o: confirm open = %v, called = %d; want closed, 0", a.confirm != nil, called)
+	}
+
+	open()
+	yes := findHit(t, a, "dialogbtn", 0)
+	a.Update(press(yes.x0, yes.y0))
+	if a.confirm != nil || called != 1 {
+		t.Fatalf("after clicking [y]es: confirm open = %v, called = %d; want closed, 1", a.confirm != nil, called)
+	}
+}
+
+// TestFlowReviewNoButtonCloses covers the apply review screen's [n]o
+// button: clicking it closes the flow, same as 'n'.
+func TestFlowReviewNoButtonCloses(t *testing.T) {
+	a := testApp(t, false)
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	a.flow = &applyFlow{screen: flowReview}
+	_ = a.View() // record hits
+	no := findHit(t, a, "dialogbtn", 1)
+	a.Update(press(no.x0, no.y0))
+	if a.flow != nil {
+		t.Fatal("apply flow still open after clicking [n]o")
 	}
 }
