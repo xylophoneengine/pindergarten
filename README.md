@@ -238,3 +238,7 @@ Apply review and drift (after `a`, while applying):
 | `w` | drift screen | reopen the pin wizard for the drifted operation against fresh data (closes the drift screen even if other operations are still drifted) |
 | `esc` | drift screen | close back to browsing; every operation, drifted or not, stays queued untouched |
 | any key | results screen | dismiss the results screen and rescan |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
